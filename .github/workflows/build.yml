@@ -19,7 +19,7 @@ jobs:
             ref: 7e35917775b8
             config: config-ranchu-6.1.23
           - name: gki-5.10
-            ref: android14-5.10
+            ref: android12-5.10
           - name: gki-5.15
             ref: android14-5.15
           - name: gki-6.1
@@ -41,7 +41,7 @@ jobs:
       - name: install toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu libelf-dev
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu libelf-dev libdw-dev
 
       - name: cache kernel source
         id: cache-kernel
@@ -75,6 +75,8 @@ jobs:
           cd kernel/${{ matrix.kernel.name }}
           if [ -n "${{ matrix.kernel.config }}" ]; then
             cp $GITHUB_WORKSPACE/module/${{ matrix.kernel.config }} .config
+            # clear google-build-server-only paths
+            sed -i '/CONFIG_UNUSED_KSYMS_WHITELIST/d' .config
           else
             make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
           fi
