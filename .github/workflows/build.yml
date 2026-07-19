@@ -58,11 +58,14 @@ jobs:
           fi
           rm -rf kernel/${{ matrix.kernel.name }}
           case "${{ matrix.kernel.name }}" in
-            avd-*)
-              mkdir -p kernel/${{ matrix.kernel.name }}
-              curl -sL "${{ env.KERNEL_COMMON }}/+archive/${{ matrix.kernel.ref }}.tar.gz" \
-                | tar xz -C kernel/${{ matrix.kernel.name }}
-              ;;
+              avd-*)
+                mkdir -p kernel/${{ matrix.kernel.name }}
+                curl -fL --retry 3 --connect-timeout 30 \
+                  "${{ env.KERNEL_COMMON }}/+archive/${{ matrix.kernel.ref }}.tar.gz" \
+                  -o /tmp/kernel.tar.gz
+                tar xzf /tmp/kernel.tar.gz -C kernel/${{ matrix.kernel.name }}
+                rm -f /tmp/kernel.tar.gz
+                ;;
             *)
               git clone --depth=1 --branch ${{ matrix.kernel.ref }} \
                 ${{ env.KERNEL_COMMON }} \
