@@ -47,12 +47,13 @@ struct __attribute__((packed)) memd_req {
 static long memd_xfer(struct memd_req *req, char __user *user_buf, int is_write)
 {
     size_t size = req->size;
+    void *vaddr;
     if (size == 0 || size > MAX_XFER)
         return -EINVAL;
     if (req->phys_addr + size < req->phys_addr)
         return -EINVAL;
 
-    void *vaddr = memremap(req->phys_addr, size, MEMREMAP_WB);
+    vaddr = memremap(req->phys_addr, size, MEMREMAP_WB);
     if (!vaddr)
         return -EFAULT;
 
