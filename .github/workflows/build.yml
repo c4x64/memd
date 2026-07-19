@@ -17,12 +17,16 @@ jobs:
         kernel:
           - name: avd-ranchu-6.1.23
             ref: 7e35917775b8
+            cc: clang
           - name: gki-5.15
             ref: android14-5.15
+            cc: gcc
           - name: gki-6.1
             ref: android14-6.1
+            cc: gcc
           - name: gki-6.6
             ref: android15-6.6
+            cc: gcc
       fail-fast: false
     runs-on: ubuntu-22.04
 
@@ -35,6 +39,13 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-aarch64-linux-gnu ccache libelf-dev
+
+      - name: download NDK (clang for avd target)
+        if: matrix.kernel.cc == 'clang'
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r28-linux.zip
+          unzip -q android-ndk-r28-linux.zip
+          echo "CC=$PWD/android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang" >> $GITHUB_ENV
 
       - name: cache kernel source
         id: cache-kernel
@@ -59,14 +70,9 @@ jobs:
                   kernel/${{ matrix.kernel.name }}
                 ;;
               avd-*)
-                # specific commit — download tarball from gitiles
                 mkdir -p kernel/${{ matrix.kernel.name }}
                 curl -sL "${{ env.KERNEL_COMMON }}/+archive/${{ matrix.kernel.ref }}.tar.gz" \
                   | tar xz -C kernel/${{ matrix.kernel.name }}
-                ;;
-              *)
-                echo "unknown kernel name: ${{ matrix.kernel.name }}"
-                exit 1
                 ;;
             esac
           fi
@@ -75,7 +81,15 @@ jobs:
         run: |
           cd kernel/${{ matrix.kernel.name }}
           if [ ! -f .config ]; then
-            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
+            case "${{ matrix.kernel.name }}" in
+              avd-*)
+                cp $GITHUB_WORKSPACE/module/config-ranchu-6.1.23 .config
+                make ARCH=arm64 olddefconfig
+                ;;
+              *)
+                make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
+                ;;
+            esac
             make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
           else
             echo ".config already present, skipping prepare"
@@ -85,10 +99,19 @@ jobs:
         run: |
           export CCACHE_DIR=$HOME/.cache/ccache
           cd kernel/${{ matrix.kernel.name }}
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-            CC="ccache aarch64-linux-gnu-gcc" \
-            M=$GITHUB_WORKSPACE/module modules -j$(nproc) \
-            KBUILD_MODPOST_WARN=1
+          case "${{ matrix.kernel.cc }}" in
+            clang)
+              make ARCH=arm64 CC="$CC" CLANG_TRIPLE=aarch64-linux-gnu- \
+                LD="$CC" M=$GITHUB_WORKSPACE/module modules -j$(nproc) \
+                KBUILD_MODPOST_WARN=1
+              ;;
+            *)
+              make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+                CC="ccache aarch64-linux-gnu-gcc" \
+                M=$GITHUB_WORKSPACE/module modules -j$(nproc) \
+                KBUILD_MODPOST_WARN=1
+              ;;
+          esac
 
       - name: rename artifact
         run: |
