@@ -1,0 +1,82 @@
+name: kleaf build (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_ref:
+        description: 'kernel commit (default: avd-ranchu-6.1.23)'
+        required: false
+        default: 7e35917775b8
+      kernel_branch:
+        description: 'manifest branch'
+        required: false
+        default: common-android14-6.1
+
+jobs:
+  kleaf-build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: module
+
+      - name: install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq repo python3 python3-distro
+
+      - name: cache kernel workspace
+        id: cache-ws
+        uses: actions/cache@v4
+        with:
+          path: kleaf-ws
+          key: kleaf-ws-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.kernel_ref }}
+
+      - name: init manifest
+        if: steps.cache-ws.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p kleaf-ws && cd kleaf-ws
+          repo init -u https://android.googlesource.com/kernel/manifest \
+            -b ${{ github.event.inputs.kernel_branch }} --depth=1
+
+      - name: sync kernel
+        if: steps.cache-ws.outputs.cache-hit != 'true'
+        run: |
+          cd kleaf-ws
+          repo sync -c -j$(nproc) --no-tags --no-clone-bundle
+
+      - name: pin common to specific commit
+        if: steps.cache-ws.outputs.cache-hit != 'true'
+        run: |
+          cd kleaf-ws/common
+          git fetch --depth=1 origin ${{ github.event.inputs.kernel_ref }}
+          git checkout ${{ github.event.inputs.kernel_ref }}
+
+      - name: integrate module
+        run: |
+          mkdir -p kleaf-ws/memd
+          cat > kleaf-ws/memd/BUILD.bazel << 'EOF'
+load("//build/kernel/kleaf:kernel.bzl", "ddk_module")
+
+ddk_module(
+    name = "memd_kern",
+    srcs = ["memd_kern.c"],
+    outs = ["memd_kern.ko"],
+    kernel_build = "//common:kernel_aarch64",
+)
+EOF
+          cp module/memd_kern.c kleaf-ws/memd/memd_kern.c
+
+      - name: build with kleaf
+        run: |
+          cd kleaf-ws
+          tools/bazel build //common:kernel_aarch64 //memd:memd_kern --config=stamp
+
+      - name: copy artifact
+        run: |
+          cp kleaf-ws/bazel-bin/memd/memd_kern.ko memd_kern-kleaf.ko
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memd_kern-kleaf
+          path: memd_kern-kleaf.ko

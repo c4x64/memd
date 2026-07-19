@@ -17,16 +17,19 @@ jobs:
         kernel:
           - name: avd-ranchu-6.1.23
             ref: 7e35917775b8
-            cc: clang
+            config: config-ranchu-6.1.23
+          - name: gki-5.10
+            ref: android14-5.10
           - name: gki-5.15
             ref: android14-5.15
-            cc: gcc
           - name: gki-6.1
             ref: android14-6.1
-            cc: gcc
           - name: gki-6.6
             ref: android15-6.6
-            cc: gcc
+          - name: gki-6.12
+            ref: android16-6.12
+          - name: gki-6.18
+            ref: android17-6.18
       fail-fast: false
     runs-on: ubuntu-22.04
 
@@ -38,80 +41,51 @@ jobs:
       - name: install toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu ccache libelf-dev
-
-      - name: download NDK (clang for avd target)
-        if: matrix.kernel.cc == 'clang'
-        run: |
-          wget -q https://dl.google.com/android/repository/android-ndk-r28-linux.zip
-          unzip -q android-ndk-r28-linux.zip
-          echo "CC=$PWD/android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang" >> $GITHUB_ENV
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu libelf-dev
 
       - name: cache kernel source
         id: cache-kernel
         uses: actions/cache@v4
         with:
-          path: |
-            kernel/${{ matrix.kernel.name }}
-            ~/.cache/ccache
-          key: kmod-${{ matrix.kernel.name }}-${{ github.sha }}
-          restore-keys: kmod-${{ matrix.kernel.name }}-
+          path: kernel/${{ matrix.kernel.name }}
+          key: kernel-src-${{ matrix.kernel.name }}-${{ matrix.kernel.ref }}
 
       - name: checkout kernel
         run: |
-          if [ -f kernel/${{ matrix.kernel.name }}/Makefile ]; then
+          if [ -d kernel/${{ matrix.kernel.name }}/include ]; then
             echo "kernel source already present (cache restore)"
-          else
-            rm -rf kernel/${{ matrix.kernel.name }}
-            case "${{ matrix.kernel.name }}" in
-              gki-*)
-                git clone --depth=1 --branch ${{ matrix.kernel.ref }} \
-                  ${{ env.KERNEL_COMMON }} \
-                  kernel/${{ matrix.kernel.name }}
-                ;;
-              avd-*)
-                mkdir -p kernel/${{ matrix.kernel.name }}
-                curl -sL "${{ env.KERNEL_COMMON }}/+archive/${{ matrix.kernel.ref }}.tar.gz" \
-                  | tar xz -C kernel/${{ matrix.kernel.name }}
-                ;;
-            esac
+            exit 0
           fi
+          rm -rf kernel/${{ matrix.kernel.name }}
+          case "${{ matrix.kernel.name }}" in
+            avd-*)
+              mkdir -p kernel/${{ matrix.kernel.name }}
+              curl -sL "${{ env.KERNEL_COMMON }}/+archive/${{ matrix.kernel.ref }}.tar.gz" \
+                | tar xz -C kernel/${{ matrix.kernel.name }}
+              ;;
+            *)
+              git clone --depth=1 --branch ${{ matrix.kernel.ref }} \
+                ${{ env.KERNEL_COMMON }} \
+                kernel/${{ matrix.kernel.name }}
+              ;;
+          esac
 
       - name: prepare kernel build
         run: |
           cd kernel/${{ matrix.kernel.name }}
-          if [ ! -f .config ]; then
-            case "${{ matrix.kernel.name }}" in
-              avd-*)
-                cp $GITHUB_WORKSPACE/module/config-ranchu-6.1.23 .config
-                make ARCH=arm64 olddefconfig
-                ;;
-              *)
-                make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
-                ;;
-            esac
-            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
+          if [ -n "${{ matrix.kernel.config }}" ]; then
+            cp $GITHUB_WORKSPACE/module/${{ matrix.kernel.config }} .config
           else
-            echo ".config already present, skipping prepare"
+            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
           fi
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig modules_prepare
 
       - name: build module
         run: |
-          export CCACHE_DIR=$HOME/.cache/ccache
           cd kernel/${{ matrix.kernel.name }}
-          case "${{ matrix.kernel.cc }}" in
-            clang)
-              make ARCH=arm64 CC="$CC" CLANG_TRIPLE=aarch64-linux-gnu- \
-                LD="$CC" M=$GITHUB_WORKSPACE/module modules -j$(nproc) \
-                KBUILD_MODPOST_WARN=1
-              ;;
-            *)
-              make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-                CC="ccache aarch64-linux-gnu-gcc" \
-                M=$GITHUB_WORKSPACE/module modules -j$(nproc) \
-                KBUILD_MODPOST_WARN=1
-              ;;
-          esac
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            M=$GITHUB_WORKSPACE/module modules -j$(nproc) \
+            KBUILD_MODPOST_WARN=1
 
       - name: rename artifact
         run: |
@@ -129,14 +103,23 @@ jobs:
         with:
           path: module
 
-      - name: install toolchain
+      - name: cache NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: android-ndk-r28
+          key: ndk-r28
+
+      - name: install NDK
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
         run: |
           wget -q https://dl.google.com/android/repository/android-ndk-r28-linux.zip
           unzip -q android-ndk-r28-linux.zip
-          echo "CC=$PWD/android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang" >> $GITHUB_ENV
+          rm android-ndk-r28-linux.zip
 
       - name: build binaries
         run: |
+          CC=$PWD/android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang
           $CC -static -O2 -s -o debugd_unsafe module/memd_us.c
           $CC -static -O2 -s -o memtool module/memd_dump.c
 
