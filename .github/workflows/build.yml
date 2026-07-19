@@ -103,7 +103,8 @@ jobs:
           cd kernel/${{ matrix.kernel.name }}
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
             CC="ccache aarch64-linux-gnu-gcc" \
-            M=$GITHUB_WORKSPACE/module modules -j$(nproc)
+            M=$GITHUB_WORKSPACE/module modules -j$(nproc) \
+            KBUILD_MODPOST_WARN=1
 
       - name: rename artifact
         run: |
