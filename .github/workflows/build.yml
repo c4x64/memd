@@ -41,7 +41,7 @@ jobs:
       - name: install toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu libelf-dev libdw-dev
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu libelf-dev libdw-dev ccache
 
       - name: cache kernel source
         id: cache-kernel
@@ -58,14 +58,14 @@ jobs:
           fi
           rm -rf kernel/${{ matrix.kernel.name }}
           case "${{ matrix.kernel.name }}" in
-              avd-*)
-                mkdir -p kernel/${{ matrix.kernel.name }}
-                curl -fL --retry 3 --connect-timeout 30 \
-                  "${{ env.KERNEL_COMMON }}/+archive/${{ matrix.kernel.ref }}.tar.gz" \
-                  -o /tmp/kernel.tar.gz
-                tar xzf /tmp/kernel.tar.gz -C kernel/${{ matrix.kernel.name }}
-                rm -f /tmp/kernel.tar.gz
-                ;;
+            avd-*)
+              mkdir -p kernel/${{ matrix.kernel.name }}
+              curl -fL --retry 3 --connect-timeout 30 \
+                "${{ env.KERNEL_COMMON }}/+archive/${{ matrix.kernel.ref }}.tar.gz" \
+                -o /tmp/kernel.tar.gz
+              tar xzf /tmp/kernel.tar.gz -C kernel/${{ matrix.kernel.name }}
+              rm -f /tmp/kernel.tar.gz
+              ;;
             *)
               git clone --depth=1 --branch ${{ matrix.kernel.ref }} \
                 ${{ env.KERNEL_COMMON }} \
@@ -73,24 +73,37 @@ jobs:
               ;;
           esac
 
-      - name: prepare kernel build
+      - name: configure kernel
         run: |
           cd kernel/${{ matrix.kernel.name }}
           if [ -n "${{ matrix.kernel.config }}" ]; then
             cp $GITHUB_WORKSPACE/module/${{ matrix.kernel.config }} .config
-            # clear google-build-server-only paths
             sed -i '/CONFIG_UNUSED_KSYMS_WHITELIST/d' .config
           else
             make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
           fi
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig modules_prepare
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+
+      - name: build kernel (avd only — generates Module.symvers)
+        if: matrix.kernel.config != ''
+        run: |
+          cd kernel/${{ matrix.kernel.name }}
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            CC="ccache aarch64-linux-gnu-gcc" \
+            -j$(nproc) Image modules
+
+      - name: prepare kernel (GKI only)
+        if: matrix.kernel.config == ''
+        run: |
+          cd kernel/${{ matrix.kernel.name }}
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
 
       - name: build module
         run: |
           cd kernel/${{ matrix.kernel.name }}
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-            M=$GITHUB_WORKSPACE/module modules -j$(nproc) \
-            KBUILD_MODPOST_WARN=1
+            CC="ccache aarch64-linux-gnu-gcc" \
+            M=$GITHUB_WORKSPACE/module modules -j$(nproc)
 
       - name: rename artifact
         run: |
