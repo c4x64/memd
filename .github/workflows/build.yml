@@ -32,7 +32,7 @@ jobs:
       - name: install toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu ccache
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu ccache libelf-dev
 
       - name: cache kernel source
         id: cache-kernel
@@ -56,7 +56,7 @@ jobs:
         run: |
           cd kernel/${{ matrix.kernel.name }}
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- scripts prepare
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
 
       - name: build module
         run: |
