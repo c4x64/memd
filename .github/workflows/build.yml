@@ -46,9 +46,10 @@ jobs:
 
       - name: checkout kernel
         run: |
-          if [ -d kernel/${{ matrix.kernel.name }}/Makefile ]; then
+          if [ -f kernel/${{ matrix.kernel.name }}/Makefile ]; then
             echo "kernel source already present (cache restore)"
           else
+            rm -rf kernel/${{ matrix.kernel.name }}
             git clone --depth=1 --branch ${{ matrix.kernel.ref }} \
               ${{ matrix.kernel.url }} \
               kernel/${{ matrix.kernel.name }}
