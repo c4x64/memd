@@ -41,7 +41,7 @@ jobs:
       - name: install toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu libelf-dev libdw-dev ccache
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu clang lld libelf-dev libdw-dev ccache
 
       - name: cache kernel source
         id: cache-kernel
@@ -79,32 +79,51 @@ jobs:
           if [ -n "${{ matrix.kernel.config }}" ]; then
             cp $GITHUB_WORKSPACE/module/${{ matrix.kernel.config }} .config
             sed -i '/CONFIG_UNUSED_KSYMS_WHITELIST/d' .config
+            make ARCH=arm64 CC=clang LLVM=1 olddefconfig
           else
             make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
+            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
           fi
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+
+      - name: set build variables
+        id: vars
+        run: |
+          if [ -n "${{ matrix.kernel.config }}" ]; then
+            # avd-ranchu: use clang to match AVD kernel
+            echo "TOOLCHAIN=CC=clang LLVM=1" >> $GITHUB_OUTPUT
+          else
+            # GKI: use gcc
+            echo "TOOLCHAIN=CROSS_COMPILE=aarch64-linux-gnu- CC='ccache aarch64-linux-gnu-gcc'" >> $GITHUB_OUTPUT
+          fi
 
       - name: build kernel (avd only — generates Module.symvers)
         if: matrix.kernel.config != ''
         run: |
           cd kernel/${{ matrix.kernel.name }}
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-            CC="ccache aarch64-linux-gnu-gcc" \
-            -j$(nproc) Image modules
+          make ARCH=arm64 ${{ steps.vars.outputs.TOOLCHAIN }} -j$(nproc) Image modules
 
       - name: prepare kernel (GKI only)
         if: matrix.kernel.config == ''
         run: |
           cd kernel/${{ matrix.kernel.name }}
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
+          make ARCH=arm64 ${{ steps.vars.outputs.TOOLCHAIN }} modules_prepare
 
       - name: build module
         run: |
           cd kernel/${{ matrix.kernel.name }}
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-            CC="ccache aarch64-linux-gnu-gcc" \
+          make ARCH=arm64 ${{ steps.vars.outputs.TOOLCHAIN }} \
             M=$GITHUB_WORKSPACE/module modules -j$(nproc) \
             KBUILD_MODPOST_WARN=1
+
+      - name: sign modules (avd only)
+        if: matrix.kernel.config != ''
+        run: |
+          cd kernel/${{ matrix.kernel.name }}
+          for ko in $GITHUB_WORKSPACE/module/*.ko; do
+            perl scripts/sign-file sha1 certs/signing_key.pem \
+              certs/signing_key.x509 "$ko"
+            echo "signed: $(basename $ko)"
+          done
 
       - name: rename artifact
         run: |
