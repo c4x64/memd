@@ -1,0 +1,104 @@
+name: build memd
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-kmod:
+    strategy:
+      matrix:
+        kernel:
+          - name: android14-5.15
+            url: https://android.googlesource.com/kernel/common
+            ref: android14-5.15
+          - name: android14-6.1
+            url: https://android.googlesource.com/kernel/common
+            ref: android14-6.1
+          - name: android15-6.6
+            url: https://android.googlesource.com/kernel/common
+            ref: android15-6.6
+      fail-fast: false
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: module
+
+      - name: install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu ccache
+
+      - name: cache kernel source
+        id: cache-kernel
+        uses: actions/cache@v4
+        with:
+          path: |
+            kernel/${{ matrix.kernel.name }}
+            ~/.cache/ccache
+          key: kmod-${{ matrix.kernel.name }}-${{ github.sha }}
+          restore-keys: kmod-${{ matrix.kernel.name }}-
+
+      - name: checkout kernel
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 --branch ${{ matrix.kernel.ref }} \
+            ${{ matrix.kernel.url }} \
+            kernel/${{ matrix.kernel.name }}
+
+      - name: prepare kernel build
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          cd kernel/${{ matrix.kernel.name }}
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- scripts prepare
+
+      - name: build module
+        run: |
+          export CCACHE_DIR=$HOME/.cache/ccache
+          cd kernel/${{ matrix.kernel.name }}
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            CC="ccache aarch64-linux-gnu-gcc" \
+            M=$GITHUB_WORKSPACE/module modules -j$(nproc)
+
+      - name: rename artifact
+        run: |
+          cp module/memd_kern.ko memd_kern-${{ matrix.kernel.name }}.ko
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memd_kern-${{ matrix.kernel.name }}
+          path: memd_kern-${{ matrix.kernel.name }}.ko
+
+  build-userspace:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: module
+
+      - name: install toolchain
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r28-linux.zip
+          unzip -q android-ndk-r28-linux.zip
+          echo "CC=$PWD/android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang" >> $GITHUB_ENV
+
+      - name: build debugd_unsafe
+        run: |
+          $CC -static -O2 -s -o debugd_unsafe module/memd_us.c
+          $CC -static -O2 -s -o memtool module/memd_dump.c
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debugd_unsafe
+          path: debugd_unsafe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memtool
+          path: memtool
