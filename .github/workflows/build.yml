@@ -45,18 +45,24 @@ jobs:
           restore-keys: kmod-${{ matrix.kernel.name }}-
 
       - name: checkout kernel
-        if: steps.cache-kernel.outputs.cache-hit != 'true'
         run: |
-          git clone --depth=1 --branch ${{ matrix.kernel.ref }} \
-            ${{ matrix.kernel.url }} \
-            kernel/${{ matrix.kernel.name }}
+          if [ -d kernel/${{ matrix.kernel.name }}/Makefile ]; then
+            echo "kernel source already present (cache restore)"
+          else
+            git clone --depth=1 --branch ${{ matrix.kernel.ref }} \
+              ${{ matrix.kernel.url }} \
+              kernel/${{ matrix.kernel.name }}
+          fi
 
       - name: prepare kernel build
-        if: steps.cache-kernel.outputs.cache-hit != 'true'
         run: |
           cd kernel/${{ matrix.kernel.name }}
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
+          if [ ! -f .config ]; then
+            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
+            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
+          else
+            echo ".config already present, skipping prepare"
+          fi
 
       - name: build module
         run: |
