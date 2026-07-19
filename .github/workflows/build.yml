@@ -7,19 +7,21 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+env:
+  KERNEL_COMMON: https://android.googlesource.com/kernel/common
+
 jobs:
   build-kmod:
     strategy:
       matrix:
         kernel:
-          - name: android14-5.15
-            url: https://android.googlesource.com/kernel/common
+          - name: avd-ranchu-6.1.23
+            ref: 7e35917775b8
+          - name: gki-5.15
             ref: android14-5.15
-          - name: android14-6.1
-            url: https://android.googlesource.com/kernel/common
+          - name: gki-6.1
             ref: android14-6.1
-          - name: android15-6.6
-            url: https://android.googlesource.com/kernel/common
+          - name: gki-6.6
             ref: android15-6.6
       fail-fast: false
     runs-on: ubuntu-22.04
@@ -50,9 +52,23 @@ jobs:
             echo "kernel source already present (cache restore)"
           else
             rm -rf kernel/${{ matrix.kernel.name }}
-            git clone --depth=1 --branch ${{ matrix.kernel.ref }} \
-              ${{ matrix.kernel.url }} \
-              kernel/${{ matrix.kernel.name }}
+            case "${{ matrix.kernel.name }}" in
+              gki-*)
+                git clone --depth=1 --branch ${{ matrix.kernel.ref }} \
+                  ${{ env.KERNEL_COMMON }} \
+                  kernel/${{ matrix.kernel.name }}
+                ;;
+              avd-*)
+                # specific commit — download tarball from gitiles
+                mkdir -p kernel/${{ matrix.kernel.name }}
+                curl -sL "${{ env.KERNEL_COMMON }}/+archive/${{ matrix.kernel.ref }}.tar.gz" \
+                  | tar xz -C kernel/${{ matrix.kernel.name }}
+                ;;
+              *)
+                echo "unknown kernel name: ${{ matrix.kernel.name }}"
+                exit 1
+                ;;
+            esac
           fi
 
       - name: prepare kernel build
@@ -96,7 +112,7 @@ jobs:
           unzip -q android-ndk-r28-linux.zip
           echo "CC=$PWD/android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang" >> $GITHUB_ENV
 
-      - name: build debugd_unsafe
+      - name: build binaries
         run: |
           $CC -static -O2 -s -o debugd_unsafe module/memd_us.c
           $CC -static -O2 -s -o memtool module/memd_dump.c
@@ -110,3 +126,32 @@ jobs:
         with:
           name: memtool
           path: memtool
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build-kmod, build-userspace]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: _artifacts
+
+      - name: collect artifacts
+        run: |
+          mkdir -p _release
+          find _artifacts -type f \( -name "*.ko" -o -name "debugd_unsafe" -o -name "memtool" \) \
+            -exec cp {} _release/ \;
+          ls -lh _release/
+
+      - uses: ncipollo/release-action@v1
+        with:
+          tag: beta
+          name: "beta build"
+          body: "auto-built from ${{ github.sha }}"
+          prerelease: true
+          allowUpdates: true
+          removeArtifacts: true
+          replacesArtifacts: true
+          artifacts: "_release/*"
