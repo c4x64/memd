@@ -15,8 +15,6 @@ jobs:
     strategy:
       matrix:
         kernel:
-          - name: gki-6.1-avd
-            ref: android15-6.1
           - name: gki-5.10
             ref: android12-5.10
           - name: gki-5.15
@@ -40,7 +38,7 @@ jobs:
       - name: install toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu clang lld llvm libelf-dev libdw-dev ccache
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu libelf-dev libdw-dev ccache
 
       - name: cache kernel source
         id: cache-kernel
@@ -71,14 +69,7 @@ jobs:
         run: |
           echo "TOOLCHAIN=CROSS_COMPILE=aarch64-linux-gnu- CC='ccache aarch64-linux-gnu-gcc'" >> $GITHUB_OUTPUT
 
-      - name: build kernel (avd only — generates Module.symvers)
-        if: contains(matrix.kernel.name, 'avd')
-        run: |
-          cd kernel/${{ matrix.kernel.name }}
-          make ARCH=arm64 ${{ steps.vars.outputs.TOOLCHAIN }} -j$(nproc) Image modules
-
-      - name: prepare kernel (GKI only)
-        if: ${{ !contains(matrix.kernel.name, 'avd') }}
+      - name: prepare kernel
         run: |
           cd kernel/${{ matrix.kernel.name }}
           make ARCH=arm64 ${{ steps.vars.outputs.TOOLCHAIN }} modules_prepare
@@ -90,16 +81,6 @@ jobs:
             M=$GITHUB_WORKSPACE/module modules -j$(nproc) \
             KBUILD_MODPOST_WARN=1
 
-      - name: sign modules (avd only)
-        if: contains(matrix.kernel.name, 'avd')
-        run: |
-          cd kernel/${{ matrix.kernel.name }}
-          for ko in $GITHUB_WORKSPACE/module/*.ko; do
-            perl scripts/sign-file sha1 certs/signing_key.pem \
-              certs/signing_key.x509 "$ko"
-            echo "signed: $(basename $ko)"
-          done
-
       - name: rename artifact
         run: |
           cp module/memd_kern.ko memd_kern-${{ matrix.kernel.name }}.ko
@@ -108,18 +89,6 @@ jobs:
         with:
           name: memd_kern-${{ matrix.kernel.name }}
           path: memd_kern-${{ matrix.kernel.name }}.ko
-
-      - name: upload kernel image (avd only)
-        if: contains(matrix.kernel.name, 'avd')
-        run: |
-          cp arch/arm64/boot/Image kernel-Image-${{ matrix.kernel.name }}
-        working-directory: kernel/${{ matrix.kernel.name }}
-
-      - uses: actions/upload-artifact@v4
-        if: contains(matrix.kernel.name, 'avd')
-        with:
-          name: kernel-Image-${{ matrix.kernel.name }}
-          path: kernel/${{ matrix.kernel.name }}/kernel-Image-${{ matrix.kernel.name }}
 
   build-userspace:
     runs-on: ubuntu-22.04
