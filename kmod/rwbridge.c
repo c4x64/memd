@@ -9,9 +9,8 @@
  *   - Every kernel helper resolved at runtime from kallsyms_lookup_name,
  *     whose ADDRESS is passed in as a module parameter.
  *
- * READ: custom page-table read. We resolve get_user_pages_fast + vmalloc
- *   (or use the linear map) ourselves and read the target pages directly,
- *   no access_remote_vm involved.
+ * READ: cross-process read via runtime-resolved access_remote_vm (mm-pinned).
+ *   No process_vm_readv, no page walk from our side.
  *
  * WRITE (watchpoint mode): register_wide_hw_breakpoint installs a hardware
  *   watchpoint on the target address. When the CPU accesses it, the handler
@@ -50,14 +49,9 @@ typedef void *(*klookup_t)(const char *name);
 
 typedef struct task_struct *(*find_task_by_vpid_t)(pid_t nr);
 typedef struct mm_struct *(*get_task_mm_t)(struct task_struct *task);
-typedef long (*get_user_pages_fast_t)(unsigned long start,
-                                      unsigned long nr_pages,
-                                      unsigned int gup_flags,
-                                      struct page **pages);
-typedef void (*put_page_t)(struct page *page);
-typedef void *(*page_address_t)(struct page *page);
-typedef void *(*vmalloc_t)(unsigned long size);
-typedef void (*vfree_t)(const void *addr);
+typedef long (*access_remote_vm_t)(struct mm_struct *mm, unsigned long addr,
+                                   void *buf, size_t len, unsigned int flags);
+typedef void (*mmput_t)(struct mm_struct *mm);
 
 typedef struct perf_event *__percpu *(*register_wide_hw_breakpoint_t)(
     struct perf_event_attr *attr,
@@ -68,9 +62,8 @@ typedef void (*unregister_wide_hw_breakpoint_t)(
 
 static find_task_by_vpid_t p_find_task_by_vpid;
 static get_task_mm_t p_get_task_mm;
-static get_user_pages_fast_t p_get_user_pages_fast;
-static put_page_t p_put_page;
-static page_address_t p_page_address;
+static access_remote_vm_t p_access_remote_vm;
+static mmput_t p_mmput;
 static register_wide_hw_breakpoint_t p_register_wide_hw_breakpoint;
 static unregister_wide_hw_breakpoint_t p_unregister_wide_hw_breakpoint;
 
@@ -158,7 +151,7 @@ static int rw_resolve(void)
 {
     klookup_t kl;
 
-    if (p_register_wide_hw_breakpoint && p_get_user_pages_fast &&
+    if (p_register_wide_hw_breakpoint && p_access_remote_vm &&
         p_find_task_by_vpid)
         return 0;
     if (!ksym_addr)
@@ -167,35 +160,26 @@ static int rw_resolve(void)
     kl = (klookup_t)ksym_addr;
     p_find_task_by_vpid = (find_task_by_vpid_t)kl("find_task_by_vpid");
     p_get_task_mm = (get_task_mm_t)kl("get_task_mm");
-    p_get_user_pages_fast = (get_user_pages_fast_t)kl("get_user_pages_fast");
-    p_put_page = (put_page_t)kl("put_page");
-    p_page_address = (page_address_t)kl("page_address");
+    p_access_remote_vm = (access_remote_vm_t)kl("access_remote_vm");
+    p_mmput = (mmput_t)kl("mmput");
     p_register_wide_hw_breakpoint =
         (register_wide_hw_breakpoint_t)kl("register_wide_hw_breakpoint");
     p_unregister_wide_hw_breakpoint =
         (unregister_wide_hw_breakpoint_t)kl("unregister_wide_hw_breakpoint");
-    if (!p_find_task_by_vpid || !p_get_task_mm || !p_get_user_pages_fast ||
-        !p_put_page || !p_page_address || !p_register_wide_hw_breakpoint ||
+    if (!p_find_task_by_vpid || !p_get_task_mm || !p_access_remote_vm ||
+        !p_mmput || !p_register_wide_hw_breakpoint ||
         !p_unregister_wide_hw_breakpoint)
         return -ENOENT;
     return 0;
 }
 
-/* ================= READ: custom page-table path ================= */
-/*
- * Resolve a user VA to physical and copy `size` bytes. Uses
- * get_user_pages_fast to pin the page, page_address for the linear-map
- * pointer, then a raw copy. No access_remote_vm / process_vm_* involved.
- */
+/* ================= READ ================= */
 static long rw_read_custom(int pid, unsigned long addr, unsigned long size,
                            unsigned long *value)
 {
     struct task_struct *task;
     struct mm_struct *mm;
-    struct page *page = NULL;
-    void *kaddr;
     unsigned long tmp = 0;
-    int nr;
     long rc;
 
     rc = rw_resolve();
@@ -209,34 +193,11 @@ static long rw_read_custom(int pid, unsigned long addr, unsigned long size,
     if (!mm)
         return -EACCES;
 
-    /* pin the single target page */
-    nr = (int)p_get_user_pages_fast(addr, 1, 0, &page);
-    if (nr != 1) {
-        /* gup needs the mm active; retry with FOLL flags */
-        nr = (int)p_get_user_pages_fast(addr, 1, 1, &page);
-        if (nr != 1) {
-            rw_status = -EFAULT;
-            return -EFAULT;
-        }
-    }
+    rc = p_access_remote_vm(mm, addr, &tmp, size, 0);
+    p_mmput(mm);
+    if (rc != (long)size)
+        return -EFAULT;
 
-    kaddr = p_page_address(page);
-    if (!kaddr) {
-        p_put_page(page);
-        return -EADDRNOTAVAIL;
-    }
-
-    /* read size bytes into tmp */
-    switch (size) {
-    case 1: *(unsigned char *)&tmp = *(volatile unsigned char *)kaddr; break;
-    case 2: *(unsigned short *)&tmp = *(volatile unsigned short *)kaddr; break;
-    case 4: *(unsigned int *)&tmp = *(volatile unsigned int *)kaddr; break;
-    case 8: *(unsigned long long *)&tmp =
-                *(volatile unsigned long long *)kaddr; break;
-    default: p_put_page(page); return -EINVAL;
-    }
-
-    p_put_page(page);
     *value = tmp;
     return 0;
 }
@@ -341,9 +302,6 @@ static long rw_write_raw(int pid, unsigned long addr, unsigned long size,
 {
     struct task_struct *task;
     struct mm_struct *mm;
-    struct page *page = NULL;
-    void *kaddr;
-    int nr;
     long rc;
 
     rc = rw_resolve();
@@ -357,26 +315,10 @@ static long rw_write_raw(int pid, unsigned long addr, unsigned long size,
     if (!mm)
         return -EACCES;
 
-    nr = (int)p_get_user_pages_fast(addr, 1, 1, &page);
-    if (nr != 1)
+    rc = p_access_remote_vm(mm, addr, &value, size, FOLL_WRITE);
+    p_mmput(mm);
+    if (rc != (long)size)
         return -EFAULT;
-
-    kaddr = p_page_address(page);
-    if (!kaddr) {
-        p_put_page(page);
-        return -EADDRNOTAVAIL;
-    }
-
-    switch (size) {
-    case 1: *(volatile unsigned char *)kaddr = (unsigned char)value; break;
-    case 2: *(volatile unsigned short *)kaddr = (unsigned short)value; break;
-    case 4: *(volatile unsigned int *)kaddr = (unsigned int)value; break;
-    case 8: *(volatile unsigned long long *)kaddr =
-                (unsigned long long)value; break;
-    default: p_put_page(page); return -EINVAL;
-    }
-
-    p_put_page(page);
     return 0;
 }
 
