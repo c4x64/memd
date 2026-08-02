@@ -233,6 +233,11 @@ static struct hook_entry hook_table[MAX_HOOKS];
 static struct task_struct *g_worker;
 static int g_exiting;
 
+/* debug counters (read-only via params) */
+static unsigned long g_handled;	/* watch_handler invocations */
+static unsigned long g_matched;	/* handler matched a watch entry */
+static unsigned long g_subst;	/* worker substitutions done */
+
 /* Self-contained spinlock: inline LL/SC asm only, so no kernel symbol or
  * libgcc outline-atomic helper (__aarch64_cas4_sync etc.) is imported.
  * ldaxr/stlxr/stlr are ARMv8.0 base instructions.
@@ -283,6 +288,7 @@ static void watch_handler(struct perf_event *event,
 	if (!event)
 		return;
 	addr = event->attr.bp_addr;
+	WRITE_ONCE(g_handled, g_handled + 1);
 
 	for (i = 0; i < MAX_WATCH; i++) {
 		e = &watch_table[i];
@@ -294,6 +300,7 @@ static void watch_handler(struct perf_event *event,
 		if (current->tgid != READ_ONCE(e->pid))
 			continue;
 		WRITE_ONCE(e->fired, 1);
+		WRITE_ONCE(g_matched, g_matched + 1);
 		break;
 	}
 }
@@ -356,6 +363,8 @@ static void worker_tick(void)
 						e->restore_in =
 							SUBST_RESTORE_MS /
 							WORKER_TICK_MS;
+						WRITE_ONCE(g_subst,
+							   g_subst + 1);
 					}
 					lxgr_unlock();
 				} else {
@@ -383,6 +392,7 @@ static void worker_tick(void)
 					e->substituted = 1;
 					e->restore_in = SUBST_RESTORE_MS /
 							WORKER_TICK_MS;
+					WRITE_ONCE(g_subst, g_subst + 1);
 				}
 				lxgr_unlock();
 			}
@@ -925,6 +935,35 @@ static const struct kernel_param_ops rw_stage_ops = {
 	.get = rw_stage_get,
 };
 module_param_cb(stage, &rw_stage_ops, NULL, 0444);
+
+static int rw_cnt_get(char *buf, const struct kernel_param *kp)
+{
+	unsigned long v = 0;
+	int n = 0;
+	char tmp[24];
+	int i = 22;
+	int neg = 0;
+
+	if (!kp || !kp->arg)
+		return -EINVAL;
+	v = *(unsigned long *)kp->arg;
+	tmp[23] = 0;
+	do {
+		tmp[i--] = '0' + (v % 10);
+		v /= 10;
+	} while (v && i > 0);
+	i++;
+	n = 24 - i;
+	lxgr_memcpy(buf, tmp + i, n);
+	buf[n] = 0;
+	return n;
+}
+static const struct kernel_param_ops rw_cnt_ops = {
+	.get = rw_cnt_get,
+};
+module_param_cb(handled, &rw_cnt_ops, &g_handled, 0444);
+module_param_cb(matched, &rw_cnt_ops, &g_matched, 0444);
+module_param_cb(subst, &rw_cnt_ops, &g_subst, 0444);
 
 /* ---- function-pointer params (custom ops, avoid param_ops_* imports) -- */
 
