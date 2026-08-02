@@ -16,12 +16,13 @@
 #include <linux/init.h>
 #include <linux/string.h>
 
-static char lxgr_status[256] = "loading";
+static char lxgr_status_buf[256] = "loading";
+static char *lxgr_status = lxgr_status_buf;
 module_param(lxgr_status, charp, 0444);
 
 static int __init lxgr_probe_init(void)
 {
-    snprintf(lxgr_status, sizeof(lxgr_status),
+    snprintf(lxgr_status_buf, sizeof(lxgr_status_buf),
              "INIT OK kernel=%s %s %s",
              init_uts_ns.name.release,
              init_uts_ns.name.version,
