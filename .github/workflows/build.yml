@@ -40,7 +40,6 @@ jobs:
           scripts/config --enable PREEMPTION
           scripts/config --enable MODULE_UNLOAD
           scripts/config --enable MODVERSIONS
-          scripts/config --enable ARM64 PORTABLE
           make ARCH=$ARCH olddefconfig
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
 
