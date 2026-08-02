@@ -46,7 +46,8 @@ jobs:
           # modpost writes matching __versions CRCs into our .ko. This makes
           # the loader CRC-verify our module and run module_init, without
           # compiling the entire in-tree module tree.
-          printf '0x93375eb6\tmodule_layout\tvmlinux\tEXPORT_SYMBOL\n0x92997ed8\t_printk\tvmlinux\tEXPORT_SYMBOL\n' > "$GITHUB_WORKSPACE/linux-$KVER/Module.symvers"
+          # Format (v5.15 modpost read_dump): 0x<crc>\t<sym>\t<module>\t<export>\t<namespace>
+          printf '0x93375eb6\tmodule_layout\tvmlinux\tEXPORT_SYMBOL\t\n0x92997ed8\t_printk\tvmlinux\tEXPORT_SYMBOL\t\n' > "$GITHUB_WORKSPACE/linux-$KVER/Module.symvers"
           cat "$GITHUB_WORKSPACE/linux-$KVER/Module.symvers"
 
       - name: Build kmod
