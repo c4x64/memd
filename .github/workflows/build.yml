@@ -45,8 +45,7 @@ jobs:
       - name: Build kmod
         run: |
           cd kmod
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
-            KDIR="$GITHUB_WORKSPACE/linux-$KVER" modules
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE KDIR="$GITHUB_WORKSPACE/linux-$KVER"
 
       - name: Show vermagic
         run: |
