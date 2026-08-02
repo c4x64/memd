@@ -112,6 +112,7 @@ typedef struct perf_event *(*reg_user_fn)(
 			  struct pt_regs *),
 	void *context, struct task_struct *tsk);
 typedef void (*release_event_fn)(struct perf_event *event);
+typedef void (*perf_event_enable_fn)(struct perf_event *event);
 typedef struct task_struct *(*kthread_create_fn)(int (*threadfn)(void *),
 						 void *data, int node,
 						 const char *namefmt, ...);
@@ -126,6 +127,7 @@ static unsigned long g_mmput;
 static unsigned long g_access_remote_vm;
 static unsigned long g_reg_user;
 static unsigned long g_release_event;
+static unsigned long g_perf_enable;
 static unsigned long g_kthread_create;
 static unsigned long g_wake_up_process;
 static unsigned long g_kthread_should_stop;
@@ -615,6 +617,12 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 		lxgr_unlock();
 		return rc;
 	}
+	/* perf_event_create_kernel_counter() (wrapped by register_user_
+	 * hw_breakpoint) creates the event INACTIVE and does NOT enable it;
+	 * call perf_event_enable() so the scheduler arms the debug register
+	 * and the watchpoint actually fires. */
+	if (g_perf_enable)
+		((perf_event_enable_fn)g_perf_enable)(ev);
 
 	lxgr_lock();
 	WRITE_ONCE(e->ev, ev);
@@ -1003,6 +1011,7 @@ DEF_HEX_PARAM(mmput, g_mmput);
 DEF_HEX_PARAM(access_remote_vm, g_access_remote_vm);
 DEF_HEX_PARAM(register_user_hw_breakpoint, g_reg_user);
 DEF_HEX_PARAM(perf_event_release_kernel, g_release_event);
+DEF_HEX_PARAM(perf_event_enable, g_perf_enable);
 DEF_HEX_PARAM(kthread_create_on_node, g_kthread_create);
 DEF_HEX_PARAM(wake_up_process, g_wake_up_process);
 DEF_HEX_PARAM(kthread_should_stop, g_kthread_should_stop);
