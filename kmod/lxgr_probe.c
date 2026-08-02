@@ -17,7 +17,6 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/utsname.h>
-#include <linux/vermagic.h>
 #include <linux/init.h>
 
 static int __init lxgr_probe_init(void)
@@ -26,7 +25,6 @@ static int __init lxgr_probe_init(void)
         init_uts_ns.name.release,
         init_uts_ns.name.version,
         init_uts_ns.name.machine);
-    printk(KERN_INFO "lxgr_probe: VERMAGIC=%s\n", VERMAGIC_STRING);
     return 0;
 }
 
