@@ -106,12 +106,12 @@ typedef void (*mmput_fn)(struct mm_struct *mm);
 typedef long (*access_remote_vm_fn)(struct mm_struct *mm,
 				    unsigned long addr, void *buf, size_t len,
 				    unsigned int flags);
-typedef struct perf_event *__percpu *(*reg_wide_fn)(
+typedef struct perf_event *(*reg_user_fn)(
 	struct perf_event_attr *attr,
 	void (*triggered)(struct perf_event *, struct perf_sample_data *,
 			  struct pt_regs *),
-	void *context);
-typedef void (*unreg_wide_fn)(struct perf_event *__percpu *cpu_events);
+	void *context, struct task_struct *tsk);
+typedef void (*release_event_fn)(struct perf_event *event);
 typedef struct task_struct *(*kthread_create_fn)(int (*threadfn)(void *),
 						 void *data, int node,
 						 const char *namefmt, ...);
@@ -124,8 +124,8 @@ static unsigned long g_find_task_by_vpid;
 static unsigned long g_get_task_mm;
 static unsigned long g_mmput;
 static unsigned long g_access_remote_vm;
-static unsigned long g_reg_wide;
-static unsigned long g_unreg_wide;
+static unsigned long g_reg_user;
+static unsigned long g_release_event;
 static unsigned long g_kthread_create;
 static unsigned long g_wake_up_process;
 static unsigned long g_kthread_should_stop;
@@ -212,7 +212,7 @@ struct watch_entry {
 	int fired;		/* set by atomic handler */
 	int substituted;	/* currently substituted, restore pending */
 	int restore_in;		/* ticks until restore */
-	struct perf_event *__percpu *ev;
+	struct perf_event *ev;
 };
 
 static struct watch_entry watch_table[MAX_WATCH];
@@ -489,9 +489,10 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 {
 	struct perf_event_attr attr;
 	struct watch_entry *e = NULL;
+	struct task_struct *task;
 	int i, free = -1;
 	long rc;
-	struct perf_event *__percpu *ev;
+	struct perf_event *ev;
 
 	if (unwatch) {
 		int upid;
@@ -500,7 +501,7 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 
 		if (READ_ONCE(g_exiting))
 			return -ESHUTDOWN;
-		if (!g_unreg_wide)
+		if (!g_release_event)
 			return -EINVAL;
 		lxgr_lock();
 		for (i = 0; i < MAX_WATCH; i++) {
@@ -522,7 +523,7 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 				WRITE_ONCE(e->ev, NULL);
 				lxgr_unlock();
 				if (ev)
-					((unreg_wide_fn)g_unreg_wide)(ev);
+					((release_event_fn)g_release_event)(ev);
 				if (need_restore)
 					(void)rw_write_direct(upid, uaddr,
 							      usize, uorig);
@@ -533,7 +534,7 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 		return -ENOENT;
 	}
 
-	if (!lxgr_ptrs_ok() || !g_reg_wide || !g_unreg_wide)
+	if (!lxgr_ptrs_ok() || !g_reg_user || !g_release_event)
 		return -EINVAL;
 	if (READ_ONCE(g_exiting))
 		return -ESHUTDOWN;
@@ -593,7 +594,20 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 	WRITE_ONCE(e->reserved, 1);
 	lxgr_unlock();
 
-	ev = ((reg_wide_fn)g_reg_wide)(&attr, watch_handler, NULL);
+	/* A user-space watchpoint must be task-bound
+	 * (register_user_hw_breakpoint), not a per-CPU "wide" one: on ARM64 the
+	 * hardware debug register for a VA only fires while the owning task is
+	 * running, and task-bound perf events arm the watchpoint whenever the
+	 * target task is context switched in. Resolve the task by pid. */
+	task = ((find_task_by_vpid_fn)g_find_task_by_vpid)(pid);
+	if (!task) {
+		lxgr_lock();
+		WRITE_ONCE(e->reserved, 0);
+		lxgr_unlock();
+		return -ESRCH;
+	}
+
+	ev = ((reg_user_fn)g_reg_user)(&attr, watch_handler, NULL, task);
 	if (IS_ERR(ev)) {
 		rc = (long)PTR_ERR(ev);
 		lxgr_lock();
@@ -680,7 +694,7 @@ static void rw_teardown(void)
 	int i;
 	struct watch_entry *e;
 	struct task_struct *worker;
-	struct perf_event *__percpu *evs[MAX_WATCH];
+	struct perf_event *evs[MAX_WATCH];
 
 	WRITE_ONCE(g_exiting, 1);
 
@@ -719,10 +733,10 @@ static void rw_teardown(void)
 	lxgr_unlock();
 
 	/* unregister perf events outside the lock (may sleep) */
-	if (g_unreg_wide) {
+	if (g_release_event) {
 		for (i = 0; i < MAX_WATCH; i++)
 			if (evs[i])
-				((unreg_wide_fn)g_unreg_wide)(evs[i]);
+				((release_event_fn)g_release_event)(evs[i]);
 	}
 }
 
@@ -987,8 +1001,8 @@ DEF_HEX_PARAM(find_task_by_vpid, g_find_task_by_vpid);
 DEF_HEX_PARAM(get_task_mm, g_get_task_mm);
 DEF_HEX_PARAM(mmput, g_mmput);
 DEF_HEX_PARAM(access_remote_vm, g_access_remote_vm);
-DEF_HEX_PARAM(register_wide_hw_breakpoint, g_reg_wide);
-DEF_HEX_PARAM(unregister_wide_hw_breakpoint, g_unreg_wide);
+DEF_HEX_PARAM(register_user_hw_breakpoint, g_reg_user);
+DEF_HEX_PARAM(perf_event_release_kernel, g_release_event);
 DEF_HEX_PARAM(kthread_create_on_node, g_kthread_create);
 DEF_HEX_PARAM(wake_up_process, g_wake_up_process);
 DEF_HEX_PARAM(kthread_should_stop, g_kthread_should_stop);
