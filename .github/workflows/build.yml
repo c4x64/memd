@@ -41,6 +41,7 @@ jobs:
           scripts/config --enable PREEMPT
           make ARCH=$ARCH olddefconfig
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE modules
 
       - name: Build kmod
         run: |
