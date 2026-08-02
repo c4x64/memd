@@ -7,7 +7,7 @@ endif
 obj-m += rwbridge.o
 obj-m += lxgr_probe.o
 
-ccflags-y += -fno-stack-protector -fno-stack-check
+ccflags-y += -fno-stack-protector -fno-stack-check -fno-builtin
 
 all:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
