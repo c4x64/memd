@@ -235,7 +235,7 @@ static int g_exiting;
 
 /* Self-contained spinlock: inline __sync/__atomic GCC builtins only, so no
  * kernel symbol is imported (modpost would otherwise demand _raw_spin_lock).
- * -fno-builtin does not affect __sync_*/__atomic_* builtins.
+ * -fno-builtin does not affect the sync/atomic builtin families.
  */
 static int g_lock;
 
