@@ -581,7 +581,9 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 	case 8: attr.bp_len = HW_BREAKPOINT_LEN_8; break;
 	default: lxgr_unlock(); return -EINVAL;
 	}
-	attr.pinned = 1;
+	/* pinned is only valid for per-CPU events; per-task (this case) must use
+	 * flexible scheduling or the enable path drops the event to ERROR. */
+	attr.pinned = 0;
 
 	/* reserve + fill BEFORE arming so handler/worker never see garbage;
 	 * worker skips reserved entries (active still 0) */
