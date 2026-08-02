@@ -40,6 +40,7 @@
 #include <linux/hw_breakpoint.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
+#include <linux/smp.h>
 
 /* ================= self-contained libc-free helpers ================= */
 
@@ -113,6 +114,10 @@ typedef struct perf_event *(*reg_user_fn)(
 	void *context, struct task_struct *tsk);
 typedef void (*release_event_fn)(struct perf_event *event);
 typedef void (*perf_event_enable_fn)(struct perf_event *event);
+typedef int (*arch_install_bp_fn)(struct perf_event *event);
+typedef void (*arch_uninstall_bp_fn)(struct perf_event *event);
+typedef void (*smp_call_fn)(int cpu, void (*func)(void *info), void *info,
+			    int wait);
 typedef struct task_struct *(*kthread_create_fn)(int (*threadfn)(void *),
 						 void *data, int node,
 						 const char *namefmt, ...);
@@ -128,6 +133,9 @@ static unsigned long g_access_remote_vm;
 static unsigned long g_reg_user;
 static unsigned long g_release_event;
 static unsigned long g_perf_enable;
+static unsigned long g_arch_install;
+static unsigned long g_arch_uninstall;
+static unsigned long g_smp_call;
 static unsigned long g_kthread_create;
 static unsigned long g_wake_up_process;
 static unsigned long g_kthread_should_stop;
@@ -275,36 +283,121 @@ static void lxgr_unlock(void)
 	asm volatile("stlr	wzr, [%0]" : : "r" (&g_lock) : "memory");
 }
 
-/* atomic perf overflow handler: only flags the matching watchpoint */
+/* per-CPU arming callbacks run via smp_call_function_single on every online
+ * CPU. arch_install_hw_breakpoint programs the ARM64 DBGWVR/DBGWCR debug
+ * register of the CURRENT cpu, so we must run it once per CPU to arm the
+ * watchpoint everywhere the target task may be scheduled. */
+static void rw_install_now(void *data)
+{
+	if (g_arch_install)
+		((arch_install_bp_fn)g_arch_install)((struct perf_event *)data);
+}
+
+static void rw_uninstall_now(void *data)
+{
+	if (g_arch_uninstall)
+		((arch_uninstall_bp_fn)g_arch_uninstall)((struct perf_event *)data);
+}
+
+static void arm_on_each_cpu(struct perf_event *ev)
+{
+	int cpu;
+	for_each_online_cpu(cpu)
+		((smp_call_fn)g_smp_call)(cpu, rw_install_now, ev, 1);
+}
+
+static void unarm_on_each_cpu(struct perf_event *ev)
+{
+	int cpu;
+	for_each_online_cpu(cpu)
+		((smp_call_fn)g_smp_call)(cpu, rw_uninstall_now, ev, 1);
+}
+
+/* atomic perf overflow handler: ZERO-WRITE skip + register injection.
+ * When the CPU reads the watched offset, the debug watchpoint fires here.
+ * We decode the just-executed load at regs->pc; if it reads exactly our offset
+ * into one register, we place `value` into that register and advance pc past
+ * the instruction (regs->pc). The CPU resumes at the *next* instruction, the
+ * load is never completed against real memory, so the watched memory is never
+ * written and stays byte-for-byte original. Only a register (pt_regs) is
+ * touched. */
 static void watch_handler(struct perf_event *event,
 			  struct perf_sample_data *data,
 			  struct pt_regs *regs)
 {
 	int i;
 	struct watch_entry *e;
-	unsigned long addr;
+	unsigned long addr, base, eff, val;
+	unsigned int rt, rn;
+	u32 instr;
 
 	(void)data;
-	(void)regs;
-
-	if (!event)
-		return;
-	addr = event->attr.bp_addr;
 	WRITE_ONCE(g_handled, g_handled + 1);
 
+	if (!event || !regs || !user_mode(regs))
+		return;
+	addr = event->attr.bp_addr;
+
+	/* locate armed entry for this address+pid */
+	e = NULL;
 	for (i = 0; i < MAX_WATCH; i++) {
-		e = &watch_table[i];
-		if (!READ_ONCE(e->active))
-			continue;
-		if (READ_ONCE(e->addr) != addr)
-			continue;
-		/* match process via tgid (threads of same proc share it) */
-		if (current->tgid != READ_ONCE(e->pid))
-			continue;
-		WRITE_ONCE(e->fired, 1);
-		WRITE_ONCE(g_matched, g_matched + 1);
-		break;
+		struct watch_entry *c = &watch_table[i];
+		if (READ_ONCE(c->active) && READ_ONCE(c->addr) == addr &&
+		    current->tgid == READ_ONCE(c->pid)) {
+			e = c;
+			break;
+		}
 	}
+	if (!e)
+		return;
+	WRITE_ONCE(g_matched, g_matched + 1);
+
+	/* fetch the faulting instruction (user VA, present in mapped text) */
+	instr = 0;
+	if (copy_from_user(&instr, (const void __user *)regs->pc, 4))
+		goto detached;
+
+	/* 64-bit: LDR x, [x#n, #imm]   opcode bits[31:24] == 0xF9
+	 * 32-bit: LDR w, [x#n, #imm]   opcode bits[31:24] == 0xB9 */
+	if ((instr & 0xFF000000U) == 0xF9000000U) {
+		/* unsigned-imm LDR X (base register + imm12*8) */
+		rn = (instr >> 5) & 0x1f;   /* base reg */
+		rt = instr & 0x1f;          /* dest reg */
+		if (rn > 30)
+			goto detached;
+		base = (unsigned long)regs->regs[rn];
+		base += (unsigned long)((instr >> 10) & 0xfff) << 3;
+		if (base != addr)
+			goto detached; /* read a different place: let it run */
+		val = READ_ONCE(e->value);
+		regs->regs[rt] = val;
+		regs->pc += 4;
+		WRITE_ONCE(g_subst, g_subst + 1);
+		return;
+	} else if ((instr & 0xFF000000U) == 0xB9000000U) {
+		/* = (imm) LDR w (32-bit load) */
+		rn = (instr >> 5) & 0x1f;
+		rt = instr & 0x1f;
+		if (rn > 30)
+			goto detached;
+		base = (unsigned long)regs->regs[rn];
+		base = base + (unsigned long)((instr >> 10) & 0xfff) << 2;
+		if (base != addr)
+			goto detached;
+		val = (unsigned long)(u32)READ_ONCE(e->value);
+		regs->regs[rt] = val;
+		regs->pc += 4;
+		WRITE_ONCE(g_subst, g_subst + 1);
+		return;
+	}
+
+detached:
+	/* Not a straight single-register load, or address doesn't match: to
+	 * keep memory untouched and avoid an endless re-fire loop we cannot
+	 * blindly advance pc. Leave the watchpoint handling to the kernel's
+	 * original path (the read completes from real memory). This entry is
+	 * opted out of substitution. */
+	return;
 }
 
 static void worker_tick(void)
@@ -524,8 +617,10 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 				ev = e->ev;
 				WRITE_ONCE(e->ev, NULL);
 				lxgr_unlock();
-				if (ev)
+				if (ev) {
+					unarm_on_each_cpu(ev);
 					((release_event_fn)g_release_event)(ev);
+				}
 				if (need_restore)
 					(void)rw_write_direct(upid, uaddr,
 							      usize, uorig);
@@ -584,6 +679,12 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 	/* pinned is only valid for per-CPU events; per-task (this case) must use
 	 * flexible scheduling or the enable path drops the event to ERROR. */
 	attr.pinned = 0;
+	/* The overflow handler is only reached via perf_bp_event() when the
+	 * event is a "sampling event" (is_sampling_event()); a zero
+	 * sample_period/type makes perf_swevent_event() return before calling
+	 * the handler. Force sampling so watch_handler actually runs on each
+	 * hardware hit. */
+	attr.sample_period = 1;
 
 	/* reserve + fill BEFORE arming so handler/worker never see garbage;
 	 * worker skips reserved entries (active still 0) */
@@ -620,11 +721,20 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 		return rc;
 	}
 	/* perf_event_create_kernel_counter() (wrapped by register_user_
-	 * hw_breakpoint) creates the event INACTIVE and does NOT enable it;
-	 * call perf_event_enable() so the scheduler arms the debug register
-	 * and the watchpoint actually fires. */
-	if (g_perf_enable)
-		((perf_event_enable_fn)g_perf_enable)(ev);
+	 * hw_breakpoint) creates the event but perf_event_enable() puts it in
+	 * ERROR/un-scheduled state on this vendor kernel, so the ARM64 debug
+	 * register never arms. Instead we arm the watchpoint DIRECTLY on every
+	 * online CPU via arch_install_hw_breakpoint(), bypassing perf event
+	 * scheduling entirely. The overflow handler is still reached through
+	 * perf_bp_event() (we set attr.sample_period below so the event is a
+	 * "sampling event"). */
+	if (!g_arch_install || !g_arch_uninstall || !g_smp_call) {
+		lxgr_lock();
+		WRITE_ONCE(e->reserved, 0);
+		lxgr_unlock();
+		return -EINVAL;
+	}
+	arm_on_each_cpu(ev);
 
 	{
 		struct perf_event *__ev = ev;
@@ -1021,6 +1131,9 @@ DEF_HEX_PARAM(access_remote_vm, g_access_remote_vm);
 DEF_HEX_PARAM(register_user_hw_breakpoint, g_reg_user);
 DEF_HEX_PARAM(perf_event_release_kernel, g_release_event);
 DEF_HEX_PARAM(perf_event_enable, g_perf_enable);
+DEF_HEX_PARAM(arch_install_hw_breakpoint, g_arch_install);
+DEF_HEX_PARAM(arch_uninstall_hw_breakpoint, g_arch_uninstall);
+DEF_HEX_PARAM(smp_call_function_single, g_smp_call);
 DEF_HEX_PARAM(kthread_create_on_node, g_kthread_create);
 DEF_HEX_PARAM(wake_up_process, g_wake_up_process);
 DEF_HEX_PARAM(kthread_should_stop, g_kthread_should_stop);
