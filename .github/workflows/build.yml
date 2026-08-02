@@ -10,7 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       KVER: "5.15.137"
-      LOCALVERSION: "-v5.21.770-optimizations-5.21.771.4051"
       ARCH: arm64
       CROSS_COMPILE: aarch64-linux-gnu-
     steps:
@@ -34,12 +33,7 @@ jobs:
           cd linux-$KVER
           make ARCH=$ARCH defconfig
           scripts/config --disable LOCALVERSION_AUTO
-          scripts/config --set-str LOCALVERSION "$LOCALVERSION"
-          scripts/config --enable SMP
-          scripts/config --enable PREEMPT
-          scripts/config --enable PREEMPTION
-          scripts/config --enable MODULE_UNLOAD
-          scripts/config --enable MODVERSIONS
+          scripts/config --set-str LOCALVERSION "-v5.21.770-optimizations-5.21.771.4051"
           make ARCH=$ARCH olddefconfig
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
 
