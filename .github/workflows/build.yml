@@ -41,7 +41,12 @@ jobs:
           scripts/config --enable PREEMPT
           make ARCH=$ARCH olddefconfig
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE modules
+          # Populate modpost CRC table from the device kernel's own exported
+          # symbol CRCs (extracted from /boot/bstmods/*.ko on the target), so
+          # modpost writes matching __versions CRCs into our .ko. This makes
+          # the loader CRC-verify our module and run module_init, without
+          # compiling the entire in-tree module tree.
+          printf '0x93375eb6\tmodule_layout\tvmlinux\tEXPORT_SYMBOL\n0x92997ed8\t_printk\tvmlinux\tEXPORT_SYMBOL\n' > linux-$KVER/Module.symvers
 
       - name: Build kmod
         run: |
