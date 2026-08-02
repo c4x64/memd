@@ -626,9 +626,9 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 
 	{
 		struct perf_event *__ev = ev;
-		pr_info("rwbridge: armed pid=%d addr=0x%lx len=%d ev=%px state=%d cpu=%d ctx_task_pid=%d\n",
+		pr_info("rwbridge: armed pid=%d addr=0x%lx len=%d ev=%px state=%d cpu=%d hw_state=%d\n",
 			pid, addr, size, (void *)__ev, __ev->state,
-			__ev->cpu, __ev->ctx ? __ev->ctx->pid : -1);
+			__ev->cpu, __ev->hw.state);
 	}
 
 	lxgr_lock();
