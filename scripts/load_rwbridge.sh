@@ -17,8 +17,11 @@ MMP=$(get mmput)
 ARM=$(get access_remote_vm)
 RWH=$(get register_wide_hw_breakpoint)
 UWH=$(get unregister_wide_hw_breakpoint)
-SDW=$(get schedule_delayed_work)
-CDW=$(get cancel_delayed_work_sync)
+KTC=$(get kthread_create_on_node)
+WUP=$(get wake_up_process)
+KTS=$(get kthread_should_stop)
+KTST=$(get kthread_stop)
+MSP=$(get msleep)
 
 echo "find_task_by_vpid=$FTVP"
 echo "get_task_mm=$GTM"
@@ -26,8 +29,11 @@ echo "mmput=$MMP"
 echo "access_remote_vm=$ARM"
 echo "register_wide_hw_breakpoint=$RWH"
 echo "unregister_wide_hw_breakpoint=$UWH"
-echo "schedule_delayed_work=$SDW"
-echo "cancel_delayed_work_sync=$CDW"
+echo "kthread_create_on_node=$KTC"
+echo "wake_up_process=$WUP"
+echo "kthread_should_stop=$KTS"
+echo "kthread_stop=$KTST"
+echo "msleep=$MSP"
 
 if [ -z "$FTVP" ] || [ -z "$GTM" ] || [ -z "$MMP" ] || [ -z "$ARM" ]; then
     echo "ERROR: missing core symbol(s)"
@@ -42,7 +48,10 @@ insmod $KO \
     access_remote_vm=0x$ARM \
     register_wide_hw_breakpoint=0x$RWH \
     unregister_wide_hw_breakpoint=0x$UWH \
-    schedule_delayed_work=0x$SDW \
-    cancel_delayed_work_sync=0x$CDW
+    kthread_create_on_node=0x$KTC \
+    wake_up_process=0x$WUP \
+    kthread_should_stop=0x$KTS \
+    kthread_stop=0x$KTST \
+    msleep=0x$MSP
 echo "insmod rc=$?"
 grep rwbridge /proc/modules

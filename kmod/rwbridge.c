@@ -2,38 +2,44 @@
 /*
  * rwbridge.c - memory R/W / substitution bridge for ARM64 Android kernels.
  *
- * Everything runs in kernel mode (module param set callback). No kernel
- * symbol is linked: all kernel functions are resolved FRESH from
- * /proc/kallsyms by the loader on every insmod (kernel is KASLR re-based
- * after reboot, stale addresses = panic). Nothing is hardcoded.
+ * Everything runs in kernel mode. No kernel symbol is linked: all kernel
+ * functions are resolved FRESH from /proc/kallsyms by the loader on every
+ * insmod (kernel is KASLR re-based after reboot, stale addresses = panic).
+ * Nothing is hardcoded. Link-time imports: module_layout ONLY.
+ *
+ * A single worker kthread (created lazily on first V/H) does all periodic
+ * work in process context: watchpoint substitute+restore and fixed-Hz
+ * hooks. The atomic perf handler only flags fired watchpoints.
  *
  * Operations (sysfs param `rw`, comma separated):
  *   R,pid,addr,size                  read user VA, result in `out`
  *   W,pid,addr,size,value            direct write (modifies memory)
- *   V,pid,addr,size,value            arm hardware-watchpoint substitution:
- *                                    on access, write `value`, then restore
- *                                    the original bytes. Memory appears
- *                                    unmodified; executing code sees value.
- *   U,pid,addr                       disarm watchpoint
- *   H,pid,addr,size,value,period_ms,dir   fixed-Hz hook: every period_ms
- *                                    re-write (dir=W) or read (dir=R) so the
- *                                    value stays pinned. dir is 'R' or 'W'.
+ *   V,pid,addr,size,value            arm watchpoint substitution:
+ *                                    on access, write value, restore orig
+ *                                    after SUBST_RESTORE_MS. Memory appears
+ *                                    untouched; executing code sees value.
+ *   U,pid,addr[,size]                disarm watchpoint (size optional)
+ *   H,pid,addr,size,value,period_ms,dir  fixed-Hz hook: every period_ms
+ *                                    re-write (dir=W) or re-read (dir=R).
+ *   X,pid,addr                       stop a hook
  *
  * Diagnosis params: out, status (errno), stage (last step without printk).
  *
- * ARM64 only. Link-time imports: module_layout ONLY.
+ * ARM64 only. BTI required (-mbranch-protection=standard).
  */
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/err.h>
 #include <linux/string.h>
 #include <linux/sched.h>
 #include <linux/version.h>
 #include <linux/perf_event.h>
 #include <linux/hw_breakpoint.h>
-#include <linux/workqueue.h>
+#include <linux/kthread.h>
+#include <linux/delay.h>
 
 /* ================= self-contained libc-free helpers ================= */
 
@@ -106,9 +112,13 @@ typedef struct perf_event *__percpu *(*reg_wide_fn)(
 			  struct pt_regs *),
 	void *context);
 typedef void (*unreg_wide_fn)(struct perf_event *__percpu *cpu_events);
-typedef bool (*schedule_delayed_work_fn)(struct delayed_work *dwork,
-					 unsigned long delay);
-typedef bool (*cancel_delayed_work_sync_fn)(struct delayed_work *dwork);
+typedef struct task_struct *(*kthread_create_fn)(int (*threadfn)(void *),
+						 void *data, int node,
+						 const char *namefmt, ...);
+typedef int (*wake_up_process_fn)(struct task_struct *tsk);
+typedef int (*kthread_should_stop_fn)(void);
+typedef int (*kthread_stop_fn)(struct task_struct *tsk);
+typedef void (*msleep_fn)(unsigned int msecs);
 
 static unsigned long g_find_task_by_vpid;
 static unsigned long g_get_task_mm;
@@ -116,12 +126,13 @@ static unsigned long g_mmput;
 static unsigned long g_access_remote_vm;
 static unsigned long g_reg_wide;
 static unsigned long g_unreg_wide;
-static unsigned long g_sched_dwork;
-static unsigned long g_cancel_dwork;
+static unsigned long g_kthread_create;
+static unsigned long g_wake_up_process;
+static unsigned long g_kthread_should_stop;
+static unsigned long g_kthread_stop;
+static unsigned long g_msleep;
 
 #define FOLL_WRITE 0x01
-
-#define SFN(t, p, s) ((t)(p))
 
 static int lxgr_ptrs_ok(void)
 {
@@ -142,16 +153,15 @@ static long rw_read_custom(int pid, unsigned long addr, unsigned long size,
 	if (!lxgr_ptrs_ok())
 		return -EINVAL;
 
-	task = SFN(find_task_by_vpid_fn, g_find_task_by_vpid, pid);
+	task = ((find_task_by_vpid_fn)g_find_task_by_vpid)(pid);
 	if (!task)
 		return -ESRCH;
-	mm = SFN(get_task_mm_fn, g_get_task_mm, task);
+	mm = ((get_task_mm_fn)g_get_task_mm)(task);
 	if (!mm)
 		return -EACCES;
 
-	rc = SFN(access_remote_vm_fn, g_access_remote_vm)(mm, addr, &tmp, size,
-							  0);
-	SFN(mmput_fn, g_mmput)(mm);
+	rc = ((access_remote_vm_fn)g_access_remote_vm)(mm, addr, &tmp, size, 0);
+	((mmput_fn)g_mmput)(mm);
 	if (rc != (long)size)
 		return -EFAULT;
 
@@ -169,16 +179,16 @@ static long rw_write_direct(int pid, unsigned long addr, unsigned long size,
 	if (!lxgr_ptrs_ok())
 		return -EINVAL;
 
-	task = SFN(find_task_by_vpid_fn, g_find_task_by_vpid, pid);
+	task = ((find_task_by_vpid_fn)g_find_task_by_vpid)(pid);
 	if (!task)
 		return -ESRCH;
-	mm = SFN(get_task_mm_fn, g_get_task_mm, task);
+	mm = ((get_task_mm_fn)g_get_task_mm)(task);
 	if (!mm)
 		return -EACCES;
 
-	rc = SFN(access_remote_vm_fn, g_access_remote_vm)(mm, addr, &value,
-							  size, FOLL_WRITE);
-	SFN(mmput_fn, g_mmput)(mm);
+	rc = ((access_remote_vm_fn)g_access_remote_vm)(mm, addr, &value, size,
+						       FOLL_WRITE);
+	((mmput_fn)g_mmput)(mm);
 	if (rc != (long)size)
 		return -EFAULT;
 	return 0;
@@ -187,7 +197,9 @@ static long rw_write_direct(int pid, unsigned long addr, unsigned long size,
 /* ================= watchpoint substitution engine ===================== */
 
 #define MAX_WATCH 8
-#define SUBST_RESTORE_MS 5
+#define MAX_HOOKS 4
+#define WORKER_TICK_MS 5
+#define SUBST_RESTORE_MS 15
 
 struct watch_entry {
 	unsigned long addr;
@@ -196,66 +208,142 @@ struct watch_entry {
 	unsigned long value;
 	unsigned long orig;
 	int active;
+	int fired;		/* set by atomic handler */
+	int substituted;	/* currently substituted, restore pending */
+	int restore_in;		/* ticks until restore */
 	struct perf_event *__percpu *ev;
-	struct delayed_work subst_work;
-	struct delayed_work restore_work;
 };
 
 static struct watch_entry watch_table[MAX_WATCH];
 
-static void watch_restore_work_fn(struct work_struct *work)
-{
-	struct watch_entry *e;
+struct hook_entry {
+	int pid;
+	unsigned long addr;
+	unsigned long size;
+	unsigned long value;
+	unsigned long period_ms;
+	int dir; /* 'R' or 'W' */
+	int active;
+	unsigned long next_tick; /* ticks until next run */
+};
 
-	e = container_of(work, struct watch_entry, restore_work.work);
-	if (!e->active)
-		return;
-	/* put the original bytes back; memory looks untouched again */
-	(void)rw_write_direct(e->pid, e->addr, e->size, e->orig);
-}
+static struct hook_entry hook_table[MAX_HOOKS];
 
-static void watch_subst_work_fn(struct work_struct *work)
-{
-	struct watch_entry *e;
-	unsigned long orig = 0;
+static struct task_struct *g_worker;
+static int g_exiting;
 
-	e = container_of(work, struct watch_entry, subst_work.work);
-	if (!e->active)
-		return;
-
-	/* snapshot original, write substitute, then schedule a restore */
-	if (rw_read_custom(e->pid, e->addr, e->size, &orig) != 0)
-		return;
-	if (rw_write_direct(e->pid, e->addr, e->size, e->value) != 0)
-		return;
-	e->orig = orig;
-
-	SFN(schedule_delayed_work_fn, g_sched_dwork)(
-		&e->restore_work, msecs_to_jiffies(SUBST_RESTORE_MS));
-}
-
-/* perf overflow handler: runs in atomic/debug context, only defers work */
+/* atomic perf overflow handler: only flags the matching watchpoint */
 static void watch_handler(struct perf_event *event,
 			  struct perf_sample_data *data,
 			  struct pt_regs *regs)
 {
 	int i;
 	struct watch_entry *e;
+	unsigned long addr;
 
-	(void)event;
 	(void)data;
 	(void)regs;
+
+	if (!event)
+		return;
+	addr = event->attr.bp_addr;
 
 	for (i = 0; i < MAX_WATCH; i++) {
 		e = &watch_table[i];
 		if (!e->active)
 			continue;
-		if (current->pid != e->pid)
+		if (e->addr != addr)
 			continue;
-		SFN(schedule_delayed_work_fn, g_sched_dwork)(
-			&e->subst_work, 0);
+		/* match process via tgid (threads of same proc share it) */
+		if (current->tgid != e->pid)
+			continue;
+		e->fired = 1;
 		break;
 	}
+}
+
+static void worker_tick(void)
+{
+	int i;
+	struct watch_entry *e;
+	struct hook_entry *h;
+	unsigned long tmp = 0;
+
+	if (g_exiting)
+		return;
+
+	/* process fired watchpoints */
+	for (i = 0; i < MAX_WATCH; i++) {
+		e = &watch_table[i];
+		if (!e->active)
+			continue;
+		if (e->fired && !e->substituted) {
+			e->fired = 0;
+			if (rw_read_custom(e->pid, e->addr, e->size,
+					   &e->orig) == 0) {
+				if (rw_write_direct(e->pid, e->addr, e->size,
+						    e->value) == 0) {
+					e->substituted = 1;
+					e->restore_in =
+						SUBST_RESTORE_MS /
+						WORKER_TICK_MS;
+				}
+			}
+		} else if (e->substituted) {
+			if (--e->restore_in <= 0) {
+				(void)rw_write_direct(e->pid, e->addr, e->size,
+						      e->orig);
+				e->substituted = 0;
+				e->fired = 0;
+			}
+		}
+	}
+
+	/* fixed-Hz hooks */
+	for (i = 0; i < MAX_HOOKS; i++) {
+		h = &hook_table[i];
+		if (!h->active)
+			continue;
+		if (h->next_tick > 0) {
+			h->next_tick--;
+			continue;
+		}
+		if (h->dir == 'W')
+			(void)rw_write_direct(h->pid, h->addr, h->size,
+					      h->value);
+		else
+			(void)rw_read_custom(h->pid, h->addr, h->size, &tmp);
+		h->next_tick = h->period_ms / WORKER_TICK_MS;
+	}
+}
+
+static int lxgr_worker_fn(void *data)
+{
+	(void)data;
+	while (!((kthread_should_stop_fn)g_kthread_should_stop)()) {
+		worker_tick();
+		((msleep_fn)g_msleep)(WORKER_TICK_MS);
+	}
+	return 0;
+}
+
+static int lxgr_ensure_worker(void)
+{
+	struct task_struct *t;
+
+	if (g_worker || g_exiting)
+		return g_worker ? 0 : -ESHUTDOWN;
+	if (!g_kthread_create || !g_wake_up_process ||
+	    !g_kthread_should_stop || !g_kthread_stop || !g_msleep)
+		return -EINVAL;
+
+	t = ((kthread_create_fn)g_kthread_create)(lxgr_worker_fn, NULL,
+						  -1, "lxgrw");
+	if (IS_ERR(t))
+		return (long)PTR_ERR(t);
+	((wake_up_process_fn)g_wake_up_process)(t);
+	g_worker = t;
+	return 0;
 }
 
 static long rw_watch(int pid, unsigned long addr, unsigned long size,
@@ -267,16 +355,16 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 	long rc;
 
 	if (unwatch) {
+		if (!g_unreg_wide)
+			return -EINVAL;
 		for (i = 0; i < MAX_WATCH; i++) {
 			e = &watch_table[i];
 			if (e->active && e->addr == addr && e->pid == pid) {
 				e->active = 0;
-				SFN(cancel_delayed_work_sync_fn, g_cancel_dwork)(
-					&e->subst_work);
-				SFN(cancel_delayed_work_sync_fn, g_cancel_dwork)(
-					&e->restore_work);
+				e->fired = 0;
+				e->substituted = 0;
 				if (e->ev) {
-					SFN(unreg_wide_fn, g_unreg_wide)(e->ev);
+					((unreg_wide_fn)g_unreg_wide)(e->ev);
 					e->ev = NULL;
 				}
 				return 0;
@@ -285,9 +373,11 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 		return -ENOENT;
 	}
 
-	if (!lxgr_ptrs_ok() || !g_reg_wide || !g_unreg_wide ||
-	    !g_sched_dwork || !g_cancel_dwork)
+	if (!lxgr_ptrs_ok() || !g_reg_wide || !g_unreg_wide)
 		return -EINVAL;
+	rc = lxgr_ensure_worker();
+	if (rc)
+		return rc;
 
 	for (i = 0; i < MAX_WATCH; i++) {
 		if (!watch_table[i].active) {
@@ -304,62 +394,36 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 	attr.size = sizeof(attr);
 	attr.bp_type = HW_BREAKPOINT_RW;
 	attr.bp_addr = addr;
-	attr.bp_len = HW_BREAKPOINT_LEN_8;
+	switch (size) {
+	case 1: attr.bp_len = HW_BREAKPOINT_LEN_1; break;
+	case 2: attr.bp_len = HW_BREAKPOINT_LEN_2; break;
+	case 4: attr.bp_len = HW_BREAKPOINT_LEN_4; break;
+	case 8: attr.bp_len = HW_BREAKPOINT_LEN_8; break;
+	default: return -EINVAL;
+	}
 	attr.pinned = 1;
 
-	e->ev = SFN(reg_wide_fn, g_reg_wide)(&attr, watch_handler, NULL);
-	if (IS_ERR(e->ev)) {
-		rc = (long)PTR_ERR(e->ev);
-		e->ev = NULL;
-		return rc;
-	}
-
+	/* fill entry BEFORE arming so the handler never sees garbage */
 	e->addr = addr;
 	e->pid = pid;
 	e->size = size;
 	e->value = value;
+	e->orig = 0;
+	e->fired = 0;
+	e->substituted = 0;
+	e->restore_in = 0;
 	e->active = 1;
-	INIT_DELAYED_WORK(&e->subst_work, watch_subst_work_fn);
-	INIT_DELAYED_WORK(&e->restore_work, watch_restore_work_fn);
+	e->ev = ((reg_wide_fn)g_reg_wide)(&attr, watch_handler, NULL);
+	if (IS_ERR(e->ev)) {
+		rc = (long)PTR_ERR(e->ev);
+		e->ev = NULL;
+		e->active = 0;
+		return rc;
+	}
 	return 0;
 }
 
 /* ================= fixed-Hz hook ====================================== */
-
-#define MAX_HOOKS 4
-
-struct hook_entry {
-	int pid;
-	unsigned long addr;
-	unsigned long size;
-	unsigned long value;
-	unsigned long period_ms;
-	int dir; /* 'R' or 'W' */
-	int active;
-	unsigned long ticks;
-	struct delayed_work work;
-};
-
-static struct hook_entry hook_table[MAX_HOOKS];
-
-static void hook_work_fn(struct work_struct *work)
-{
-	struct hook_entry *h;
-	unsigned long tmp = 0;
-
-	h = container_of(work, struct hook_entry, work.work);
-	if (!h->active)
-		return;
-
-	if (h->dir == 'W')
-		(void)rw_write_direct(h->pid, h->addr, h->size, h->value);
-	else
-		(void)rw_read_custom(h->pid, h->addr, h->size, &tmp);
-
-	h->ticks++;
-	SFN(schedule_delayed_work_fn, g_sched_dwork)(
-		&h->work, msecs_to_jiffies(h->period_ms));
-}
 
 static long rw_hook(int pid, unsigned long addr, unsigned long size,
 		    unsigned long value, unsigned long period_ms,
@@ -367,21 +431,20 @@ static long rw_hook(int pid, unsigned long addr, unsigned long size,
 {
 	struct hook_entry *h;
 	int i, free = -1;
+	long rc;
 
 	if (stop) {
 		for (i = 0; i < MAX_HOOKS; i++) {
 			h = &hook_table[i];
 			if (h->active && h->pid == pid && h->addr == addr) {
 				h->active = 0;
-				SFN(cancel_delayed_work_sync_fn, g_cancel_dwork)(
-					&h->work);
 				return 0;
 			}
 		}
 		return -ENOENT;
 	}
 
-	if (!lxgr_ptrs_ok() || !g_sched_dwork || !g_cancel_dwork)
+	if (!lxgr_ptrs_ok())
 		return -EINVAL;
 	if (period_ms == 0)
 		period_ms = 100;
@@ -389,6 +452,9 @@ static long rw_hook(int pid, unsigned long addr, unsigned long size,
 		period_ms = 60000;
 	if (dir != 'R' && dir != 'W')
 		return -EINVAL;
+	rc = lxgr_ensure_worker();
+	if (rc)
+		return rc;
 
 	for (i = 0; i < MAX_HOOKS; i++) {
 		if (!hook_table[i].active) {
@@ -406,12 +472,36 @@ static long rw_hook(int pid, unsigned long addr, unsigned long size,
 	h->value = value;
 	h->period_ms = period_ms;
 	h->dir = (int)dir;
-	h->ticks = 0;
+	h->next_tick = 0;
 	h->active = 1;
-	INIT_DELAYED_WORK(&h->work, hook_work_fn);
-	SFN(schedule_delayed_work_fn, g_sched_dwork)(
-		&h->work, msecs_to_jiffies(period_ms));
 	return 0;
+}
+
+static void rw_teardown(void)
+{
+	int i;
+
+	g_exiting = 1;
+
+	for (i = 0; i < MAX_WATCH; i++) {
+		struct watch_entry *e = &watch_table[i];
+		if (e->active && e->substituted && e->ev)
+			(void)rw_write_direct(e->pid, e->addr, e->size,
+					      e->orig);
+		e->active = 0;
+		e->fired = 0;
+		e->substituted = 0;
+		if (e->ev) {
+			((unreg_wide_fn)g_unreg_wide)(e->ev);
+			e->ev = NULL;
+		}
+	}
+	for (i = 0; i < MAX_HOOKS; i++)
+		hook_table[i].active = 0;
+
+	if (g_worker && g_kthread_stop)
+		((kthread_stop_fn)g_kthread_stop)(g_worker);
+	g_worker = NULL;
 }
 
 /* ================= param set: guaranteed entry point ================== */
@@ -423,84 +513,85 @@ static char rw_stage[16] = "idle";
 #define STAGE(s) lxgr_memcpy(rw_stage, (s), sizeof(s) - 1), \
 		rw_stage[sizeof(s) - 1] = 0
 
+/* split next comma field from p into buf; returns field length or -1 */
+static int next_field(const char **pp, char *buf, int bufsz)
+{
+	const char *p = *pp;
+	int n = 0;
+
+	while (*p == ' ')
+		p++;
+	while (*p && *p != ',' && n < bufsz - 1)
+		buf[n++] = *p++;
+	buf[n] = 0;
+	if (*p == ',')
+		p++;
+	*pp = p;
+	return n;
+}
+
 static int rw_set(const char *val, const struct kernel_param *kp)
 {
 	const char *p = val;
-	int pid;
-	unsigned long addr, size, value;
-	unsigned long period = 0, dir = 0;
+	char f[24];
 	char op;
+	int pid;
+	unsigned long addr, size, value, period, dir;
 	long r;
 	unsigned long readout = 0;
 
 	while (*p == ' ')
 		p++;
-	if (!*p) {
-		rw_status = -EINVAL;
-		return 0;
-	}
-
+	if (!*p)
+		goto bad;
 	op = *p++;
 	if (*p == ',')
 		p++;
-	else {
-		rw_status = -EINVAL;
-		return 0;
-	}
+	else
+		goto bad;
 	STAGE("parse");
 
-	pid = (int)parse_dec(p);
-	while (*p && *p != ',')
-		p++;
-	if (*p == ',')
-		p++;
-	else {
-		rw_status = -EINVAL;
-		return 0;
-	}
+	if (next_field(&p, f, sizeof(f)) <= 0)
+		goto bad;
+	pid = (int)parse_dec(f);
+	if (next_field(&p, f, sizeof(f)) <= 0)
+		goto bad;
+	addr = parse_hex(f);
 
-	addr = parse_hex(p);
-	while (*p && *p != ',')
-		p++;
-	if (*p == ',')
-		p++;
-	else {
-		rw_status = -EINVAL;
-		return 0;
-	}
+	size = 0;
+	value = 0;
+	period = 0;
+	dir = 0;
 
-	size = parse_dec(p);
-	while (*p && *p != ',')
-		p++;
-	if (*p == ',') {
-		p++;
-		value = parse_hex(p);
-	} else {
-		value = 0;
+	if (op != 'U' && op != 'X') {
+		if (next_field(&p, f, sizeof(f)) <= 0)
+			goto bad;
+		size = parse_dec(f);
 	}
-
-	/* optional extra fields for H op: period_ms, dir */
+	if (op == 'W' || op == 'V' || op == 'H') {
+		if (next_field(&p, f, sizeof(f)) <= 0)
+			goto bad;
+		value = parse_hex(f);
+	}
 	if (op == 'H') {
-		while (*p && *p != ',')
-			p++;
-		if (*p == ',') {
-			p++;
-			period = parse_dec(p);
-		}
-		while (*p && *p != ',')
-			p++;
-		if (*p == ',')
-			dir = *++p;
+		if (next_field(&p, f, sizeof(f)) <= 0)
+			goto bad;
+		period = parse_dec(f);
+		if (next_field(&p, f, sizeof(f)) <= 0)
+			goto bad;
+		dir = f[0];
 	}
 
 	/* ---- strict validation: nothing here may ever crash ---- */
-	if (!(op == 'R' || op == 'W' || op == 'V' || op == 'U' || op == 'H'))
+	if (!(op == 'R' || op == 'W' || op == 'V' || op == 'U' ||
+	      op == 'H' || op == 'X'))
 		goto bad;
 	if (pid <= 0 || pid > 0x7fffffff)
 		goto bad;
 	if (addr == 0 || addr >= 0x0000800000000000UL)
 		goto bad;
-	if (size != 1 && size != 2 && size != 4 && size != 8)
+	if (op != 'U' && op != 'X' &&
+	    size != 1 && size != 2 && size != 4 && size != 8)
 		goto bad;
 	if (addr + size < addr) /* wraparound */
 		goto bad;
@@ -529,6 +620,10 @@ ok:
 	case 'H':
 		STAGE("hook");
 		r = rw_hook(pid, addr, size, value, period, dir, 0);
+		break;
+	case 'X':
+		STAGE("unhook");
+		r = rw_hook(pid, addr, size, value, 0, 0, 1);
 		break;
 	default:
 		r = -EINVAL;
@@ -643,8 +738,11 @@ DEF_HEX_PARAM(mmput, g_mmput);
 DEF_HEX_PARAM(access_remote_vm, g_access_remote_vm);
 DEF_HEX_PARAM(register_wide_hw_breakpoint, g_reg_wide);
 DEF_HEX_PARAM(unregister_wide_hw_breakpoint, g_unreg_wide);
-DEF_HEX_PARAM(schedule_delayed_work, g_sched_dwork);
-DEF_HEX_PARAM(cancel_delayed_work_sync, g_cancel_dwork);
+DEF_HEX_PARAM(kthread_create_on_node, g_kthread_create);
+DEF_HEX_PARAM(wake_up_process, g_wake_up_process);
+DEF_HEX_PARAM(kthread_should_stop, g_kthread_should_stop);
+DEF_HEX_PARAM(kthread_stop, g_kthread_stop);
+DEF_HEX_PARAM(msleep, g_msleep);
 
 static int __init rwbridge_init(void)
 {
@@ -653,6 +751,7 @@ static int __init rwbridge_init(void)
 
 static void __exit rwbridge_exit(void)
 {
+	rw_teardown();
 }
 
 module_init(rwbridge_init);
