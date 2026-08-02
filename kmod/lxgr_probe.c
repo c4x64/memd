@@ -14,8 +14,7 @@
 
 static int __init lxgr_probe_init(void)
 {
-    printk(KERN_INFO "lxgr_probe: INIT OK probe\n");
-    return 0;
+    return -EINVAL;
 }
 
 static void __exit lxgr_probe_exit(void)
