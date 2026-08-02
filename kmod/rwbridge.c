@@ -242,7 +242,7 @@ static int g_lock;
 static void lxgr_lock(void)
 {
 	while (__sync_val_compare_and_swap(&g_lock, 0, 1) != 0)
-		;
+		cpu_relax();
 }
 
 static void lxgr_unlock(void)
@@ -283,7 +283,6 @@ static void watch_handler(struct perf_event *event,
 static void worker_tick(void)
 {
 	int i;
-	struct watch_entry *e;
 	struct hook_entry *h;
 	unsigned long tmp = 0;
 
@@ -292,57 +291,114 @@ static void worker_tick(void)
 
 	/* process fired watchpoints */
 	for (i = 0; i < MAX_WATCH; i++) {
-		e = &watch_table[i];
-		if (!READ_ONCE(e->active))
+		struct watch_entry *e = &watch_table[i];
+		int pid, fired, substituted;
+		unsigned long addr, size, value, orig, restore_in;
+
+		/* snapshot the whole entry under the lock so we never do I/O
+		 * with a torn view (arm/unwatch can rewrite fields) */
+		lxgr_lock();
+		if (!READ_ONCE(e->active)) {
+			lxgr_unlock();
 			continue;
-		if (e->substituted) {
-			/* restore window: first restore, then, if a hit landed
-			 * while substituted, immediately re-substitute so the
-			 * memory visible to executors is the value, not orig. */
-			e->restore_in--;
-			if (e->restore_in > 0)
+		}
+		pid = e->pid;
+		addr = e->addr;
+		size = e->size;
+		value = e->value;
+		orig = e->orig;
+		substituted = e->substituted;
+		fired = READ_ONCE(e->fired);
+		restore_in = e->restore_in;
+		lxgr_unlock();
+
+		if (substituted) {
+			/* count down the restore window */
+			if (restore_in > 0) {
+				restore_in--;
+				lxgr_lock();
+				if (READ_ONCE(e->active) &&
+				    e->pid == pid && e->addr == addr)
+					e->restore_in = restore_in;
+				lxgr_unlock();
 				continue;
-			(void)rw_write_direct(e->pid, e->addr, e->size,
-					      e->orig);
-			e->substituted = 0;
-			if (READ_ONCE(e->fired)) {
-				WRITE_ONCE(e->fired, 0);
-				if (rw_write_direct(e->pid, e->addr, e->size,
-						    e->value) == 0) {
-					e->substituted = 1;
-					e->restore_in = SUBST_RESTORE_MS /
-							WORKER_TICK_MS;
-				}
 			}
-		} else if (READ_ONCE(e->fired)) {
+			/* window elapsed: put orig back first */
+			(void)rw_write_direct(pid, addr, size, orig);
+			/* if a hit landed while substituted, immediately
+			 * re-substitute so executors keep seeing value */
+			if (fired) {
+				WRITE_ONCE(e->fired, 0);
+				if (rw_write_direct(pid, addr, size,
+						    value) == 0) {
+					lxgr_lock();
+					if (READ_ONCE(e->active) &&
+					    e->pid == pid && e->addr == addr) {
+						e->substituted = 1;
+						e->restore_in =
+							SUBST_RESTORE_MS /
+							WORKER_TICK_MS;
+					}
+					lxgr_unlock();
+				} else {
+					lxgr_lock();
+					if (READ_ONCE(e->active) &&
+					    e->pid == pid && e->addr == addr)
+						e->substituted = 0;
+					lxgr_unlock();
+				}
+			} else {
+				lxgr_lock();
+				if (READ_ONCE(e->active) &&
+				    e->pid == pid && e->addr == addr)
+					e->substituted = 0;
+				lxgr_unlock();
+			}
+		} else if (fired) {
 			WRITE_ONCE(e->fired, 0);
-			if (rw_read_custom(e->pid, e->addr, e->size,
-					   &e->orig) == 0) {
-				if (rw_write_direct(e->pid, e->addr, e->size,
-						    e->value) == 0) {
+			if (rw_read_custom(pid, addr, size, &orig) == 0 &&
+			    rw_write_direct(pid, addr, size, value) == 0) {
+				lxgr_lock();
+				if (READ_ONCE(e->active) &&
+				    e->pid == pid && e->addr == addr) {
+					e->orig = orig;
 					e->substituted = 1;
 					e->restore_in = SUBST_RESTORE_MS /
 							WORKER_TICK_MS;
 				}
+				lxgr_unlock();
 			}
 		}
 	}
 
 	/* fixed-Hz hooks */
 	for (i = 0; i < MAX_HOOKS; i++) {
+		int pid, dir;
+		unsigned long addr, size, value, period;
+
+		lxgr_lock();
 		h = &hook_table[i];
-		if (!h->active)
-			continue;
-		if (h->next_tick > 0) {
-			h->next_tick--;
+		if (!READ_ONCE(h->active)) {
+			lxgr_unlock();
 			continue;
 		}
-		if (h->dir == 'W')
-			(void)rw_write_direct(h->pid, h->addr, h->size,
-					      h->value);
+		pid = h->pid;
+		addr = h->addr;
+		size = h->size;
+		value = h->value;
+		period = h->period_ms;
+		dir = h->dir;
+		lxgr_unlock();
+
+		if (READ_ONCE(h->next_tick) > 0) {
+			WRITE_ONCE(h->next_tick, h->next_tick - 1);
+			continue;
+		}
+		if (dir == 'W')
+			(void)rw_write_direct(pid, addr, size, value);
 		else
-			(void)rw_read_custom(h->pid, h->addr, h->size, &tmp);
-		h->next_tick = h->period_ms / WORKER_TICK_MS;
+			(void)rw_read_custom(pid, addr, size, &tmp);
+		WRITE_ONCE(h->next_tick, period / WORKER_TICK_MS);
 	}
 }
 
@@ -410,6 +466,12 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 	struct perf_event *__percpu *ev;
 
 	if (unwatch) {
+		int upid;
+		unsigned long uaddr, usize, uorig;
+		int need_restore = 0;
+
+		if (READ_ONCE(g_exiting))
+			return -ESHUTDOWN;
 		if (!g_unreg_wide)
 			return -EINVAL;
 		lxgr_lock();
@@ -417,15 +479,25 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 			e = &watch_table[i];
 			if (READ_ONCE(e->active) && e->addr == addr &&
 			    e->pid == pid) {
-				e->active = 0;
-				e->reserved = 0;
+				/* snapshot any live substitution so the target
+				 * memory goes back to orig after we detach */
+				upid = e->pid;
+				uaddr = e->addr;
+				usize = e->size;
+				uorig = e->orig;
+				need_restore = e->substituted;
+				WRITE_ONCE(e->active, 0);
+				WRITE_ONCE(e->reserved, 0);
 				WRITE_ONCE(e->fired, 0);
-				e->substituted = 0;
+				WRITE_ONCE(e->substituted, 0);
 				ev = e->ev;
-				e->ev = NULL;
+				WRITE_ONCE(e->ev, NULL);
 				lxgr_unlock();
 				if (ev)
 					((unreg_wide_fn)g_unreg_wide)(ev);
+				if (need_restore)
+					(void)rw_write_direct(upid, uaddr,
+							      usize, uorig);
 				return 0;
 			}
 		}
@@ -435,24 +507,27 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 
 	if (!lxgr_ptrs_ok() || !g_reg_wide || !g_unreg_wide)
 		return -EINVAL;
+	if (READ_ONCE(g_exiting))
+		return -ESHUTDOWN;
 	rc = lxgr_ensure_worker();
 	if (rc)
 		return rc;
 
 	lxgr_lock();
 	/* reject duplicate pid+addr: two armed events would each restore
-	 * their own stale orig and corrupt the memory */
+	 * their own stale orig and corrupt the memory (check reserved too,
+	 * since an in-flight arm already owns the slot) */
 	for (i = 0; i < MAX_WATCH; i++) {
 		e = &watch_table[i];
-		if (READ_ONCE(e->active) && e->addr == addr &&
-		    e->pid == pid) {
+		if ((READ_ONCE(e->active) || READ_ONCE(e->reserved)) &&
+		    e->addr == addr && e->pid == pid) {
 			lxgr_unlock();
 			return -EEXIST;
 		}
 	}
 	for (i = 0; i < MAX_WATCH; i++) {
 		if (!READ_ONCE(watch_table[i].active) &&
-		    !watch_table[i].reserved) {
+		    !READ_ONCE(watch_table[i].reserved)) {
 			free = i;
 			break;
 		}
@@ -485,24 +560,24 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 	e->value = value;
 	e->orig = 0;
 	WRITE_ONCE(e->fired, 0);
-	e->substituted = 0;
+	WRITE_ONCE(e->substituted, 0);
 	e->restore_in = 0;
-	e->reserved = 1;
+	WRITE_ONCE(e->reserved, 1);
 	lxgr_unlock();
 
 	ev = ((reg_wide_fn)g_reg_wide)(&attr, watch_handler, NULL);
 	if (IS_ERR(ev)) {
 		rc = (long)PTR_ERR(ev);
 		lxgr_lock();
-		e->reserved = 0;
+		WRITE_ONCE(e->reserved, 0);
 		lxgr_unlock();
 		return rc;
 	}
 
 	lxgr_lock();
-	e->ev = ev;
-	e->reserved = 0;
-	e->active = 1;
+	WRITE_ONCE(e->ev, ev);
+	WRITE_ONCE(e->reserved, 0);
+	WRITE_ONCE(e->active, 1);
 	lxgr_unlock();
 	return 0;
 }
@@ -518,11 +593,13 @@ static long rw_hook(int pid, unsigned long addr, unsigned long size,
 	long rc;
 
 	if (stop) {
+		if (READ_ONCE(g_exiting))
+			return -ESHUTDOWN;
 		lxgr_lock();
 		for (i = 0; i < MAX_HOOKS; i++) {
 			h = &hook_table[i];
 			if (h->active && h->pid == pid && h->addr == addr) {
-				h->active = 0;
+				WRITE_ONCE(h->active, 0);
 				lxgr_unlock();
 				return 0;
 			}
@@ -533,6 +610,8 @@ static long rw_hook(int pid, unsigned long addr, unsigned long size,
 
 	if (!lxgr_ptrs_ok())
 		return -EINVAL;
+	if (READ_ONCE(g_exiting))
+		return -ESHUTDOWN;
 	if (period_ms == 0)
 		period_ms = 100;
 	if (period_ms > 60000)
@@ -545,7 +624,7 @@ static long rw_hook(int pid, unsigned long addr, unsigned long size,
 
 	lxgr_lock();
 	for (i = 0; i < MAX_HOOKS; i++) {
-		if (!hook_table[i].active) {
+		if (!READ_ONCE(hook_table[i].active)) {
 			free = i;
 			break;
 		}
@@ -563,7 +642,7 @@ static long rw_hook(int pid, unsigned long addr, unsigned long size,
 	h->period_ms = period_ms;
 	h->dir = (int)dir;
 	h->next_tick = 0;
-	h->active = 1;
+	WRITE_ONCE(h->active, 1);
 	lxgr_unlock();
 	return 0;
 }
@@ -572,16 +651,22 @@ static void rw_teardown(void)
 {
 	int i;
 	struct watch_entry *e;
+	struct task_struct *worker;
 	struct perf_event *__percpu *evs[MAX_WATCH];
 
 	WRITE_ONCE(g_exiting, 1);
 
 	/* stop the worker FIRST: kthread_stop joins it, so after this returns
 	 * no code can be touching watch_table/hook_table (worker_tick bails on
-	 * g_exiting and kthread_stop wakes it out of msleep). */
-	if (g_worker && g_kthread_stop)
-		((kthread_stop_fn)g_kthread_stop)(g_worker);
+	 * g_exiting and kthread_stop wakes it out of msleep). Read g_worker
+	 * under the lock so we cannot miss a worker whose g_worker store (in
+	 * lxgr_ensure_worker) is still in flight. */
+	lxgr_lock();
+	worker = g_worker;
 	g_worker = NULL;
+	lxgr_unlock();
+	if (worker && g_kthread_stop)
+		((kthread_stop_fn)g_kthread_stop)(worker);
 
 	/* restore any live substitutions so target memory returns to orig */
 	for (i = 0; i < MAX_WATCH; i++) {
@@ -595,14 +680,14 @@ static void rw_teardown(void)
 	for (i = 0; i < MAX_WATCH; i++) {
 		e = &watch_table[i];
 		evs[i] = e->ev;
-		e->active = 0;
-		e->reserved = 0;
+		WRITE_ONCE(e->active, 0);
+		WRITE_ONCE(e->reserved, 0);
 		WRITE_ONCE(e->fired, 0);
-		e->substituted = 0;
-		e->ev = NULL;
+		WRITE_ONCE(e->substituted, 0);
+		WRITE_ONCE(e->ev, NULL);
 	}
 	for (i = 0; i < MAX_HOOKS; i++)
-		hook_table[i].active = 0;
+		WRITE_ONCE(hook_table[i].active, 0);
 	lxgr_unlock();
 
 	/* unregister perf events outside the lock (may sleep) */
