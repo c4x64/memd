@@ -34,13 +34,16 @@ jobs:
           make ARCH=$ARCH defconfig
           scripts/config --disable LOCALVERSION_AUTO
           scripts/config --set-str LOCALVERSION "-v5.21.770-optimizations-5.21.771.4051"
+          scripts/config --enable MODULES
+          scripts/config --enable MODULE_UNLOAD
+          scripts/config --enable MODVERSIONS
+          scripts/config --enable SMP
+          scripts/config --enable PREEMPT
           make ARCH=$ARCH olddefconfig
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
 
       - name: Build kmod
         run: |
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
-            KDIR=$PWD/linux-$KVER M=$PWD/kmod modules
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
             KDIR=$PWD/linux-$KVER M=$PWD/kmod modules
 
