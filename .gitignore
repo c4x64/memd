@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0
+# Kernel sources/config are fetched by the workflow and .gitignored.
+# Only the module source + build config live in the repo.
+
+kernel/
+linux-5.15.137/
+*.tar.xz
+*.ko
+*.mod
+*.o
+*.cmd
+Module.symvers
+modules.order
