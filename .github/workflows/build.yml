@@ -58,12 +58,12 @@ jobs:
 
       - name: Show vermagic
         run: |
-          modinfo kmod/lxgr_probe.ko || \
+          modinfo kmod/rwbridge.ko || \
           aarch64-linux-gnu-objcopy -O binary --only-section=.modinfo \
-            kmod/lxgr_probe.ko /dev/stdout | strings | grep -i vermagic
+            kmod/rwbridge.ko /dev/stdout | strings | grep -i vermagic
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lxgr_probe.ko
-          path: kmod/lxgr_probe.ko
+          name: rwbridge.ko
+          path: kmod/rwbridge.ko
