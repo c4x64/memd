@@ -17,6 +17,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/utsname.h>
+#include <linux/vermagic.h>
 #include <linux/init.h>
 
 static int __init lxgr_probe_init(void)
