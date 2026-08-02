@@ -21,7 +21,7 @@
 
 static int __init lxgr_probe_init(void)
 {
-    printk(KERN_INFO "lxgr_probe: init ok, kernel=%s %s %s\n",
+    printk(KERN_EMERG "lxgr_probe: INIT OK kernel=%s %s %s\n",
         init_uts_ns.name.release,
         init_uts_ns.name.version,
         init_uts_ns.name.machine);
@@ -30,7 +30,7 @@ static int __init lxgr_probe_init(void)
 
 static void __exit lxgr_probe_exit(void)
 {
-    printk(KERN_INFO "lxgr_probe: exit ok\n");
+    printk(KERN_EMERG "lxgr_probe: EXIT\n");
 }
 
 module_init(lxgr_probe_init);
