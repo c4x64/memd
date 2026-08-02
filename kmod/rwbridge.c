@@ -233,21 +233,39 @@ static struct hook_entry hook_table[MAX_HOOKS];
 static struct task_struct *g_worker;
 static int g_exiting;
 
-/* Self-contained spinlock: inline __sync/__atomic GCC builtins only, so no
- * kernel symbol is imported (modpost would otherwise demand _raw_spin_lock).
- * -fno-builtin does not affect the sync/atomic builtin families.
+/* Self-contained spinlock: inline LL/SC asm only, so no kernel symbol or
+ * libgcc outline-atomic helper (__aarch64_cas4_sync etc.) is imported.
+ * ldaxr/stlxr/stlr are ARMv8.0 base instructions.
  */
 static int g_lock;
 
+static int lxgr_cas(int *ptr, int old, int new)
+{
+	int val;
+	unsigned long status;
+
+	asm volatile(
+		"1:	ldaxr	%w0, [%2]\n"
+		"	cmp	%w0, %w3\n"
+		"	b.ne	2f\n"
+		"	stlxr	%w1, %w4, [%2]\n"
+		"	cbnz	%w1, 1b\n"
+		"2:"
+		: "=&r" (val), "=&r" (status)
+		: "r" (ptr), "r" (old), "r" (new)
+		: "cc", "memory");
+	return val;
+}
+
 static void lxgr_lock(void)
 {
-	while (__sync_val_compare_and_swap(&g_lock, 0, 1) != 0)
+	while (lxgr_cas(&g_lock, 0, 1) != 0)
 		cpu_relax();
 }
 
 static void lxgr_unlock(void)
 {
-	__atomic_store_n(&g_lock, 0, __ATOMIC_RELEASE);
+	asm volatile("stlr	wzr, [%0]" : : "r" (&g_lock) : "memory");
 }
 
 /* atomic perf overflow handler: only flags the matching watchpoint */
