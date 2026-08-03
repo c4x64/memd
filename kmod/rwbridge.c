@@ -30,6 +30,8 @@
 
 /* ================= self-contained libc-free helpers ================= */
 
+#define RW_MAX_SIZE 256    /* max bytes per R op (out exposes 2*size hex chars) */
+
 static size_t lxgr_strlen(const char *s)
 {
 	size_t n = 0;
@@ -103,11 +105,10 @@ static int lxgr_ptrs_ok(void)
 /* ================= READ ============================================== */
 
 static long rw_read_custom(int pid, unsigned long addr, unsigned long size,
-			   unsigned long *value)
+			   void *buf)
 {
 	struct task_struct *task;
 	struct mm_struct *mm;
-	unsigned long tmp = 0;
 	long rc;
 
 	if (!lxgr_ptrs_ok())
@@ -120,12 +121,11 @@ static long rw_read_custom(int pid, unsigned long addr, unsigned long size,
 	if (!mm)
 		return -EACCES;
 
-	rc = ((access_remote_vm_fn)g_access_remote_vm)(mm, addr, &tmp, size, 0);
+	rc = ((access_remote_vm_fn)g_access_remote_vm)(mm, addr, buf, size, 0);
 	((mmput_fn)g_mmput)(mm);
 	if (rc != (long)size)
 		return -EFAULT;
 
-	*value = tmp;
 	return 0;
 }
 
@@ -158,7 +158,8 @@ static long rw_write_direct(int pid, unsigned long addr, unsigned long size,
 
 /* ================= param set: guaranteed entry point ================== */
 
-static char rw_out[64] = "idle";
+static unsigned char rw_buf[RW_MAX_SIZE];
+static long rw_last_size = 0;    /* bytes produced by the last R op */
 static long rw_status = 0;
 static char rw_stage[16] = "idle";
 
@@ -190,7 +191,6 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 	int pid;
 	unsigned long addr, size, value;
 	long r;
-	unsigned long readout = 0;
 
 	(void)kp;
 	while (*p == ' ')
@@ -230,19 +230,22 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 		goto bad;
 	if (addr == 0 || addr >= 0x0000800000000000UL)
 		goto bad;
-	if (size != 1 && size != 2 && size != 4 && size != 8)
+	if (size < 1 || size > RW_MAX_SIZE)
 		goto bad;
+	if (op == 'W' && size != 1 && size != 2 && size != 4 && size != 8)
+		goto bad;              /* writes stay single small values */
 	if (addr + size < addr) /* wraparound */
 		goto bad;
 	goto ok;
 bad:
 	rw_status = -EINVAL;
+	rw_last_size = 0;
 	return 0;
 ok:
 	switch (op) {
 	case 'R':
 		STAGE("read");
-		r = rw_read_custom(pid, addr, size, &readout);
+		r = rw_read_custom(pid, addr, size, rw_buf);
 		break;
 	case 'W':
 		STAGE("write");
@@ -254,26 +257,14 @@ ok:
 	}
 
 	if (r == 0 && op == 'R') {
-		int i;
-		char tmp[17];
-		unsigned long v = readout;
-		static const char hx[] = "0123456789abcdef";
-		for (i = 15; i >= 0; i--) {
-			tmp[i] = hx[v & 0xf];
-			v >>= 4;
-		}
-		tmp[16] = 0;
-		lxgr_memcpy(rw_out, tmp, 17);
+		rw_last_size = (long)size;
 		rw_status = 0;
 	} else if (r == 0) {
-		lxgr_memcpy(rw_out, "ok", 3);
+		rw_last_size = 0;
 		rw_status = 0;
 	} else {
 		rw_status = r;
-		rw_out[0] = 'e';
-		rw_out[1] = 'r';
-		rw_out[2] = 'r';
-		rw_out[3] = 0;
+		rw_last_size = 0;
 	}
 	return 0;
 }
@@ -285,10 +276,21 @@ module_param_cb(rw, &rw_param_ops, NULL, 0200);
 
 static int rw_out_get(char *buf, const struct kernel_param *kp)
 {
-	size_t n = lxgr_strlen(rw_out);
-	lxgr_memcpy(buf, rw_out, n);
+	int i, n = 0;
+	long s = rw_last_size;
+	static const char hx[] = "0123456789abcdef";
+
+	(void)kp;
+	if (s <= 0)
+		return 0;
+	if (s > RW_MAX_SIZE)
+		s = RW_MAX_SIZE;
+	for (i = 0; i < s; i++) {
+		buf[n++] = hx[(rw_buf[i] >> 4) & 0xf];
+		buf[n++] = hx[rw_buf[i] & 0xf];
+	}
 	buf[n] = '\0';
-	return (int)n;
+	return n;
 }
 static const struct kernel_param_ops rw_out_ops = {
 	.get = rw_out_get,

@@ -8,6 +8,10 @@
 # find_task_by_vpid, get_task_mm, mmput. All are EXPORT_SYMBOL_GPL
 # fundamentals the kernel itself needs, so no vendor kernel can remove them.
 
+# Symbol addresses are zeroed unless kptr_restrict=0 (default is 2 on this
+# emulator), so force it open first or every module op returns -EINVAL.
+echo 0 > /proc/sys/kernel/kptr_restrict 2>/dev/null
+
 K=/proc/kallsyms
 KO=/data/local/tmp/rwbridge.ko
 
