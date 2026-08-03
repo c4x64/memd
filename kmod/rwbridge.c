@@ -36,6 +36,22 @@
  * serializes, but the module must not rely on that to stay correct. */
 static DEFINE_MUTEX(rw_mtx);
 
+/* Diagnostics: the emulator kernel corrupts the caller's preempt/irq state
+ * during access_remote_vm (reads then all fail with -EAGAIN from the guard,
+ * and the OS eventually dies). Log the exact values at first detection. */
+static int rw_dbg_logged;
+static void rw_dbg_state(const char *tag, unsigned long addr, unsigned long size)
+{
+	if (rw_dbg_logged)
+		return;
+	if (!(in_atomic() || irqs_disabled()))
+		return;
+	rw_dbg_logged = 1;
+	printk(KERN_ERR "rwbridge: %s pid=%d addr=%lx size=%lu preempt=%d "
+	       "in_atomic=%d irqs=%d\n", tag, (int)current->pid, addr, size,
+	       preempt_count(), in_atomic(), irqs_disabled());
+}
+
 /* ================= self-contained libc-free helpers ================= */
 
 #define RW_MAX_SIZE 256    /* max bytes per R op (out exposes 2*size hex chars) */
@@ -121,8 +137,10 @@ static long rw_read_custom(int pid, unsigned long addr, unsigned long size,
 
 	if (!lxgr_ptrs_ok())
 		return -EINVAL;
-	if (in_atomic() || irqs_disabled())
+	if (in_atomic() || irqs_disabled()) {
+		rw_dbg_state("guard-read", addr, size);
 		return -EAGAIN;   /* access_remote_vm may sleep: never from atomic */
+	}
 
 	task = ((find_task_by_vpid_fn)g_find_task_by_vpid)(pid);
 	if (!task)
@@ -134,6 +152,7 @@ static long rw_read_custom(int pid, unsigned long addr, unsigned long size,
 		return -EACCES;
 
 	rc = ((access_remote_vm_fn)g_access_remote_vm)(mm, addr, buf, size, 0);
+	rw_dbg_state("after-read", addr, size);
 	((mmput_fn)g_mmput)(mm);
 	if (rc != (long)size)
 		return -EFAULT;
@@ -152,8 +171,10 @@ static long rw_write_direct(int pid, unsigned long addr, unsigned long size,
 
 	if (!lxgr_ptrs_ok())
 		return -EINVAL;
-	if (in_atomic() || irqs_disabled())
+	if (in_atomic() || irqs_disabled()) {
+		rw_dbg_state("guard-write", addr, size);
 		return -EAGAIN;   /* access_remote_vm may sleep: never from atomic */
+	}
 
 	task = ((find_task_by_vpid_fn)g_find_task_by_vpid)(pid);
 	if (!task)
@@ -166,6 +187,7 @@ static long rw_write_direct(int pid, unsigned long addr, unsigned long size,
 
 	rc = ((access_remote_vm_fn)g_access_remote_vm)(mm, addr, &value, size,
 						       FOLL_WRITE);
+	rw_dbg_state("after-write", addr, size);
 	((mmput_fn)g_mmput)(mm);
 	if (rc != (long)size)
 		return -EFAULT;
