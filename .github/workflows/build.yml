@@ -76,7 +76,7 @@ jobs:
             # emulator (its config differs from stock, so a vmlinux build here
             # would produce CRCs the device rejects).
             # Format (v5.15 modpost read_dump): 0x<crc>\t<sym>\t<module>\t<export>\t<namespace>
-            printf '0x93375eb6\tmodule_layout\tvmlinux\tEXPORT_SYMBOL\t\n0x92997ed8\t_printk\tvmlinux\tEXPORT_SYMBOL\t\n0xc5383799\tparam_ops_int\tvmlinux\tEXPORT_SYMBOL\t\n0xdcb764ad\tmemset\tvmlinux\tEXPORT_SYMBOL\t\n' > Module.symvers
+            printf '0x93375eb6\tmodule_layout\tvmlinux\tEXPORT_SYMBOL\t\n0x92997ed8\t_printk\tvmlinux\tEXPORT_SYMBOL\t\n0xc5383799\tparam_ops_int\tvmlinux\tEXPORT_SYMBOL\t\n0xdcb764ad\tmemset\tvmlinux\tEXPORT_SYMBOL\t\n0xd5977bfb\tmutex_lock\tvmlinux\tEXPORT_SYMBOL\t\n0xed55cabd\tmutex_unlock\tvmlinux\tEXPORT_SYMBOL\t\n' > Module.symvers
             make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
           else
             # Stock kernel: build vmlinux so modpost emits Module.symvers with
