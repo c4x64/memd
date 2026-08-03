@@ -26,45 +26,38 @@
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/sched.h>
 #include <linux/mutex.h>
-#include <linux/hardirq.h>
 
-/* Serialize every command. The module is a single-slot sysfs interface; two
+/*
+ * Serialize every command. The module is a single-slot sysfs interface; two
  * concurrent users (e.g. a stale overlay + the live one) would otherwise
  * interleave rw_buf/rw_status writes and return torn reads. The overlay also
- * serializes, but the module must not rely on that to stay correct. */
+ * serializes, but the module must not rely on that to stay correct.
+ *
+ * LAYOUT-INDEPENDENCE: this module never dereferences task_struct /
+ * thread_info fields and never reads current->pid / comm / preempt_count.
+ * Struct offsets (e.g. TSK_TI_PREEMPT, task->flags) differ between kernels and
+ * are NOT fixed here — the vendor kernel compiles with CONFIG_ARM64_SW_TTBR0_PAN
+ * (preempt_count lives at offset 16, not 8), so any such access would read
+ * garbage (it previously read the ttbr0 page-table base as "preempt_count",
+ * making the atomic-guard fire on every op and block all reads with -EAGAIN).
+ * The only entry point is the sysfs `rw` set callback, which always runs in
+ * process context with preemption enabled, so access_remote_vm() (which may
+ * sleep) is always legal here. The process-lifetime safety net is the
+ * mm == NULL check after get_task_mm(), which is layout-independent.
+ */
 static DEFINE_MUTEX(rw_mtx);
 
-/* Diagnostics: the emulator kernel corrupts the caller's preempt/irq state
- * during access_remote_vm (reads then all fail with -EAGAIN from the guard,
- * and the OS eventually dies). Log the exact values at first detection. */
-static int rw_dbg_logged;
-static void rw_dbg_state(const char *tag, unsigned long addr, unsigned long size)
-{
-	if (rw_dbg_logged)
-		return;
-	rw_dbg_logged = 1;
-	printk(KERN_ERR "rwbridge: %s pid=%d tgid=%d comm=%s addr=%lx size=%lu "
-	       "preempt=%llu in_atomic=%d irqs=%d hw=%d sw=%d intr=%d\n",
-	       tag, (int)current->pid, (int)current->tgid, current->comm,
-	       addr, size, (unsigned long long)preempt_count(),
-	       in_atomic(), irqs_disabled(), in_hardirq(), in_softirq(),
-	       in_interrupt());
-}
-/* Dump full context on every -EAGAIN, rate-limited to first 3, so we see
- * whether the corruption is present at entry or appears after access_remote_vm. */
+/* Diagnostics: log the op + pid + addr, never current->* fields. */
 static int rw_dbg_n;
-static void rw_dbg_ctx(const char *tag, unsigned long addr)
+static void rw_dbg(const char *tag, int pid, unsigned long addr,
+		   unsigned long size)
 {
 	if (rw_dbg_n >= 3)
 		return;
 	rw_dbg_n++;
-	printk(KERN_ERR "rwbridge: %s pid=%d comm=%s addr=%lx preempt=%llu "
-	       "in_atomic=%d irqs=%d hw=%d sw=%d intr=%d\n",
-	       tag, (int)current->pid, current->comm, addr,
-	       (unsigned long long)preempt_count(), in_atomic(),
-	       irqs_disabled(), in_hardirq(), in_softirq(), in_interrupt());
+	printk(KERN_ERR "rwbridge: %s pid=%d addr=%lx size=%lu\n",
+	       tag, pid, addr, size);
 }
 
 /* ================= self-contained libc-free helpers ================= */
@@ -152,23 +145,16 @@ static long rw_read_custom(int pid, unsigned long addr, unsigned long size,
 
 	if (!lxgr_ptrs_ok())
 		return -EINVAL;
-	rw_dbg_ctx("entry-read", addr);
-	if (in_atomic() || irqs_disabled()) {
-		rw_dbg_state("guard-read", addr, size);
-		return -EAGAIN;   /* access_remote_vm may sleep: never from atomic */
-	}
+	rw_dbg("entry-read", pid, addr, size);
 
 	task = ((find_task_by_vpid_fn)g_find_task_by_vpid)(pid);
 	if (!task)
 		return -ESRCH;
-	if (task->flags & PF_EXITING)
-		return -ESRCH;    /* dying task: never touch its mm */
 	mm = ((get_task_mm_fn)g_get_task_mm)(task);
 	if (!mm)
-		return -EACCES;
+		return -ESRCH;    /* dying task / kernel thread: no user mm */
 
 	rc = ((access_remote_vm_fn)g_access_remote_vm)(mm, addr, buf, size, 0);
-	rw_dbg_state("after-read", addr, size);
 	((mmput_fn)g_mmput)(mm);
 	if (rc != (long)size)
 		return -EFAULT;
@@ -187,23 +173,17 @@ static long rw_write_direct(int pid, unsigned long addr, unsigned long size,
 
 	if (!lxgr_ptrs_ok())
 		return -EINVAL;
-	if (in_atomic() || irqs_disabled()) {
-		rw_dbg_state("guard-write", addr, size);
-		return -EAGAIN;   /* access_remote_vm may sleep: never from atomic */
-	}
+	rw_dbg("entry-write", pid, addr, size);
 
 	task = ((find_task_by_vpid_fn)g_find_task_by_vpid)(pid);
 	if (!task)
 		return -ESRCH;
-	if (task->flags & PF_EXITING)
-		return -ESRCH;    /* dying task: never touch its mm */
 	mm = ((get_task_mm_fn)g_get_task_mm)(task);
 	if (!mm)
-		return -EACCES;
+		return -ESRCH;    /* dying task / kernel thread: no user mm */
 
 	rc = ((access_remote_vm_fn)g_access_remote_vm)(mm, addr, &value, size,
 						       FOLL_WRITE);
-	rw_dbg_state("after-write", addr, size);
 	((mmput_fn)g_mmput)(mm);
 	if (rc != (long)size)
 		return -EFAULT;
@@ -247,7 +227,6 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 	long r;
 
 	(void)kp;
-	rw_dbg_ctx("set-entry", 0);
 	mutex_lock(&rw_mtx);
 	while (*p == ' ')
 		p++;
