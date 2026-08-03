@@ -116,8 +116,8 @@ typedef void (*release_event_fn)(struct perf_event *event);
 typedef void (*perf_event_enable_fn)(struct perf_event *event);
 typedef int (*arch_install_bp_fn)(struct perf_event *event);
 typedef void (*arch_uninstall_bp_fn)(struct perf_event *event);
-typedef void (*smp_call_many_fn)(const struct cpumask *mask,
-				 void (*func)(void *info), void *info, bool wait);
+typedef void (*smp_call_single_fn)(int cpu, void (*func)(void *info),
+				   void *info, int wait);
 typedef struct task_struct *(*kthread_create_fn)(int (*threadfn)(void *),
 						 void *data, int node,
 						 const char *namefmt, ...);
@@ -301,30 +301,22 @@ static void rw_uninstall_now(void *data)
 
 static void arm_on_each_cpu(struct perf_event *ev)
 {
-	cpumask_t mask;
-	int i;
+	int cpu;
 
 	if (!g_smp_call_many)
 		return;
-	cpumask_clear(&mask);
-	/* mark every possible CPU; smp_call_function_many() internally filters
-	 * to online CPUs so we never touch unresolved cpu_online_mask/nr_cpu_ids */
-	for (i = 0; i < NR_CPUS; i++)
-		cpumask_set_cpu(i, &mask);
-	((smp_call_many_fn)g_smp_call_many)(&mask, rw_install_now, ev, true);
+	for (cpu = 0; cpu < NR_CPUS; cpu++)
+		((smp_call_single_fn)g_smp_call_many)(cpu, rw_install_now, ev, 1);
 }
 
 static void unarm_on_each_cpu(struct perf_event *ev)
 {
-	cpumask_t mask;
-	int i;
+	int cpu;
 
 	if (!g_smp_call_many)
 		return;
-	cpumask_clear(&mask);
-	for (i = 0; i < NR_CPUS; i++)
-		cpumask_set_cpu(i, &mask);
-	((smp_call_many_fn)g_smp_call_many)(&mask, rw_uninstall_now, ev, true);
+	for (cpu = 0; cpu < NR_CPUS; cpu++)
+		((smp_call_single_fn)g_smp_call_many)(cpu, rw_uninstall_now, ev, 1);
 }
 
 /* read a 32-bit value from a USER address without the get_user()/copy_from_
@@ -1158,7 +1150,7 @@ DEF_HEX_PARAM(perf_event_release_kernel, g_release_event);
 DEF_HEX_PARAM(perf_event_enable, g_perf_enable);
 DEF_HEX_PARAM(arch_install_hw_breakpoint, g_arch_install);
 DEF_HEX_PARAM(arch_uninstall_hw_breakpoint, g_arch_uninstall);
-DEF_HEX_PARAM(smp_call_function_many, g_smp_call_many);
+DEF_HEX_PARAM(smp_call_function_single, g_smp_call_many);
 DEF_HEX_PARAM(kthread_create_on_node, g_kthread_create);
 DEF_HEX_PARAM(wake_up_process, g_wake_up_process);
 DEF_HEX_PARAM(kthread_should_stop, g_kthread_should_stop);
