@@ -116,8 +116,8 @@ typedef void (*release_event_fn)(struct perf_event *event);
 typedef void (*perf_event_enable_fn)(struct perf_event *event);
 typedef int (*arch_install_bp_fn)(struct perf_event *event);
 typedef void (*arch_uninstall_bp_fn)(struct perf_event *event);
-typedef void (*smp_call_fn)(int cpu, void (*func)(void *info), void *info,
-			    int wait);
+typedef void (*smp_call_many_fn)(const struct cpumask *mask,
+				 void (*func)(void *info), void *info, bool wait);
 typedef struct task_struct *(*kthread_create_fn)(int (*threadfn)(void *),
 						 void *data, int node,
 						 const char *namefmt, ...);
@@ -135,7 +135,7 @@ static unsigned long g_release_event;
 static unsigned long g_perf_enable;
 static unsigned long g_arch_install;
 static unsigned long g_arch_uninstall;
-static unsigned long g_smp_call;
+static unsigned long g_smp_call_many;
 static unsigned long g_kthread_create;
 static unsigned long g_wake_up_process;
 static unsigned long g_kthread_should_stop;
@@ -301,16 +301,30 @@ static void rw_uninstall_now(void *data)
 
 static void arm_on_each_cpu(struct perf_event *ev)
 {
-	int cpu;
-	for_each_online_cpu(cpu)
-		((smp_call_fn)g_smp_call)(cpu, rw_install_now, ev, 1);
+	cpumask_t mask;
+	int i;
+
+	if (!g_smp_call_many)
+		return;
+	cpumask_clear(&mask);
+	/* mark every possible CPU; smp_call_function_many() internally filters
+	 * to online CPUs so we never touch unresolved cpu_online_mask/nr_cpu_ids */
+	for (i = 0; i < NR_CPUS; i++)
+		cpumask_set_cpu(i, &mask);
+	((smp_call_many_fn)g_smp_call_many)(&mask, rw_install_now, ev, true);
 }
 
 static void unarm_on_each_cpu(struct perf_event *ev)
 {
-	int cpu;
-	for_each_online_cpu(cpu)
-		((smp_call_fn)g_smp_call)(cpu, rw_uninstall_now, ev, 1);
+	cpumask_t mask;
+	int i;
+
+	if (!g_smp_call_many)
+		return;
+	cpumask_clear(&mask);
+	for (i = 0; i < NR_CPUS; i++)
+		cpumask_set_cpu(i, &mask);
+	((smp_call_many_fn)g_smp_call_many)(&mask, rw_uninstall_now, ev, true);
 }
 
 /* atomic perf overflow handler: ZERO-WRITE skip + register injection.
@@ -327,7 +341,7 @@ static void watch_handler(struct perf_event *event,
 {
 	int i;
 	struct watch_entry *e;
-	unsigned long addr, base, eff, val;
+unsigned long addr, base, val;
 	unsigned int rt, rn;
 	u32 instr;
 
@@ -352,9 +366,10 @@ static void watch_handler(struct perf_event *event,
 		return;
 	WRITE_ONCE(g_matched, g_matched + 1);
 
-	/* fetch the faulting instruction (user VA, present in mapped text) */
+	/* fetch the faulting instruction (user VA, already in mapped text so
+	 * this present-page read does not page-fault) */
 	instr = 0;
-	if (copy_from_user(&instr, (const void __user *)regs->pc, 4))
+	if (get_user(instr, (u32 __user *)regs->pc))
 		goto detached;
 
 	/* 64-bit: LDR x, [x#n, #imm]   opcode bits[31:24] == 0xF9
@@ -366,7 +381,7 @@ static void watch_handler(struct perf_event *event,
 		if (rn > 30)
 			goto detached;
 		base = (unsigned long)regs->regs[rn];
-		base += (unsigned long)((instr >> 10) & 0xfff) << 3;
+		base += ((unsigned long)((instr >> 10) & 0xfff)) << 3;
 		if (base != addr)
 			goto detached; /* read a different place: let it run */
 		val = READ_ONCE(e->value);
@@ -381,7 +396,7 @@ static void watch_handler(struct perf_event *event,
 		if (rn > 30)
 			goto detached;
 		base = (unsigned long)regs->regs[rn];
-		base = base + (unsigned long)((instr >> 10) & 0xfff) << 2;
+		base += ((unsigned long)((instr >> 10) & 0xfff)) << 2;
 		if (base != addr)
 			goto detached;
 		val = (unsigned long)(u32)READ_ONCE(e->value);
@@ -728,7 +743,7 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 	 * scheduling entirely. The overflow handler is still reached through
 	 * perf_bp_event() (we set attr.sample_period below so the event is a
 	 * "sampling event"). */
-	if (!g_arch_install || !g_arch_uninstall || !g_smp_call) {
+	if (!g_arch_install || !g_arch_uninstall || !g_smp_call_many) {
 		lxgr_lock();
 		WRITE_ONCE(e->reserved, 0);
 		lxgr_unlock();
@@ -738,7 +753,7 @@ static long rw_watch(int pid, unsigned long addr, unsigned long size,
 
 	{
 		struct perf_event *__ev = ev;
-		pr_info("rwbridge: armed pid=%d addr=0x%lx len=%d ev=%px state=%d cpu=%d hw_state=%d\n",
+		pr_info("rwbridge: armed pid=%d addr=0x%lx len=%lu ev=%px state=%d cpu=%d hw_state=%d\n",
 			pid, addr, size, (void *)__ev, __ev->state,
 			__ev->cpu, __ev->hw.state);
 	}
@@ -1133,7 +1148,7 @@ DEF_HEX_PARAM(perf_event_release_kernel, g_release_event);
 DEF_HEX_PARAM(perf_event_enable, g_perf_enable);
 DEF_HEX_PARAM(arch_install_hw_breakpoint, g_arch_install);
 DEF_HEX_PARAM(arch_uninstall_hw_breakpoint, g_arch_uninstall);
-DEF_HEX_PARAM(smp_call_function_single, g_smp_call);
+DEF_HEX_PARAM(smp_call_function_many, g_smp_call_many);
 DEF_HEX_PARAM(kthread_create_on_node, g_kthread_create);
 DEF_HEX_PARAM(wake_up_process, g_wake_up_process);
 DEF_HEX_PARAM(kthread_should_stop, g_kthread_should_stop);
