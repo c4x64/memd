@@ -297,25 +297,26 @@ module_param_cb(out, &rw_out_ops, NULL, 0444);
 
 static int rw_status_get(char *buf, const struct kernel_param *kp)
 {
-	int n = 0;
 	long v = rw_status;
 	char tmp[24];
-	int i = 22;
+	int i = 23;
+	int neg = 0;
 
 	if (v < 0) {
+		neg = 1;
 		v = -v;
-		tmp[i--] = '-';
 	}
 	tmp[23] = 0;
 	do {
-		tmp[i--] = '0' + (v % 10);
+		tmp[--i] = '0' + (v % 10);
 		v /= 10;
 	} while (v && i > 0);
-	i++;
-	n = 24 - i;
-	lxgr_memcpy(buf, tmp + i, n);
-	buf[n] = 0;
-	return n;
+	if (neg)
+		tmp[--i] = '-';
+	neg = 24 - i;
+	lxgr_memcpy(buf, tmp + i, neg);
+	buf[neg] = 0;
+	return neg;
 }
 static const struct kernel_param_ops rw_status_ops = {
 	.get = rw_status_get,
