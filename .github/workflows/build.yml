@@ -79,9 +79,12 @@ jobs:
             printf '0x93375eb6\tmodule_layout\tvmlinux\tEXPORT_SYMBOL\t\n0x92997ed8\t_printk\tvmlinux\tEXPORT_SYMBOL\t\n0xc5383799\tparam_ops_int\tvmlinux\tEXPORT_SYMBOL\t\n0xdcb764ad\tmemset\tvmlinux\tEXPORT_SYMBOL\t\n0xd5977bfb\tmutex_lock\tvmlinux\tEXPORT_SYMBOL\t\n0xed55cabd\tmutex_unlock\tvmlinux\tEXPORT_SYMBOL\t\n' > Module.symvers
             make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
           else
-            # Stock kernel: build vmlinux so modpost emits Module.symvers with
-            # the real EXPORT_SYMBOL CRCs for this exact kernel+config.
+            # Stock kernel: build vmlinux so modpost emits the real
+            # EXPORT_SYMBOL CRCs for this exact kernel+config. The vmlinux
+            # modpost writes vmlinux.symvers (5.10) or Module.symvers (5.15+);
+            # normalize to Module.symvers so the kmod's modpost picks it up.
             make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) vmlinux
+            [ ! -f Module.symvers ] && [ -f vmlinux.symvers ] && cp vmlinux.symvers Module.symvers
           fi
           ls -la Module.symvers
           head -5 Module.symvers
