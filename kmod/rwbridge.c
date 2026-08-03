@@ -27,6 +27,10 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/mutex.h>
+#include <linux/fs.h>
+#include <linux/fcntl.h>
+#include <linux/err.h>
+#include <linux/time64.h>
 
 /*
  * Serialize every command. The module is a single-slot sysfs interface; two
@@ -47,18 +51,6 @@
  * mm == NULL check after get_task_mm(), which is layout-independent.
  */
 static DEFINE_MUTEX(rw_mtx);
-
-/* Diagnostics: log the op + pid + addr, never current->* fields. */
-static int rw_dbg_n;
-static void rw_dbg(const char *tag, int pid, unsigned long addr,
-		   unsigned long size)
-{
-	if (rw_dbg_n >= 3)
-		return;
-	rw_dbg_n++;
-	printk(KERN_ERR "rwbridge: %s pid=%d addr=%lx size=%lu\n",
-	       tag, pid, addr, size);
-}
 
 /* ================= self-contained libc-free helpers ================= */
 
@@ -112,8 +104,107 @@ static unsigned long parse_dec(const char *s)
 	return v;
 }
 
-/* ============ runtime-resolved kernel functions (fresh kallsyms) ====== */
+/* ================= file logging ======================================= */
 
+#define RW_LOG_PATH "/data/local/tmp/rwbridge.log"
+
+static struct file *rw_log_file;
+
+static void rw_log_open(void)
+{
+	if (rw_log_file || !g_filp_open || !g_kernel_write)
+		return;
+	rw_log_file = ((filp_open_fn)g_filp_open)(RW_LOG_PATH,
+						   O_WRONLY | O_CREAT | O_APPEND,
+						   0644);
+	if (IS_ERR(rw_log_file))
+		rw_log_file = NULL;
+}
+
+static int fmt_hex(char *d, unsigned long v)
+{
+	char t[16];
+	int n = 0, i;
+
+	do {
+		t[n++] = "0123456789abcdef"[v & 0xf];
+		v >>= 4;
+	} while (v);
+	for (i = 0; i < n; i++)
+		d[i] = t[n - 1 - i];
+	return n;
+}
+
+static int fmt_dec(char *d, long v)
+{
+	char t[16];
+	int n = 0, i, neg = 0;
+
+	if (v < 0) {
+		neg = 1;
+		v = -v;
+	}
+	do {
+		t[n++] = '0' + (v % 10);
+		v /= 10;
+	} while (v);
+	if (neg)
+		t[n++] = '-';
+	for (i = 0; i < n; i++)
+		d[i] = t[n - 1 - i];
+	return n;
+}
+
+/* Append one op record: "<epoch>.<ms> <op> <pid> 0x<addr> <size> => <status>\n".
+ * status -1 marks the entry of an op that is about to run (lets us see the
+ * last op that entered but never returned if the kernel dies mid-read). */
+static void rw_log(const char *op, int pid, unsigned long addr,
+		   unsigned long size, long status)
+{
+	char line[96];
+	char *p = line;
+	int n = 0;
+	struct timespec64 ts;
+	unsigned long ms;
+
+	if (!g_kernel_write || !g_ktime_get_real_ts64)
+		return;
+	((ktime_get_real_ts64_fn)g_ktime_get_real_ts64)(&ts);
+	n += fmt_dec(p + n, (long)ts.tv_sec);
+	p[n++] = '.';
+	ms = (unsigned long)ts.tv_nsec / 1000000UL;
+	if (ms < 10)
+		p[n++] = '0';
+	if (ms < 100)
+		p[n++] = '0';
+	n += fmt_dec(p + n, (long)ms);
+	p[n++] = ' ';
+	p[n++] = op[0];
+	p[n++] = ' ';
+	n += fmt_dec(p + n, pid);
+	p[n++] = ' ';
+	p[n++] = '0';
+	p[n++] = 'x';
+	n += fmt_hex(p + n, addr);
+	p[n++] = ' ';
+	n += fmt_dec(p + n, (long)size);
+	p[n++] = ' ';
+	p[n++] = '=';
+	p[n++] = '>';
+	p[n++] = ' ';
+	n += fmt_dec(p + n, status);
+	p[n++] = '\n';
+
+	rw_log_open();
+	if (!rw_log_file)
+		return;
+	{
+		loff_t pos = 0;
+		((kernel_write_fn)g_kernel_write)(rw_log_file, line, n, &pos);
+	}
+}
+
+/* ============ runtime-resolved kernel functions (fresh kallsyms) ====== */
 typedef struct task_struct *(*find_task_by_vpid_fn)(pid_t nr);
 typedef struct mm_struct *(*get_task_mm_fn)(struct task_struct *task);
 typedef void (*mmput_fn)(struct mm_struct *mm);
@@ -121,10 +212,24 @@ typedef long (*access_remote_vm_fn)(struct mm_struct *mm,
 				    unsigned long addr, void *buf, size_t len,
 				    unsigned int flags);
 
+/* Logging to a file (/data/local/tmp/rwbridge.log) so the op trace survives
+ * a kernel panic/reboot and does not flood dmesg. Same kallsyms-resolve
+ * scheme as the core 4; if any of these is missing the module simply skips
+ * logging and keeps working. */
+typedef struct file *(*filp_open_fn)(const char *path, int flags, umode_t mode);
+typedef ssize_t (*kernel_write_fn)(struct file *file, const void *buf,
+				   size_t count, loff_t *pos);
+typedef int (*filp_close_fn)(struct file *file, void *owner);
+typedef void (*ktime_get_real_ts64_fn)(struct timespec64 *ts);
+
 static unsigned long g_find_task_by_vpid;
 static unsigned long g_get_task_mm;
 static unsigned long g_mmput;
 static unsigned long g_access_remote_vm;
+static unsigned long g_filp_open;
+static unsigned long g_kernel_write;
+static unsigned long g_filp_close;
+static unsigned long g_ktime_get_real_ts64;
 
 #define FOLL_WRITE 0x01
 
@@ -145,7 +250,6 @@ static long rw_read_custom(int pid, unsigned long addr, unsigned long size,
 
 	if (!lxgr_ptrs_ok())
 		return -EINVAL;
-	rw_dbg("entry-read", pid, addr, size);
 
 	task = ((find_task_by_vpid_fn)g_find_task_by_vpid)(pid);
 	if (!task)
@@ -173,7 +277,6 @@ static long rw_write_direct(int pid, unsigned long addr, unsigned long size,
 
 	if (!lxgr_ptrs_ok())
 		return -EINVAL;
-	rw_dbg("entry-write", pid, addr, size);
 
 	task = ((find_task_by_vpid_fn)g_find_task_by_vpid)(pid);
 	if (!task)
@@ -278,6 +381,7 @@ bad:
 	mutex_unlock(&rw_mtx);
 	return 0;
 ok:
+	rw_log(op == 'R' ? "R" : "W", pid, addr, size, -1);
 	switch (op) {
 	case 'R':
 		STAGE("read");
@@ -291,6 +395,7 @@ ok:
 		r = -EINVAL;
 		break;
 	}
+	rw_log(op == 'R' ? "R" : "W", pid, addr, size, r);
 
 	if (r == 0 && op == 'R') {
 		rw_last_size = (long)size;
@@ -403,14 +508,23 @@ DEF_HEX_PARAM(find_task_by_vpid, g_find_task_by_vpid);
 DEF_HEX_PARAM(get_task_mm, g_get_task_mm);
 DEF_HEX_PARAM(mmput, g_mmput);
 DEF_HEX_PARAM(access_remote_vm, g_access_remote_vm);
+DEF_HEX_PARAM(filp_open, g_filp_open);
+DEF_HEX_PARAM(kernel_write, g_kernel_write);
+DEF_HEX_PARAM(filp_close, g_filp_close);
+DEF_HEX_PARAM(ktime_get_real_ts64, g_ktime_get_real_ts64);
 
 static int __init rwbridge_init(void)
 {
+	rw_log_open();
+	rw_log("L", 0, 0, 0, 0);
 	return 0;
 }
 
 static void __exit rwbridge_exit(void)
 {
+	if (rw_log_file && g_filp_close)
+		((filp_close_fn)g_filp_close)(rw_log_file, NULL);
+	rw_log_file = NULL;
 }
 
 module_init(rwbridge_init);
