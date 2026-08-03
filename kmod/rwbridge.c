@@ -327,6 +327,18 @@ static void unarm_on_each_cpu(struct perf_event *ev)
 	((smp_call_many_fn)g_smp_call_many)(&mask, rw_uninstall_now, ev, true);
 }
 
+/* read a 32-bit value from a USER address without the get_user()/copy_from_
+ * user() uaccess wrappers (those drag in arm64 capability+copy symbols that are
+ * not exported here; the module may only link `module_layout`). `ldtr` is the
+ * unprivileged-AT load the kernel's own get_user emits for a plain scalar. */
+static u32 lxgr_user_ldr_u32(const void __user *p)
+{
+	u32 v;
+
+	asm volatile("ldtr %w0, [%1]" : "=r"(v) : "r"(p) : "memory");
+	return v;
+}
+
 /* atomic perf overflow handler: ZERO-WRITE skip + register injection.
  * When the CPU reads the watched offset, the debug watchpoint fires here.
  * We decode the just-executed load at regs->pc; if it reads exactly our offset
@@ -368,9 +380,7 @@ unsigned long addr, base, val;
 
 	/* fetch the faulting instruction (user VA, already in mapped text so
 	 * this present-page read does not page-fault) */
-	instr = 0;
-	if (get_user(instr, (u32 __user *)regs->pc))
-		goto detached;
+	instr = lxgr_user_ldr_u32((const void __user *)regs->pc);
 
 	/* 64-bit: LDR x, [x#n, #imm]   opcode bits[31:24] == 0xF9
 	 * 32-bit: LDR w, [x#n, #imm]   opcode bits[31:24] == 0xB9 */
