@@ -104,6 +104,41 @@ static unsigned long parse_dec(const char *s)
 	return v;
 }
 
+/* ============ runtime-resolved kernel functions (fresh kallsyms) ====== */
+typedef struct task_struct *(*find_task_by_vpid_fn)(pid_t nr);
+typedef struct mm_struct *(*get_task_mm_fn)(struct task_struct *task);
+typedef void (*mmput_fn)(struct mm_struct *mm);
+typedef long (*access_remote_vm_fn)(struct mm_struct *mm,
+				    unsigned long addr, void *buf, size_t len,
+				    unsigned int flags);
+
+/* Logging to a file (/data/local/tmp/rwbridge.log) so the op trace survives
+ * a kernel panic/reboot and does not flood dmesg. Same kallsyms-resolve
+ * scheme as the core 4; if any of these is missing the module simply skips
+ * logging and keeps working. */
+typedef struct file *(*filp_open_fn)(const char *path, int flags, umode_t mode);
+typedef ssize_t (*kernel_write_fn)(struct file *file, const void *buf,
+				   size_t count, loff_t *pos);
+typedef int (*filp_close_fn)(struct file *file, void *owner);
+typedef void (*ktime_get_real_ts64_fn)(struct timespec64 *ts);
+
+static unsigned long g_find_task_by_vpid;
+static unsigned long g_get_task_mm;
+static unsigned long g_mmput;
+static unsigned long g_access_remote_vm;
+static unsigned long g_filp_open;
+static unsigned long g_kernel_write;
+static unsigned long g_filp_close;
+static unsigned long g_ktime_get_real_ts64;
+
+#define FOLL_WRITE 0x01
+
+static int lxgr_ptrs_ok(void)
+{
+	return g_find_task_by_vpid && g_get_task_mm &&
+	       g_mmput && g_access_remote_vm;
+}
+
 /* ================= file logging ======================================= */
 
 #define RW_LOG_PATH "/data/local/tmp/rwbridge.log"
@@ -202,41 +237,6 @@ static void rw_log(const char *op, int pid, unsigned long addr,
 		loff_t pos = 0;
 		((kernel_write_fn)g_kernel_write)(rw_log_file, line, n, &pos);
 	}
-}
-
-/* ============ runtime-resolved kernel functions (fresh kallsyms) ====== */
-typedef struct task_struct *(*find_task_by_vpid_fn)(pid_t nr);
-typedef struct mm_struct *(*get_task_mm_fn)(struct task_struct *task);
-typedef void (*mmput_fn)(struct mm_struct *mm);
-typedef long (*access_remote_vm_fn)(struct mm_struct *mm,
-				    unsigned long addr, void *buf, size_t len,
-				    unsigned int flags);
-
-/* Logging to a file (/data/local/tmp/rwbridge.log) so the op trace survives
- * a kernel panic/reboot and does not flood dmesg. Same kallsyms-resolve
- * scheme as the core 4; if any of these is missing the module simply skips
- * logging and keeps working. */
-typedef struct file *(*filp_open_fn)(const char *path, int flags, umode_t mode);
-typedef ssize_t (*kernel_write_fn)(struct file *file, const void *buf,
-				   size_t count, loff_t *pos);
-typedef int (*filp_close_fn)(struct file *file, void *owner);
-typedef void (*ktime_get_real_ts64_fn)(struct timespec64 *ts);
-
-static unsigned long g_find_task_by_vpid;
-static unsigned long g_get_task_mm;
-static unsigned long g_mmput;
-static unsigned long g_access_remote_vm;
-static unsigned long g_filp_open;
-static unsigned long g_kernel_write;
-static unsigned long g_filp_close;
-static unsigned long g_ktime_get_real_ts64;
-
-#define FOLL_WRITE 0x01
-
-static int lxgr_ptrs_ok(void)
-{
-	return g_find_task_by_vpid && g_get_task_mm &&
-	       g_mmput && g_access_remote_vm;
 }
 
 /* ================= READ ============================================== */
