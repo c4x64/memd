@@ -85,6 +85,10 @@ jobs:
             # normalize to Module.symvers so the kmod's modpost picks it up.
             make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) vmlinux
             [ ! -f Module.symvers ] && [ -f vmlinux.symvers ] && cp vmlinux.symvers Module.symvers
+            # vmlinux alone does not generate scripts/module.lds (only
+            # modules_prepare/scripts do), which the external kmod's modpost
+            # needs for the final .ko link. Mirror the vendor branch.
+            make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
           fi
           ls -la Module.symvers
           head -5 Module.symvers
