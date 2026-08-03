@@ -1,0 +1,53 @@
+# rwbridge — silent memory R/W kernel module (ARM64 Android)
+
+Minimal kernel module that reads and writes a target process's user memory
+via `access_remote_vm()`. No watchpoints, no perf, no hooks, no kthread.
+The four kernel functions used (`access_remote_vm`, `find_task_by_vpid`,
+`get_task_mm`, `mmput`) are all `EXPORT_SYMBOL_GPL` fundamentals the kernel
+itself needs and cannot ship without, so no vendor kernel can remove them.
+
+The module is loaded and used independently; it is a building block, not part
+of any overlay. Nothing is linked from the kernel: the four addresses are
+resolved fresh from `/proc/kallsyms` by the loader on every insmod (the kernel
+is KASLR re-based after reboot; stale addresses panic). Link-time imports:
+`module_layout` only.
+
+## Operations
+
+All via the `rw` sysfs param, comma separated (addr is a **virtual address**
+of the target process):
+
+```
+R,pid,addr,size                  read VA; 16 hex digits in `out`
+W,pid,addr,size,value            write value to VA (modifies memory)
+```
+
+Diagnosis params: `out` (last read value), `status` (errno, 0 = ok),
+`stage` (parse/read/write step). Sizes allowed: 1, 2, 4, 8. Everything is
+strictly validated before any kernel call — invalid input returns `-EINVAL`
+and can never oops.
+
+## Load
+
+`scripts/load_rwbridge.sh` resolves the four addresses from `/proc/kallsyms`
+and `insmod`s with them as params (requires root, and `kptr_restrict=0`):
+
+```sh
+su -c 'echo 0 > /proc/sys/kernel/kptr_restrict'
+su -c 'sh /data/local/tmp/load_rwbridge.sh'
+# -> rwbridge 16384 0 - Live ... (O)
+```
+
+## Build
+
+For the target kernel (e.g. `5.15.137`), from `kmod/`:
+
+```sh
+make -C /path/to/linux-5.15.137 M=$PWD ARCH=arm64 \
+    CROSS_COMPILE=aarch64-linux-gnu- modules
+```
+
+## Diagnosis
+
+- `cat /sys/module/rwbridge/parameters/status` — 0 = ok, negative = errno
+- `cat /sys/module/rwbridge/parameters/out` — last read value / `ok` / `err`

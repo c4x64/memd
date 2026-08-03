@@ -27,6 +27,14 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/sched.h>
+#include <linux/mutex.h>
+#include <linux/hardirq.h>
+
+/* Serialize every command. The module is a single-slot sysfs interface; two
+ * concurrent users (e.g. a stale overlay + the live one) would otherwise
+ * interleave rw_buf/rw_status writes and return torn reads. The overlay also
+ * serializes, but the module must not rely on that to stay correct. */
+static DEFINE_MUTEX(rw_mtx);
 
 /* ================= self-contained libc-free helpers ================= */
 
@@ -113,10 +121,14 @@ static long rw_read_custom(int pid, unsigned long addr, unsigned long size,
 
 	if (!lxgr_ptrs_ok())
 		return -EINVAL;
+	if (in_atomic() || irqs_disabled())
+		return -EAGAIN;   /* access_remote_vm may sleep: never from atomic */
 
 	task = ((find_task_by_vpid_fn)g_find_task_by_vpid)(pid);
 	if (!task)
 		return -ESRCH;
+	if (task->flags & PF_EXITING)
+		return -ESRCH;    /* dying task: never touch its mm */
 	mm = ((get_task_mm_fn)g_get_task_mm)(task);
 	if (!mm)
 		return -EACCES;
@@ -140,10 +152,14 @@ static long rw_write_direct(int pid, unsigned long addr, unsigned long size,
 
 	if (!lxgr_ptrs_ok())
 		return -EINVAL;
+	if (in_atomic() || irqs_disabled())
+		return -EAGAIN;   /* access_remote_vm may sleep: never from atomic */
 
 	task = ((find_task_by_vpid_fn)g_find_task_by_vpid)(pid);
 	if (!task)
 		return -ESRCH;
+	if (task->flags & PF_EXITING)
+		return -ESRCH;    /* dying task: never touch its mm */
 	mm = ((get_task_mm_fn)g_get_task_mm)(task);
 	if (!mm)
 		return -EACCES;
@@ -193,6 +209,7 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 	long r;
 
 	(void)kp;
+	mutex_lock(&rw_mtx);
 	while (*p == ' ')
 		p++;
 	if (!*p)
@@ -240,6 +257,7 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 bad:
 	rw_status = -EINVAL;
 	rw_last_size = 0;
+	mutex_unlock(&rw_mtx);
 	return 0;
 ok:
 	switch (op) {
@@ -266,6 +284,7 @@ ok:
 		rw_status = r;
 		rw_last_size = 0;
 	}
+	mutex_unlock(&rw_mtx);
 	return 0;
 }
 
@@ -277,12 +296,17 @@ module_param_cb(rw, &rw_param_ops, NULL, 0200);
 static int rw_out_get(char *buf, const struct kernel_param *kp)
 {
 	int i, n = 0;
-	long s = rw_last_size;
+	long s;
 	static const char hx[] = "0123456789abcdef";
 
 	(void)kp;
-	if (s <= 0)
+	mutex_lock(&rw_mtx);
+	s = rw_last_size;
+	if (s <= 0) {
+		buf[0] = '\0';
+		mutex_unlock(&rw_mtx);
 		return 0;
+	}
 	if (s > RW_MAX_SIZE)
 		s = RW_MAX_SIZE;
 	for (i = 0; i < s; i++) {
@@ -290,6 +314,7 @@ static int rw_out_get(char *buf, const struct kernel_param *kp)
 		buf[n++] = hx[rw_buf[i] & 0xf];
 	}
 	buf[n] = '\0';
+	mutex_unlock(&rw_mtx);
 	return n;
 }
 static const struct kernel_param_ops rw_out_ops = {

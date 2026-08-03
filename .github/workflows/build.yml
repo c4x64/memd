@@ -8,10 +8,39 @@ on:
 jobs:
   kmod:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Stock kernel lines (any device running a vanilla kernel of that
+          # series). Real symbol CRCs are derived from the full vmlinux build,
+          # and the vermagic (SMP preempt mod_unload modversions aarch64) is
+          # what insmod matches against on the target.
+          - kver: "5.10.209"
+            tag: "5.10"
+          - kver: "5.15.137"
+            tag: "5.15"
+          - kver: "6.1.90"
+            tag: "6.1"
+          - kver: "6.6.50"
+            tag: "6.6"
+          - kver: "6.12.20"
+            tag: "6.12"
+          # The emulator's vendor kernel: same base 5.15.137 but with the
+          # vendor LOCALVERSION so the vermagic matches exactly, and the CRCs
+          # are the ones extracted from the device's own modules (the vendor
+          # config can't be reproduced by a stock vmlinux build).
+          - kver: "5.15.137"
+            localver: "-v5.21.770-optimizations-5.21.771.4051"
+            tag: "5.15-vendor"
+            hand_crcs: "1"
     env:
-      KVER: "5.15.137"
       ARCH: arm64
       CROSS_COMPILE: aarch64-linux-gnu-
+      KVER: ${{ matrix.kver }}
+      LOCALVER: ${{ matrix.localver || '' }}
+      TAG: ${{ matrix.tag }}
+      HAND_CRCS: ${{ matrix.hand_crcs || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,31 +54,37 @@ jobs:
 
       - name: Fetch & extract kernel source
         run: |
-          wget -q https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-$KVER.tar.xz
+          wget -q https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-$KVER.tar.xz || \
+            wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$KVER.tar.xz || \
+            { echo "no tarball for $KVER"; exit 1; }
           tar xf linux-$KVER.tar.xz
 
-      - name: Configure kernel to match vendor vermagic
+      - name: Configure kernel to match target vermagic
         run: |
           cd linux-$KVER
           make ARCH=$ARCH defconfig
           scripts/config --disable LOCALVERSION_AUTO
-          scripts/config --set-str LOCALVERSION "-v5.21.770-optimizations-5.21.771.4051"
+          scripts/config --set-str LOCALVERSION "$LOCALVER"
           scripts/config --enable MODULES
           scripts/config --enable MODULE_UNLOAD
           scripts/config --enable MODVERSIONS
           scripts/config --enable SMP
           scripts/config --enable PREEMPT
           make ARCH=$ARCH olddefconfig
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
-          # Populate modpost CRC table from the device kernel's own exported
-          # symbol CRCs (extracted from /boot/bstmods/*.ko on the target), so
-          # modpost writes matching __versions CRCs into our .ko. This makes
-          # the loader CRC-verify our module and run module_init, without
-          # compiling the entire in-tree module tree.
-          # Format (v5.15 modpost read_dump): 0x<crc>\t<sym>\t<module>\t<export>\t<namespace>
-          # CRCs extracted from /boot/bstmods/*.ko (device kernel ABI)
-          printf '0x93375eb6\tmodule_layout\tvmlinux\tEXPORT_SYMBOL\t\n0x92997ed8\t_printk\tvmlinux\tEXPORT_SYMBOL\t\n0xc5383799\tparam_ops_int\tvmlinux\tEXPORT_SYMBOL\t\n0xdcb764ad\tmemset\tvmlinux\tEXPORT_SYMBOL\t\n' > "$GITHUB_WORKSPACE/linux-$KVER/Module.symvers"
-          cat "$GITHUB_WORKSPACE/linux-$KVER/Module.symvers"
+          if [ -n "$HAND_CRCS" ]; then
+            # Vendor kernel: CRCs extracted from /boot/bstmods/*.ko on the
+            # emulator (its config differs from stock, so a vmlinux build here
+            # would produce CRCs the device rejects).
+            # Format (v5.15 modpost read_dump): 0x<crc>\t<sym>\t<module>\t<export>\t<namespace>
+            printf '0x93375eb6\tmodule_layout\tvmlinux\tEXPORT_SYMBOL\t\n0x92997ed8\t_printk\tvmlinux\tEXPORT_SYMBOL\t\n0xc5383799\tparam_ops_int\tvmlinux\tEXPORT_SYMBOL\t\n0xdcb764ad\tmemset\tvmlinux\tEXPORT_SYMBOL\t\n' > Module.symvers
+            make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
+          else
+            # Stock kernel: build vmlinux so modpost emits Module.symvers with
+            # the real EXPORT_SYMBOL CRCs for this exact kernel+config.
+            make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) vmlinux
+          fi
+          ls -la Module.symvers
+          head -5 Module.symvers
 
       - name: Build kmod
         run: |
@@ -65,5 +100,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rwbridge.ko
+          name: rwbridge-${{ matrix.kver }}${{ matrix.localver || '' }}
           path: kmod/rwbridge.ko
