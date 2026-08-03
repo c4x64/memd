@@ -44,12 +44,27 @@ static void rw_dbg_state(const char *tag, unsigned long addr, unsigned long size
 {
 	if (rw_dbg_logged)
 		return;
-	if (!(in_atomic() || irqs_disabled()))
-		return;
 	rw_dbg_logged = 1;
-	printk(KERN_ERR "rwbridge: %s pid=%d addr=%lx size=%lu preempt=%d "
-	       "in_atomic=%d irqs=%d\n", tag, (int)current->pid, addr, size,
-	       preempt_count(), in_atomic(), irqs_disabled());
+	printk(KERN_ERR "rwbridge: %s pid=%d tgid=%d comm=%s addr=%lx size=%lu "
+	       "preempt=%llu in_atomic=%d irqs=%d hw=%d sw=%d intr=%d\n",
+	       tag, (int)current->pid, (int)current->tgid, current->comm,
+	       addr, size, (unsigned long long)preempt_count(),
+	       in_atomic(), irqs_disabled(), in_hardirq(), in_softirq(),
+	       in_interrupt());
+}
+/* Dump full context on every -EAGAIN, rate-limited to first 3, so we see
+ * whether the corruption is present at entry or appears after access_remote_vm. */
+static int rw_dbg_n;
+static void rw_dbg_ctx(const char *tag, unsigned long addr)
+{
+	if (rw_dbg_n >= 3)
+		return;
+	rw_dbg_n++;
+	printk(KERN_ERR "rwbridge: %s pid=%d comm=%s addr=%lx preempt=%llu "
+	       "in_atomic=%d irqs=%d hw=%d sw=%d intr=%d\n",
+	       tag, (int)current->pid, current->comm, addr,
+	       (unsigned long long)preempt_count(), in_atomic(),
+	       irqs_disabled(), in_hardirq(), in_softirq(), in_interrupt());
 }
 
 /* ================= self-contained libc-free helpers ================= */
@@ -137,6 +152,7 @@ static long rw_read_custom(int pid, unsigned long addr, unsigned long size,
 
 	if (!lxgr_ptrs_ok())
 		return -EINVAL;
+	rw_dbg_ctx("entry-read", addr);
 	if (in_atomic() || irqs_disabled()) {
 		rw_dbg_state("guard-read", addr, size);
 		return -EAGAIN;   /* access_remote_vm may sleep: never from atomic */
@@ -231,6 +247,7 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 	long r;
 
 	(void)kp;
+	rw_dbg_ctx("set-entry", 0);
 	mutex_lock(&rw_mtx);
 	while (*p == ' ')
 		p++;
