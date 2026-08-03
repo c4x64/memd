@@ -515,8 +515,6 @@ DEF_HEX_PARAM(ktime_get_real_ts64, g_ktime_get_real_ts64);
 
 static int __init rwbridge_init(void)
 {
-	rw_log_open();
-	rw_log("L", 0, 0, 0, 0);
 	return 0;
 }
 
