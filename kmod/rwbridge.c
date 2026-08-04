@@ -72,6 +72,17 @@
 #define LXGR_PMD_BLOCK   0x0000ffffffe00000ULL   /* 2MB block PA           */
 #define LXGR_PGD_BLOCK   0x0000ffffc0000000ULL   /* 1GB block PA           */
 
+/* On this guest the whole of physical RAM sits in a single contiguous window
+ * [phys_off, phys_off + RAM_LIMIT) (MemTotal ~4 GiB). The linear map maps only
+ * that window: a page-table entry whose address bits resolve to a PA outside
+ * it is not real RAM — typically a descriptor salvaged out of a page table page
+ * that the live game freed/reused mid-walk. Dereferencing such an address via
+ * the linear map lands in the unmapped hole above the linear map and faults at
+ * EL1 (a panic). So we never build a linear address from an out-of-window PA.
+ * The bound is deliberately the full 4 GiB extent so genuine low-memory pages
+ * are never rejected (any PA beyond it cannot be RAM on this box). */
+#define LXGR_RAM_LIMIT   0x100000000UL
+
 #define RW_MAX_SIZE      256UL
 
 /* Serialize all state: the overlay serializes too, but a stray reader must
@@ -176,6 +187,19 @@ static inline unsigned long lxgr_phys_to_virt(unsigned long pa)
 	return (pa - lxgr_phys_off) | LXGR_PAGE_OFFSET;
 }
 
+/* Build the linear-map address only when pa is inside the real RAM window.
+ * Returns 0 for an out-of-window / bogus PA so callers can bail out safely
+ * instead of faulting the kernel. `pa - lxgr_phys_off` unsigned-wraps to a huge
+ * value when pa < phys_off, so the single >= test catches both under- and
+ * overruns. */
+static inline unsigned long lxgr_safe_virt(unsigned long pa)
+{
+	unsigned long off = pa - lxgr_phys_off;
+	if (off >= LXGR_RAM_LIMIT)
+		return 0;
+	return off | LXGR_PAGE_OFFSET;
+}
+
 /* Derive PHYS_OFFSET from our own pgd: VA (mm->pgd) vs PA (TTBR0_EL1).
  * Must be called from the process context that owns mm (the sysfs writer). */
 static long lxgr_derive_phys_off(void)
@@ -266,10 +290,17 @@ static long lxgr_translate(unsigned long pgd_va, unsigned long va,
 	if (t != LXGR_DESC_TABLE)
 		return -EFAULT;
 
-	/* level 1 (PMD, bits 29:21) */
+	/* level 1 (PMD, bits 29:21): the referenced page-table page must live in
+	 * RAM. A stale/foreign descriptor (e.g. salvaged from a table the live
+	 * game freed mid-walk) yields a PA outside the RAM window; dereferencing
+	 * its linear address faults at EL1 (panic), so reject it up front. */
 	idx = (va >> LXGR_PMD_SHIFT) & LXGR_IDX_MASK;
-	e = *(volatile unsigned long *)(lxgr_phys_to_virt(e & LXGR_PA_MASK)
-					+ idx * 8);
+	{
+		unsigned long lin = lxgr_safe_virt(e & LXGR_PA_MASK);
+		if (!lin)
+			return -EFAULT;
+		e = *(volatile unsigned long *)(lin + idx * 8);
+	}
 	t = e & LXGR_DESC_MASK;
 	if (t == LXGR_DESC_BLOCK) {
 		*pa_out = (e & LXGR_PMD_BLOCK) + (va & 0x1fffffUL);
@@ -278,12 +309,19 @@ static long lxgr_translate(unsigned long pgd_va, unsigned long va,
 	if (t != LXGR_DESC_TABLE)
 		return -EFAULT;
 
-	/* level 2 (PTE, bits 20:12) */
+	/* level 2 (PTE, bits 20:12): same safety guard on the table page, then a
+	 * final guard on the data page PA before exposing it to caller. */
 	idx = (va >> LXGR_PTE_SHIFT) & LXGR_IDX_MASK;
-	e = *(volatile unsigned long *)(lxgr_phys_to_virt(e & LXGR_PA_MASK)
-					+ idx * 8);
+	{
+		unsigned long lin = lxgr_safe_virt(e & LXGR_PA_MASK);
+		if (!lin)
+			return -EFAULT;
+		e = *(volatile unsigned long *)(lin + idx * 8);
+	}
 	t = e & LXGR_DESC_MASK;
 	if (t != LXGR_DESC_TABLE)        /* valid page descriptor = 0b11 */
+		return -EFAULT;
+	if (!lxgr_safe_virt(e & LXGR_PA_MASK))
 		return -EFAULT;
 
 	*pa_out = (e & LXGR_PA_MASK) + (va & 0xfffUL);
