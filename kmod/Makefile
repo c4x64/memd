@@ -5,7 +5,6 @@ $(error KDIR unset: point it at the built kernel tree)
 endif
 
 obj-m += rwbridge.o
-obj-m += lxgr_probe.o
 
 ccflags-y += -fno-stack-protector -fno-stack-check -fno-builtin -mbranch-protection=standard
 

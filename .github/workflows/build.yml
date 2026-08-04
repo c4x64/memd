@@ -12,28 +12,39 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Stock kernel lines (any device running a vanilla kernel of that
-          # series). Real symbol CRCs are derived from the full vmlinux build,
-          # and the vermagic (SMP preempt mod_unload modversions aarch64) is
-          # what insmod matches against on the target.
-          - kver: "5.10.209"
-            tag: "5.10"
-          - kver: "5.15.137"
-            tag: "5.15"
-          - kver: "6.1.90"
-            tag: "6.1"
-          - kver: "6.6.50"
-            tag: "6.6"
-          - kver: "6.12.20"
-            tag: "6.12"
-          # The emulator's vendor kernel: same base 5.15.137 but with the
-          # vendor LOCALVERSION so the vermagic matches exactly, and the CRCs
-          # are the ones extracted from the device's own modules (the vendor
-          # config can't be reproduced by a stock vmlinux build).
-          - kver: "5.15.137"
-            localver: "-v5.21.770-optimizations-5.21.771.4051"
-            tag: "5.15-vendor"
-            hand_crcs: "1"
+        # Stock kernel lines (one per GKI kernel major). A .ko built for a
+        # major can NOT be force-loaded on another major: vermagic encodes the
+        # full release (w.x.y), and the struct offsets below are NOT GKI-stable.
+        # 'offsets' is REQUIRED per entry (fails closed otherwise).
+        - kver: "5.10.209"
+          tag: "5.10"
+        - kver: "5.15.137"
+          tag: "5.15"
+        - kver: "6.1.90"
+          tag: "6.1"
+        - kver: "6.6.50"
+          tag: "6.6"
+        - kver: "6.12.20"
+          tag: "6.12"
+        - kver: "6.18"            # <-- pin to a stable 6.18.y patch before enabling
+          tag: "6.18"
+        # The emulator's vendor kernel: same base 5.15.137 but with the
+        # vendor LOCALVERSION so the vermagic matches exactly, and the CRCs
+        # are the ones extracted from the device's own modules (the vendor
+        # config can't be reproduced by a stock vmlinux build). Struct offsets
+        # are verified for THIS build (see offsets below).
+        - kver: "5.15.137"
+          localver: "-v5.21.770-optimizations-5.21.771.4051"
+          tag: "5.15-vendor"
+          hand_crcs: "1"
+          offsets: |
+            #define LXGR_OFF_TASKS   1232UL
+            #define LXGR_OFF_PID     1496UL
+            #define LXGR_OFF_MM      1312UL
+            #define LXGR_OFF_COMM    1960UL
+            #define LXGR_OFF_MM_PGD  64UL
+            #define LXGR_PAGE_OFFSET 0xffffff8000000000ULL
+            #define LXGR_USER_VA_TOP 0x8000000000ULL
     env:
       ARCH: arm64
       CROSS_COMPILE: aarch64-linux-gnu-
