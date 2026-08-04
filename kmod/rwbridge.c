@@ -347,6 +347,10 @@ static long rw_read_custom(unsigned long pid, unsigned long addr,
 
 		if (r)
 			return r;
+		/* final data page: block (1GB/2MB) and page paths both land here;
+		 * a non-RAM final PA (device/huge or stale) would fault EL1. */
+		if (!lxgr_safe_virt(pa))
+			return -EFAULT;
 		chunk = LXGR_PAGE_SIZE - (pa & (LXGR_PAGE_SIZE - 1));
 		if (chunk > size - done)
 			chunk = size - done;
@@ -377,6 +381,8 @@ static long rw_write_direct(unsigned long pid, unsigned long addr,
 
 		if (r)
 			return r;
+		if (!lxgr_safe_virt(pa))
+			return -EFAULT;
 		chunk = LXGR_PAGE_SIZE - (pa & (LXGR_PAGE_SIZE - 1));
 		if (chunk > size - done)
 			chunk = size - done;
