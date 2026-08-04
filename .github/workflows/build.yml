@@ -6,16 +6,18 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ── The 6 fixed stock KMI builds ────────────────────────────────────────
+  # One .ko per GKI kernel major. rwbridge.c resolves all struct offsets and
+  # the VA geometry from THIS kernel's own headers at build time (offsetof(),
+  # PAGE_OFFSET/TASK_SIZE, pgtable shifts), so each build is correct for its
+  # kernel with no offsets file. Vermagic encodes the full release (w.x.y),
+  # so a .ko only loads on a kernel with an exact vermagic match.
   kmod:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-        # Stock kernel lines (one per GKI kernel major). A .ko built for a
-        # major can NOT be force-loaded on another major: vermagic encodes the
-        # full release (w.x.y), and the struct offsets below are NOT GKI-stable.
-        # 'offsets' is REQUIRED per entry (fails closed otherwise).
         - kver: "5.10.209"
           tag: "5.10"
         - kver: "5.15.137"
@@ -26,32 +28,12 @@ jobs:
           tag: "6.6"
         - kver: "6.12.20"
           tag: "6.12"
-        - kver: "6.18"            # <-- pin to a stable 6.18.y patch before enabling
+        - kver: "6.18"            # pin to a stable 6.18.y patch before enabling
           tag: "6.18"
-        # The emulator's vendor kernel: same base 5.15.137 but with the
-        # vendor LOCALVERSION so the vermagic matches exactly, and the CRCs
-        # are the ones extracted from the device's own modules (the vendor
-        # config can't be reproduced by a stock vmlinux build). Struct offsets
-        # are verified for THIS build (see offsets below).
-        - kver: "5.15.137"
-          localver: "-v5.21.770-optimizations-5.21.771.4051"
-          tag: "5.15-vendor"
-          hand_crcs: "1"
-          offsets: |
-            #define LXGR_OFF_TASKS   1232UL
-            #define LXGR_OFF_PID     1496UL
-            #define LXGR_OFF_MM      1312UL
-            #define LXGR_OFF_COMM    1960UL
-            #define LXGR_OFF_MM_PGD  64UL
-            #define LXGR_PAGE_OFFSET 0xffffff8000000000ULL
-            #define LXGR_USER_VA_TOP 0x8000000000ULL
     env:
       ARCH: arm64
       CROSS_COMPILE: aarch64-linux-gnu-
       KVER: ${{ matrix.kver }}
-      LOCALVER: ${{ matrix.localver || '' }}
-      TAG: ${{ matrix.tag }}
-      HAND_CRCS: ${{ matrix.hand_crcs || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,32 +57,21 @@ jobs:
           cd linux-$KVER
           make ARCH=$ARCH defconfig
           scripts/config --disable LOCALVERSION_AUTO
-          scripts/config --set-str LOCALVERSION "$LOCALVER"
+          scripts/config --set-str LOCALVERSION ""
           scripts/config --enable MODULES
           scripts/config --enable MODULE_UNLOAD
           scripts/config --enable MODVERSIONS
           scripts/config --enable SMP
           scripts/config --enable PREEMPT
           make ARCH=$ARCH olddefconfig
-          if [ -n "$HAND_CRCS" ]; then
-            # Vendor kernel: CRCs extracted from /boot/bstmods/*.ko on the
-            # emulator (its config differs from stock, so a vmlinux build here
-            # would produce CRCs the device rejects).
-            # Format (v5.15 modpost read_dump): 0x<crc>\t<sym>\t<module>\t<export>\t<namespace>
-            printf '0x93375eb6\tmodule_layout\tvmlinux\tEXPORT_SYMBOL\t\n0x92997ed8\t_printk\tvmlinux\tEXPORT_SYMBOL\t\n0xc5383799\tparam_ops_int\tvmlinux\tEXPORT_SYMBOL\t\n0xdcb764ad\tmemset\tvmlinux\tEXPORT_SYMBOL\t\n0xd5977bfb\tmutex_lock\tvmlinux\tEXPORT_SYMBOL\t\n0xed55cabd\tmutex_unlock\tvmlinux\tEXPORT_SYMBOL\t\n' > Module.symvers
-            make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
-          else
-            # Stock kernel: build vmlinux so modpost emits the real
-            # EXPORT_SYMBOL CRCs for this exact kernel+config. The vmlinux
-            # modpost writes vmlinux.symvers (5.10) or Module.symvers (5.15+);
-            # normalize to Module.symvers so the kmod's modpost picks it up.
-            make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) vmlinux
-            [ ! -f Module.symvers ] && [ -f vmlinux.symvers ] && cp vmlinux.symvers Module.symvers
-            # vmlinux alone does not generate scripts/module.lds (only
-            # modules_prepare/scripts do), which the external kmod's modpost
-            # needs for the final .ko link. Mirror the vendor branch.
-            make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
-          fi
+          # Build vmlinux so modpost emits the real EXPORT_SYMBOL CRCs for
+          # this exact kernel+config (vmlinux.symvers on 5.10, Module.symvers
+          # on 5.15+; normalize to Module.symvers).
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) vmlinux
+          [ ! -f Module.symvers ] && [ -f vmlinux.symvers ] && cp vmlinux.symvers Module.symvers
+          # vmlinux alone does not generate scripts/module.lds (only
+          # modules_prepare/scripts do), needed for the external kmod link.
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
           ls -la Module.symvers
           head -5 Module.symvers
 
@@ -118,5 +89,80 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rwbridge-${{ matrix.kver }}${{ matrix.localver || '' }}
+          name: rwbridge-${{ matrix.kver }}
+          path: kmod/rwbridge.ko
+
+  # ── The 7th, DYNAMIC build: the user's own kernel ───────────────────────
+  # Fork this repo, then set these repo variables
+  #   Settings → Secrets and variables → Actions → Variables:
+  #     USER_KERNEL_URL    direct URL to a kernel tarball (linux-*.tar.xz)
+  #                        e.g. https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.7.2.tar.xz
+  #     USER_KERNEL_VER    the kernel version string, e.g. 6.7.2
+  #     USER_KERNEL_LOCALVER  optional LOCALVERSION (vermagic suffix) to match
+  #                        a vendor kernel, e.g. -v5.21.770-optimizations-5.21.771.4051
+  # On push (or workflow_dispatch) this job downloads that kernel, builds a
+  # rwbridge.ko for it and uploads it as its own artifact. 6 + 1 = 7 kos.
+  kmod-user:
+    runs-on: ubuntu-latest
+    if: vars.USER_KERNEL_URL != ''
+    env:
+      ARCH: arm64
+      CROSS_COMPILE: aarch64-linux-gnu-
+      KVER: ${{ vars.USER_KERNEL_VER }}
+      LOCALVER: ${{ vars.USER_KERNEL_LOCALVER || '' }}
+      USER_KERNEL_URL: ${{ vars.USER_KERNEL_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            libssl-dev libelf-dev bison flex
+
+      - name: Fetch & extract user kernel source
+        run: |
+          wget -q -O kernel.tar.xz "$USER_KERNEL_URL" || \
+            { echo "cannot download USER_KERNEL_URL: $USER_KERNEL_URL"; exit 1; }
+          tar xf kernel.tar.xz
+          D=$(ls -d linux-* 2>/dev/null | head -1)
+          [ -n "$D" ] || { echo "no linux-* dir in tarball"; exit 1; }
+          [ "$D" = "linux-$KVER" ] || mv "$D" "linux-$KVER"
+          ls -d linux-$KVER
+
+      - name: Configure kernel to match target vermagic
+        run: |
+          cd linux-$KVER
+          make ARCH=$ARCH defconfig
+          scripts/config --disable LOCALVERSION_AUTO
+          scripts/config --set-str LOCALVERSION "$LOCALVER"
+          scripts/config --enable MODULES
+          scripts/config --enable MODULE_UNLOAD
+          scripts/config --enable MODVERSIONS
+          scripts/config --enable SMP
+          scripts/config --enable PREEMPT
+          make ARCH=$ARCH olddefconfig
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) vmlinux
+          [ ! -f Module.symvers ] && [ -f vmlinux.symvers ] && cp vmlinux.symvers Module.symvers
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
+          ls -la Module.symvers
+          head -5 Module.symvers
+
+      - name: Build kmod
+        run: |
+          cd kmod
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE KDIR="$GITHUB_WORKSPACE/linux-$KVER"
+
+      - name: Show vermagic
+        run: |
+          modinfo kmod/rwbridge.ko || \
+          aarch64-linux-gnu-objcopy -O binary --only-section=.modinfo \
+            kmod/rwbridge.ko /dev/stdout | strings | grep -i vermagic
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rwbridge-${{ vars.USER_KERNEL_VER }}${{ vars.USER_KERNEL_LOCALVER || '' }}
           path: kmod/rwbridge.ko
