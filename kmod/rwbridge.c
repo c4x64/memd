@@ -66,9 +66,17 @@
 #include <linux/path.h>
 #include <linux/dcache.h>
 #include <linux/stddef.h>
+#include <linux/version.h>
 #include <asm/memory.h>
 #include <asm/pgtable-hwdef.h>
 #include <asm/page.h>
+
+/* The VMA list (mm->mmap / vma->vm_next) was fully replaced by the maple
+ * tree (mm->mm_mt) in 6.1. The B operation walks whichever one THIS kernel
+ * uses. struct maple_node / maple_tree / mm_mt only exist on 6.1+. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#include <linux/maple_tree.h>
+#endif
 
 /* Per-kernel layout is taken from THIS kernel's own headers at build time:
  * the user compiles this module against the exact kernel it will be loaded
@@ -83,21 +91,57 @@
 #define LXGR_OFF_MM_PGD  offsetof(struct mm_struct, pgd)
 
 /* PID + module-base discovery (operations P / B) traverse the target's own
- * mm/vma/file/dentry, so their field offsets come from header offsetof() too. */
+ * mm/vma/file/dentry, so their field offsets come from header offsetof() too.
+ * The VMA container differs by kernel major: < 6.1 uses the classic singly
+ * linked list (mm->mmap / vma->vm_next); >= 6.1 uses the maple tree instead
+ * (mm->mm_mt) and those list fields do not exist. */
 #define LXGR_OFF_MM_ARGSTART offsetof(struct mm_struct, arg_start)
 #define LXGR_OFF_MM_ARGEND   offsetof(struct mm_struct, arg_end)
-#define LXGR_OFF_MM_MMAP     offsetof(struct mm_struct, mmap)
 
 #define LXGR_OFF_VMA_START  offsetof(struct vm_area_struct, vm_start)
 #define LXGR_OFF_VMA_PGOFF  offsetof(struct vm_area_struct, vm_pgoff)
 #define LXGR_OFF_VMA_FILE   offsetof(struct vm_area_struct, vm_file)
-#define LXGR_OFF_VMA_NEXT   offsetof(struct vm_area_struct, vm_next)
 
 #define LXGR_OFF_FILE_PATH    offsetof(struct file, f_path)
 #define LXGR_OFF_PATH_DENTRY  offsetof(struct path, dentry)
 #define LXGR_OFF_DENTRY_NAME  offsetof(struct dentry, d_name)
 #define LXGR_OFF_QSTR_NAME    offsetof(struct qstr, name)
 #define LXGR_OFF_QSTR_LEN     offsetof(struct qstr, len)
+
+/* < 6.1: VMA list. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+#define LXGR_OFF_MM_MMAP     offsetof(struct mm_struct, mmap)
+#define LXGR_OFF_VMA_NEXT    offsetof(struct vm_area_struct, vm_next)
+#endif
+
+/* >= 6.1: maple tree. mr64/ma64/meta offsets come from THIS kernel's own
+ * maple_tree.h, and all layouts are stable across 6.1..6.18. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#define LXGR_OFF_MM_MMT     offsetof(struct mm_struct, mm_mt)
+#define LXGR_OFF_MT_ROOT    offsetof(struct maple_tree, ma_root)
+#define LXGR_OFF_NODE_SLOT  offsetof(struct maple_node, slot)
+#define LXGR_OFF_MR64_PIVOT offsetof(struct maple_node, mr64.pivot)
+#define LXGR_OFF_MR64_SLOT  offsetof(struct maple_node, mr64.slot)
+#define LXGR_OFF_MR64_META  offsetof(struct maple_node, mr64.meta)
+#define LXGR_OFF_MA64_PIVOT offsetof(struct maple_node, ma64.pivot)
+#define LXGR_OFF_MA64_SLOT  offsetof(struct maple_node, ma64.slot)
+#define LXGR_OFF_MA64_META  offsetof(struct maple_node, ma64.meta)
+#define LXGR_MT_RANGE_SLOTS \
+	(sizeof(((struct maple_node *)0)->mr64.slot) / sizeof(void *))
+#define LXGR_MT_ARANGE_SLOTS \
+	(sizeof(((struct maple_node *)0)->ma64.slot) / sizeof(void *))
+#define LXGR_MT_DENSE_SLOTS \
+	(sizeof(((struct maple_node *)0)->slot) / sizeof(void *))
+#define LXGR_MT_TYPE_MASK    0x0FUL
+#define LXGR_MT_TYPE_SHIFT   3UL
+#define LXGR_MT_ENODE_NULL   0x04UL
+#define LXGR_MT_ROOT_NODE    0x02UL
+#define LXGR_MT_NODE_MASK    0xFFUL
+#define LXGR_MT_DENSE        0UL
+#define LXGR_MT_LEAF_64      1UL
+#define LXGR_MT_RANGE_64     2UL
+#define LXGR_MT_ARANGE_64    3UL
+#endif
 
 #define LXGR_PAGE_SIZE   (1UL << PAGE_SHIFT)
 
@@ -453,48 +497,171 @@ static long lxgr_find_task_by_name(const char *sub, unsigned long *pid_out)
 
 /* Resolve the load base of the task's mapping of a named shared object (e.g.
  * libil2cpp.so) — replaces the /proc/<pid>/maps parser. Walks the target's
- * vm_area_struct list, and for each offset-0 mapping with a real file match
- * the file's leaf dentry name. Every kernel pointer is guarded by
- * lxgr_kern_ptr before deref, and a file backed by a live vma is itself held
- * alive by the mapping, so this cannot fault EL1. Returns the vm_start. */
+ * VMAs, and for each offset-0 mapping with a real file match the file's leaf
+ * dentry name. Every kernel pointer is guarded by lxgr_kern_ptr before deref,
+ * and a file backed by a live vma is itself held alive by the mapping, so this
+ * cannot fault EL1. Returns the vm_start. */
+
+/* Shared per-VMA file-name match test (both walkers). */
+static long lxgr_vma_base(unsigned long vma, const char *lib,
+			  unsigned long *out)
+{
+	unsigned long pgoff, f, dentry, dn, dnlen, start;
+
+	if (!lxgr_kern_ptr(vma))
+		return -EFAULT;
+	pgoff = *(unsigned long *)(vma + LXGR_OFF_VMA_PGOFF);
+	f     = *(unsigned long *)(vma + LXGR_OFF_VMA_FILE);
+	if (pgoff != 0 || !f || !lxgr_kern_ptr(f))
+		return -ESRCH;
+	dentry = *(unsigned long *)(f + LXGR_OFF_FILE_PATH + LXGR_OFF_PATH_DENTRY);
+	if (!dentry || !lxgr_kern_ptr(dentry))
+		return -ESRCH;
+	dn   = *(unsigned long *)(dentry + LXGR_OFF_DENTRY_NAME + LXGR_OFF_QSTR_NAME);
+	dnlen = *(unsigned long *)(dentry + LXGR_OFF_DENTRY_NAME + LXGR_OFF_QSTR_LEN);
+	if (dn && dnlen > 0 && dnlen < 128 && lxgr_kern_ptr(dn) &&
+	    lxgr_name_eq((const unsigned char *)dn, dnlen, lib)) {
+		start = *(unsigned long *)(vma + LXGR_OFF_VMA_START);
+		*out = start;
+		return 0;
+	}
+	return -ESRCH;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+/* Self-contained DFS of a maple tree rooted at a node. Type is read from the
+ * enode's own tag bits (MAPLE_ENODE_TYPE_SHIFT). Leaf node types (maple_dense
+ * / maple_leaf_64) hold VMA pointers directly; internal types (maple_range_64
+ * / maple_arange_64) hold child enodes. Returns 0 (found) / -ESRCH / -EFAULT. */
+static long lxgr_mt_walk(unsigned long node, unsigned long type,
+			 const char *lib, unsigned long *out, int depth)
+{
+	unsigned long slot_off, i, slots, end;
+	long r;
+
+	if (depth > 64 || !lxgr_kern_ptr(node))
+		return -ESRCH;
+
+	if (type == LXGR_MT_LEAF_64) {
+		slot_off = node + LXGR_OFF_MR64_SLOT;
+		end = *(unsigned char *)(node + LXGR_OFF_MR64_META);
+		slots = LXGR_MT_RANGE_SLOTS;
+		if (end >= (unsigned char)slots)
+			end = (unsigned char)(slots - 1);
+		for (i = 0; i <= end; i++) {
+			unsigned long v = *(unsigned long *)(slot_off + i * 8);
+			if (!v)
+				continue;
+			r = lxgr_vma_base(v, lib, out);
+			if (r == 0)
+				return 0;
+		}
+		return -ESRCH;
+	}
+
+	if (type == LXGR_MT_RANGE_64) {
+		slot_off = node + LXGR_OFF_MR64_SLOT;
+		end = *(unsigned char *)(node + LXGR_OFF_MR64_META);
+		slots = LXGR_MT_RANGE_SLOTS;
+		if (end >= (unsigned char)slots)
+			end = (unsigned char)(slots - 1);
+		for (i = 0; i <= end; i++) {
+			unsigned long e =
+				*(unsigned long *)(slot_off + i * 8);
+			if (!e)
+				continue;
+			r = lxgr_mt_walk(e & ~LXGR_MT_NODE_MASK,
+					  (e >> LXGR_MT_TYPE_SHIFT) &
+					   LXGR_MT_TYPE_MASK,
+					  lib, out, depth + 1);
+			if (r == 0)
+				return 0;
+		}
+		return -ESRCH;
+	}
+
+	if (type == LXGR_MT_ARANGE_64) {
+		slot_off = node + LXGR_OFF_MA64_SLOT;
+		end = *(unsigned char *)(node + LXGR_OFF_MA64_META);
+		slots = LXGR_MT_ARANGE_SLOTS;
+		if (end >= (unsigned char)slots)
+			end = (unsigned char)(slots - 1);
+		for (i = 0; i <= end; i++) {
+			unsigned long e =
+				*(unsigned long *)(slot_off + i * 8);
+			if (!e)
+				continue;
+			r = lxgr_mt_walk(e & ~LXGR_MT_NODE_MASK,
+					  (e >> LXGR_MT_TYPE_SHIFT) &
+					   LXGR_MT_TYPE_MASK,
+					  lib, out, depth + 1);
+			if (r == 0)
+				return 0;
+		}
+		return -ESRCH;
+	}
+
+	/* maple_dense root: direct leaf entries packed from slot 0. */
+	slot_off = node + LXGR_OFF_NODE_SLOT;
+	slots = LXGR_MT_DENSE_SLOTS;
+	for (i = 0; i < slots; i++) {
+		unsigned long v = *(unsigned long *)(slot_off + i * 8);
+		if (!v)
+			break;
+		r = lxgr_vma_base(v, lib, out);
+		if (r == 0)
+			return 0;
+	}
+	return -ESRCH;
+}
+#endif
+
 static long lxgr_module_base(unsigned long pid, const char *lib,
 			     unsigned long *base_out)
 {
-	unsigned long mm, vma;
+	unsigned long mm;
 	long r = lxgr_find_task(pid, &mm);
-	int i;
 
 	if (r || !mm || !lxgr_kern_ptr(mm))
 		return -ESRCH;
-	vma = *(unsigned long *)(mm + LXGR_OFF_MM_MMAP);
 
-	for (i = 0; vma && i < 1048576; i++) {
-		unsigned long pgoff, f, dentry, dn, dnlen;
-		unsigned long next;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	{
+		unsigned long mt, root, node, type;
 
-		if (!lxgr_kern_ptr(vma))
-			break;
-		next = *(unsigned long *)(vma + LXGR_OFF_VMA_NEXT);
-		pgoff = *(unsigned long *)(vma + LXGR_OFF_VMA_PGOFF);
-		f     = *(unsigned long *)(vma + LXGR_OFF_VMA_FILE);
-		if (pgoff == 0 && f && lxgr_kern_ptr(f)) {
-			dentry = *(unsigned long *)(f + LXGR_OFF_FILE_PATH +
-						    LXGR_OFF_PATH_DENTRY);
-			if (dentry && lxgr_kern_ptr(dentry)) {
-				dn = *(unsigned long *)(dentry + LXGR_OFF_DENTRY_NAME +
-							LXGR_OFF_QSTR_NAME);
-				dnlen = *(unsigned long *)(dentry + LXGR_OFF_DENTRY_NAME +
-							   LXGR_OFF_QSTR_LEN);
-				if (dn && dnlen > 0 && dnlen < 128 && lxgr_kern_ptr(dn) &&
-				    lxgr_name_eq((const unsigned char *)dn, dnlen, lib)) {
-					*base_out = *(unsigned long *)(vma + LXGR_OFF_VMA_START);
-					return 0;
-				}
-			}
+		mt = mm + LXGR_OFF_MM_MMT;
+		if (!lxgr_kern_ptr(mt))
+			return -ESRCH;
+		root = *(unsigned long *)(mt + LXGR_OFF_MT_ROOT);
+		if (!root)
+			return -ESRCH;
+		if (!(root & LXGR_MT_ROOT_NODE))
+			return lxgr_vma_base(root, lib, base_out);
+		node = root & ~LXGR_MT_NODE_MASK;
+		type = (root >> LXGR_MT_TYPE_SHIFT) & LXGR_MT_TYPE_MASK;
+		r = lxgr_mt_walk(node, type, lib, base_out, 0);
+		return r;
+	}
+#else
+	{
+		unsigned long vma;
+		int i;
+
+		vma = *(unsigned long *)(mm + LXGR_OFF_MM_MMAP);
+		for (i = 0; vma && i < 1048576; i++) {
+			unsigned long next;
+
+			if (!lxgr_kern_ptr(vma))
+				break;
+			next = *(unsigned long *)(vma + LXGR_OFF_VMA_NEXT);
+			r = lxgr_vma_base(vma, lib, base_out);
+			if (r == 0)
+				return 0;
+			vma = next;
 		}
-		vma = next;
 	}
 	return -ESRCH;
+#endif
 }
 
 /* ================= page table walk =================================== */
@@ -713,8 +880,9 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 		if (n <= 0)
 			goto bad;
 		STAGE("derive");
-		if (lxgr_derive_phys_off())
-			goto fail;
+		r = lxgr_derive_phys_off();
+		if (r)
+			goto finish;
 		if (op == 'P') {
 			unsigned long found;
 			STAGE("pid");
@@ -771,8 +939,9 @@ bad:
 	return 0;
 ok:
 	STAGE("derive");
-	if (lxgr_derive_phys_off())
-		goto fail;
+	r = lxgr_derive_phys_off();
+	if (r)
+		goto finish;
 
 	switch (op) {
 	case 'R':
