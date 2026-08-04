@@ -212,12 +212,14 @@ static long lxgr_derive_phys_off(void)
 
 /* Walk task_struct.tasks from `current` (always alive - we run in it) until
  * we wrap back to it. Bounded by a hard counter so a concurrently-mutating
- * list can never loop forever. Returns the target's ->mm in *mm_out. */
+ * list can never loop forever. Returns the target's ->mm in *mm_out.
+ * `current` itself is a candidate too (self read/write), so it is examined
+ * before advancing; wrap-back stops the loop. */
 static long lxgr_find_task(unsigned long want, unsigned long *mm_out)
 {
 	unsigned long cur = lxgr_current();
 	unsigned long p = cur;
-	unsigned long pid;
+	unsigned long nxt, pid;
 	int i;
 
 	pid = *(unsigned long *)(p + LXGR_OFF_PID);
@@ -225,18 +227,17 @@ static long lxgr_find_task(unsigned long want, unsigned long *mm_out)
 		return -EIO;               /* layout sanity: current->pid sane */
 
 	for (i = 0; i < 1048576; i++) {
-		unsigned long nxt = *(unsigned long *)(p + LXGR_OFF_TASKS);
-
-		if (!nxt)
-			return -ESRCH;
-		p = nxt - LXGR_OFF_TASKS;  /* next node -> task_struct */
-		if (p == cur)
-			break;               /* wrapped whole list */
 		pid = *(unsigned long *)(p + LXGR_OFF_PID);
 		if ((unsigned int)pid == (unsigned int)want) {
 			*mm_out = *(unsigned long *)(p + LXGR_OFF_MM);
 			return 0;
 		}
+		nxt = *(unsigned long *)(p + LXGR_OFF_TASKS);
+		if (!nxt)
+			return -ESRCH;
+		p = nxt - LXGR_OFF_TASKS;  /* next node -> task_struct */
+		if (p == cur)
+			break;               /* wrapped whole list */
 	}
 	return -ESRCH;
 }
