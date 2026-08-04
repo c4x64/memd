@@ -41,7 +41,16 @@
  * Operations (sysfs param `rw`, comma separated, same interface as before):
  *   R,pid,addr,size        read user VA, result hex (byte0 first) in `out`
  *   W,pid,addr,size,value  write value to user VA (writes native LE bytes)
- * Plus `status` (errno of last op), `out` (hex), `stage` (debug) params.
+ *   P,<cmdline-substr>     find first task whose argv contains substr -> pid
+ *                          (decimal, in `out`; replaces the /proc/<pid>/cmdline
+ *                          scan — the task list + page tables are walked in
+ *                          the kernel, nothing touches /proc)
+ *   B,pid,<libname>        resolve the offset-0 mapping of the named shared
+ *                          object via the target's vma list + file dentry
+ *                          name -> base (hex, in `out`; replaces the
+ *                          /proc/<pid>/maps parser)
+ * Plus `status` (errno of last op), `out` (hex bytes / ASCII pid/base),
+ * `stage` (debug) params.
  *
  * Link-time imports: module_layout, _printk. Only.
  */
@@ -53,6 +62,9 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/mm_types.h>
+#include <linux/fs.h>
+#include <linux/path.h>
+#include <linux/dcache.h>
 #include <linux/stddef.h>
 #include <asm/memory.h>
 #include <asm/pgtable-hwdef.h>
@@ -69,6 +81,23 @@
 #define LXGR_OFF_MM      offsetof(struct task_struct, mm)
 #define LXGR_OFF_COMM    offsetof(struct task_struct, comm)
 #define LXGR_OFF_MM_PGD  offsetof(struct mm_struct, pgd)
+
+/* PID + module-base discovery (operations P / B) traverse the target's own
+ * mm/vma/file/dentry, so their field offsets come from header offsetof() too. */
+#define LXGR_OFF_MM_ARGSTART offsetof(struct mm_struct, arg_start)
+#define LXGR_OFF_MM_ARGEND   offsetof(struct mm_struct, arg_end)
+#define LXGR_OFF_MM_MMAP     offsetof(struct mm_struct, mmap)
+
+#define LXGR_OFF_VMA_START  offsetof(struct vm_area_struct, vm_start)
+#define LXGR_OFF_VMA_PGOFF  offsetof(struct vm_area_struct, vm_pgoff)
+#define LXGR_OFF_VMA_FILE   offsetof(struct vm_area_struct, vm_file)
+#define LXGR_OFF_VMA_NEXT   offsetof(struct vm_area_struct, vm_next)
+
+#define LXGR_OFF_FILE_PATH    offsetof(struct file, f_path)
+#define LXGR_OFF_PATH_DENTRY  offsetof(struct path, dentry)
+#define LXGR_OFF_DENTRY_NAME  offsetof(struct dentry, d_name)
+#define LXGR_OFF_QSTR_NAME    offsetof(struct qstr, name)
+#define LXGR_OFF_QSTR_LEN     offsetof(struct qstr, len)
 
 #define LXGR_PAGE_SIZE   (1UL << PAGE_SHIFT)
 
@@ -114,7 +143,20 @@ static const unsigned long lxgr_lvl_block[LXGR_PGT_LEVELS] = {
  * are never rejected (any PA beyond it cannot be RAM on this box). */
 #define LXGR_RAM_LIMIT   0x100000000UL
 
-#define RW_MAX_SIZE      256UL
+/* A kernel object (task/vma/file/dentry/qstr string) lives in the
+ * linearly-mapped RAM window above PAGE_OFFSET. Guard every foreign kernel
+ * pointer with this before dereferencing, so a stale/reused address can
+ * never fault EL1. */
+static inline int lxgr_kern_ptr(unsigned long p)
+{
+	return (p - LXGR_PAGE_OFFSET) < LXGR_RAM_LIMIT;
+}
+
+/* Reads chunk through the bulk path; 1024 bytes keeps the hex `out` payload
+ * (2 chars/byte = 2048 chars) safely under the one PAGE_SIZE buffer that the
+ * kernel's param-framework hands to rw_out_get, while cutting the sysfs op
+ * count ~4x versus 256-byte chunks (less per-op noise for the read path). */
+#define RW_MAX_SIZE      1024UL
 
 /* Serialize all state: the overlay serializes too, but a stray reader must
  * not tear rw_buf/rw_status. Self-contained LDXR/STXR spinlock so the module
@@ -150,6 +192,7 @@ static int lxgr_phys_off_ready;
 
 static unsigned char rw_buf[RW_MAX_SIZE];
 static long rw_last_size;                 /* bytes produced by last R op */
+static long rw_text_len;                  /* >0: `out` is raw ASCII text     */
 static long rw_status;
 static char rw_stage[16] = "idle";
 
@@ -169,6 +212,39 @@ static void lxgr_memcpy(void *dst, const void *src, size_t n)
 	const char *s = src;
 	while (n--)
 		*d++ = *s++;
+}
+
+/* substring test (libc strstr is a link-time import, so self-contained). */
+static int lxgr_strstr(const char *hay, const char *needle)
+{
+	size_t hl = lxgr_strlen(hay), nl = lxgr_strlen(needle);
+	size_t i, j;
+
+	if (!nl || nl > hl)
+		return 0;
+	for (i = 0; i + nl <= hl; i++) {
+		for (j = 0; j < nl; j++)
+			if (hay[i + j] != needle[j])
+				break;
+		if (j == nl)
+			return 1;
+	}
+	return 0;
+}
+
+/* exact name match against a (name,len) qstr pair. */
+static int lxgr_name_eq(const unsigned char *name, unsigned long len,
+			const char *want)
+{
+	size_t wl = lxgr_strlen(want);
+	unsigned long k;
+
+	if (len != wl)
+		return 0;
+	for (k = 0; k < len; k++)
+		if (name[k] != (unsigned char)want[k])
+			return 0;
+	return 1;
 }
 
 static unsigned long parse_hex(const char *s)
@@ -265,6 +341,9 @@ static long lxgr_derive_phys_off(void)
 
 /* ================= task list walk ==================================== */
 
+static long lxgr_translate(unsigned long pgd_va, unsigned long va,
+			   unsigned long *pa_out);
+
 /* Walk task_struct.tasks from `current` (always alive - we run in it) until
  * we wrap back to it. Bounded by a hard counter so a concurrently-mutating
  * list can never loop forever. Returns the target's ->mm in *mm_out.
@@ -293,6 +372,127 @@ static long lxgr_find_task(unsigned long want, unsigned long *mm_out)
 		p = nxt - LXGR_OFF_TASKS;  /* next node -> task_struct */
 		if (p == cur)
 			break;               /* wrapped whole list */
+	}
+	return -ESRCH;
+}
+
+/* Read up to cap bytes of a task's argv string (its cmdline) into out, as a
+ * single NUL-terminated C string. Uses the same safe translate/linear-map path
+ * as rw_read_custom, so an unmapped/racing arg page just ends the read. */
+static long lxgr_read_cmdline(unsigned long mm, char *out, unsigned long cap)
+{
+	unsigned long arg_start, arg_end, pgd, done = 0;
+
+	if (!lxgr_kern_ptr(mm))
+		return 0;
+	arg_start = *(unsigned long *)(mm + LXGR_OFF_MM_ARGSTART);
+	arg_end   = *(unsigned long *)(mm + LXGR_OFF_MM_ARGEND);
+	if (!arg_start || arg_end <= arg_start)
+		return 0;
+	if (arg_end - arg_start > cap)
+		arg_end = arg_start + cap;
+	pgd = *(unsigned long *)(mm + LXGR_OFF_MM_PGD);
+	if (!pgd)
+		return 0;
+
+	while (arg_start + done < arg_end) {
+		unsigned long pa, chunk, lin, k;
+		long r = lxgr_translate(pgd, arg_start + done, &pa);
+
+		if (r)
+			break;
+		if (!lxgr_safe_virt(pa))
+			break;
+		chunk = LXGR_PAGE_SIZE - (pa & (LXGR_PAGE_SIZE - 1));
+		if (chunk > arg_end - (arg_start + done))
+			chunk = arg_end - (arg_start + done);
+		lin = lxgr_phys_to_virt(pa);
+		for (k = 0; k < chunk; k++) {
+			char c = *(char *)(lin + k);
+			out[done + k] = c;
+			if (c == 0) {
+				out[done + k] = 0;
+				return (long)(done + k);
+			}
+		}
+		done += chunk;
+	}
+	out[done] = 0;
+	return (long)done;
+}
+
+/* Find a task whose cmdline contains `sub` (like the old /proc/<pid>/cmdline
+ * scan). Walks the task list exactly like lxgr_find_task — same anchored,
+ * bounded, self-contained traversal; the cmdline is read through the page
+ * tables, never through /proc. Returns the target pid. */
+static long lxgr_find_task_by_name(const char *sub, unsigned long *pid_out)
+{
+	unsigned long cur = lxgr_current();
+	unsigned long p = cur, nxt, mm;
+	char cmd[192];
+	int i;
+
+	for (i = 0; i < 1048576; i++) {
+		mm = *(unsigned long *)(p + LXGR_OFF_MM);
+		if (mm && lxgr_kern_ptr(mm)) {
+			long n = lxgr_read_cmdline(mm, cmd, sizeof(cmd) - 1);
+			if (n > 0 && lxgr_strstr(cmd, sub)) {
+				*pid_out = *(unsigned long *)(p + LXGR_OFF_PID);
+				return 0;
+			}
+		}
+		nxt = *(unsigned long *)(p + LXGR_OFF_TASKS);
+		if (!nxt)
+			return -ESRCH;
+		p = nxt - LXGR_OFF_TASKS;
+		if (p == cur)
+			break;
+	}
+	return -ESRCH;
+}
+
+/* Resolve the load base of the task's mapping of a named shared object (e.g.
+ * libil2cpp.so) — replaces the /proc/<pid>/maps parser. Walks the target's
+ * vm_area_struct list, and for each offset-0 mapping with a real file match
+ * the file's leaf dentry name. Every kernel pointer is guarded by
+ * lxgr_kern_ptr before deref, and a file backed by a live vma is itself held
+ * alive by the mapping, so this cannot fault EL1. Returns the vm_start. */
+static long lxgr_module_base(unsigned long pid, const char *lib,
+			     unsigned long *base_out)
+{
+	unsigned long mm, vma;
+	long r = lxgr_find_task(pid, &mm);
+	int i;
+
+	if (r || !mm || !lxgr_kern_ptr(mm))
+		return -ESRCH;
+	vma = *(unsigned long *)(mm + LXGR_OFF_MM_MMAP);
+
+	for (i = 0; vma && i < 1048576; i++) {
+		unsigned long pgoff, f, dentry, dn, dnlen;
+		unsigned long next;
+
+		if (!lxgr_kern_ptr(vma))
+			break;
+		next = *(unsigned long *)(vma + LXGR_OFF_VMA_NEXT);
+		pgoff = *(unsigned long *)(vma + LXGR_OFF_VMA_PGOFF);
+		f     = *(unsigned long *)(vma + LXGR_OFF_VMA_FILE);
+		if (pgoff == 0 && f && lxgr_kern_ptr(f)) {
+			dentry = *(unsigned long *)(f + LXGR_OFF_FILE_PATH +
+						    LXGR_OFF_PATH_DENTRY);
+			if (dentry && lxgr_kern_ptr(dentry)) {
+				dn = *(unsigned long *)(dentry + LXGR_OFF_DENTRY_NAME +
+							LXGR_OFF_QSTR_NAME);
+				dnlen = *(unsigned long *)(dentry + LXGR_OFF_DENTRY_NAME +
+							   LXGR_OFF_QSTR_LEN);
+				if (dn && dnlen > 0 && dnlen < 128 && lxgr_kern_ptr(dn) &&
+				    lxgr_name_eq((const unsigned char *)dn, dnlen, lib)) {
+					*base_out = *(unsigned long *)(vma + LXGR_OFF_VMA_START);
+					return 0;
+				}
+			}
+		}
+		vma = next;
 	}
 	return -ESRCH;
 }
@@ -438,16 +638,52 @@ static int next_field(const char **pp, char *buf, int bufsz)
 	return n;
 }
 
+/* ASCII payload for the `out` param (decimal pid / hex base). */
+static void lxgr_put_dec(unsigned long v)
+{
+	char tmp[24];
+	int k = 23, i = 0;
+
+	tmp[k] = 0;
+	do {
+		tmp[--k] = '0' + (v % 10);
+		v /= 10;
+	} while (v && k > 0);
+	while (k < 23)
+		rw_buf[i++] = (unsigned char)tmp[k++];
+	rw_text_len = i;
+}
+
+static void lxgr_put_hex(unsigned long v)
+{
+	static const char hx[] = "0123456789abcdef";
+	int i = 0, k, lead;
+
+	for (k = 15; k >= 0; k--)
+		rw_buf[i++] = (unsigned char)hx[(v >> (k * 4)) & 0xf];
+	lead = 0;
+	while (lead < i - 1 && rw_buf[lead] == '0')
+		lead++;
+	if (lead) {
+		for (k = lead; k < i; k++)
+			rw_buf[k - lead] = rw_buf[k];
+		i -= lead;
+	}
+	rw_text_len = i;
+}
+
 static int rw_set(const char *val, const struct kernel_param *kp)
 {
 	const char *p = val;
 	char f[24];
+	char name[96];
 	char op;
 	unsigned long pid, addr, size, value;
-	long r;
+	long r = 0;
 
 	(void)kp;
 	lxgr_spin_lock();
+	rw_text_len = 0;
 	STAGE("parse");
 	while (*p == ' ')
 		p++;
@@ -459,6 +695,43 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 	else
 		goto bad;
 
+	/* ---- discovery ops: P,<cmdline-substr> -> pid; B,<pid>,<lib> -> base ---- */
+	if (op == 'P' || op == 'B') {
+		unsigned long bpid = 0;
+		int n = 0;
+
+		if (op == 'B') {
+			if (next_field(&p, f, sizeof(f)) <= 0)
+				goto bad;
+			bpid = parse_dec(f);
+			if (bpid <= 0 || bpid > 0x7fffffff)
+				goto bad;
+		}
+		while (*p && *p != ',' && n < (int)sizeof(name) - 1)
+			name[n++] = *p++;
+		name[n] = 0;
+		if (n <= 0)
+			goto bad;
+		STAGE("derive");
+		if (lxgr_derive_phys_off())
+			goto fail;
+		if (op == 'P') {
+			unsigned long found;
+			STAGE("pid");
+			r = lxgr_find_task_by_name(name, &found);
+			if (r == 0)
+				lxgr_put_dec(found);
+		} else {
+			unsigned long base;
+			STAGE("base");
+			r = lxgr_module_base(bpid, name, &base);
+			if (r == 0)
+				lxgr_put_hex(base);
+		}
+		goto finish;
+	}
+
+	/* ---- R/W ops (unchanged layout) ---- */
 	if (next_field(&p, f, sizeof(f)) <= 0)
 		goto bad;
 	pid = parse_dec(f);
@@ -493,12 +766,12 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 bad:
 	rw_status = -EINVAL;
 	rw_last_size = 0;
+	rw_text_len = 0;
 	lxgr_spin_unlock();
 	return 0;
 ok:
 	STAGE("derive");
-	r = lxgr_derive_phys_off();
-	if (r)
+	if (lxgr_derive_phys_off())
 		goto fail;
 
 	switch (op) {
@@ -510,11 +783,8 @@ ok:
 		STAGE("write");
 		r = rw_write_direct(pid, addr, size, value);
 		break;
-	default:
-		r = -EINVAL;
-		break;
 	}
-fail:
+finish:
 	if (r == 0) {
 		rw_status = 0;
 		if (op == 'R')
@@ -525,6 +795,7 @@ fail:
 	} else {
 		rw_status = r;
 		rw_last_size = 0;
+		rw_text_len = 0;
 	}
 	lxgr_spin_unlock();
 	return 0;
@@ -543,6 +814,16 @@ static int rw_out_get(char *buf, const struct kernel_param *kp)
 
 	(void)kp;
 	lxgr_spin_lock();
+	if (rw_text_len > 0) {
+		long m = rw_text_len;
+		if (m > (long)RW_MAX_SIZE)
+			m = (long)RW_MAX_SIZE;
+		for (i = 0; i < m; i++)
+			buf[i] = (char)rw_buf[i];
+		buf[i] = '\0';
+		lxgr_spin_unlock();
+		return (int)m;
+	}
 	s = rw_last_size;
 	if (s <= 0) {
 		buf[0] = '\0';
