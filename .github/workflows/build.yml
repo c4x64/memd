@@ -161,6 +161,7 @@ jobs:
           # this exact kernel+config (Module.symvers), then prepare the tree
           # for the external kmod link.
           make ARCH=$ARCH LLVM=1 -j$(nproc) vmlinux
+          [ ! -f Module.symvers ] && [ -f vmlinux.symvers ] && cp vmlinux.symvers Module.symvers
           make ARCH=$ARCH LLVM=1 prepare modules_prepare scripts
           ls -la Module.symvers
           head -5 Module.symvers
