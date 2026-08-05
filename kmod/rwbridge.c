@@ -7,15 +7,12 @@
  * get_task_mm / mmput / access_remote_vm, no filp_open / kernel_write, no
  * current->* / preempt_count() / thread_info derefs, no page-walk helpers.
  *
- * Layout constants are taken from THIS kernel's own headers at build time:
- * offsetof(struct task_struct,*), offsetof(struct mm_struct,pgd), PAGE_OFFSET
- * and TASK_SIZE (from asm/memory.h), and the pgtable shifts (from
- * asm/pgtable-hwdef.h). Since struct offsets/VA_BITS are NOT part of the GKI
- * stable-KMI and vary per major, the user compiles this module against the
- * exact kernel it will be loaded on — no offsets file, no CI generation.
- * arm64 4K pages, 3 or 4 levels (39/48-bit VA) are handled generically. A
- * .ko only insmods on a kernel with a matching vermagic, so run.sh just picks
- * the bundled rwbridge-*.ko that matches (CRC check refuses the rest).
+ * Everything is done inside the module with hardcoded layout constants for
+ * this exact kernel build:
+ *   target: 5.15.137-v5.21.770-optimizations-5.21.771.4051 (BlueStacks)
+ *   vendor struct offsets (from the vendor asm-offsets / kheaders):
+ *     task_struct.tasks=1232  task_struct.pid=1496  task_struct.mm=1312
+ *     task_struct.comm=1960   mm_struct.pgd=64      THREAD_SIZE=0x4000
  *
  * 1) Find the process: arm64 current == sp_el0 (CONFIG_THREAD_INFO_IN_TASK,
  *    asm/current.h). Walk task_struct.tasks (circular list) and compare
@@ -41,16 +38,7 @@
  * Operations (sysfs param `rw`, comma separated, same interface as before):
  *   R,pid,addr,size        read user VA, result hex (byte0 first) in `out`
  *   W,pid,addr,size,value  write value to user VA (writes native LE bytes)
- *   P,<cmdline-substr>     find first task whose argv contains substr -> pid
- *                          (decimal, in `out`; replaces the /proc/<pid>/cmdline
- *                          scan — the task list + page tables are walked in
- *                          the kernel, nothing touches /proc)
- *   B,pid,<libname>        resolve the offset-0 mapping of the named shared
- *                          object via the target's vma list + file dentry
- *                          name -> base (hex, in `out`; replaces the
- *                          /proc/<pid>/maps parser)
- * Plus `status` (errno of last op), `out` (hex bytes / ASCII pid/base),
- * `stage` (debug) params.
+ * Plus `status` (errno of last op), `out` (hex), `stage` (debug) params.
  *
  * Link-time imports: module_layout, _printk. Only.
  */
@@ -60,95 +48,22 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/errno.h>
-#include <linux/sched.h>
-#include <linux/mm_types.h>
-#include <linux/fs.h>
-#include <linux/path.h>
-#include <linux/dcache.h>
-#include <linux/stddef.h>
-#include <linux/version.h>
-#include <asm/memory.h>
-#include <asm/pgtable-hwdef.h>
-#include <asm/page.h>
 
-/* The VMA list (mm->mmap / vma->vm_next) was fully replaced by the maple
- * tree (mm->mm_mt) in 6.1. The B operation walks whichever one THIS kernel
- * uses. struct maple_node / maple_tree / mm_mt only exist on 6.1+. */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-#include <linux/maple_tree.h>
-#endif
+/* ============ vendor layout constants (see header comment) ============ */
 
-/* Per-kernel layout is taken from THIS kernel's own headers at build time:
- * the user compiles this module against the exact kernel it will be loaded
- * on, so offsetof() / PAGE_OFFSET / TASK_SIZE / pgtable shifts are correct
- * for that kernel. No offsets file, no CI-generated constants. Offsets are
- * NOT part of the GKI stable-KMI and vermagic encodes the full release, so a
- * .ko only ever loads on the kernel it was built for. */
-#define LXGR_OFF_TASKS   offsetof(struct task_struct, tasks)
-#define LXGR_OFF_PID     offsetof(struct task_struct, pid)
-#define LXGR_OFF_MM      offsetof(struct task_struct, mm)
-#define LXGR_OFF_COMM    offsetof(struct task_struct, comm)
-#define LXGR_OFF_MM_PGD  offsetof(struct mm_struct, pgd)
+#define LXGR_OFF_TASKS   1232UL
+#define LXGR_OFF_PID     1496UL
+#define LXGR_OFF_MM      1312UL
+#define LXGR_OFF_COMM    1960UL
+#define LXGR_OFF_MM_PGD  64UL
 
-/* PID + module-base discovery (operations P / B) traverse the target's own
- * mm/vma/file/dentry, so their field offsets come from header offsetof() too.
- * The VMA container differs by kernel major: < 6.1 uses the classic singly
- * linked list (mm->mmap / vma->vm_next); >= 6.1 uses the maple tree instead
- * (mm->mm_mt) and those list fields do not exist. */
-#define LXGR_OFF_MM_ARGSTART offsetof(struct mm_struct, arg_start)
-#define LXGR_OFF_MM_ARGEND   offsetof(struct mm_struct, arg_end)
+#define LXGR_PAGE_OFFSET 0xffffff8000000000ULL   /* 39-bit VA */
+#define LXGR_USER_VA_TOP 0x8000000000ULL
+#define LXGR_PAGE_SIZE   0x1000ULL
 
-#define LXGR_OFF_VMA_START  offsetof(struct vm_area_struct, vm_start)
-#define LXGR_OFF_VMA_PGOFF  offsetof(struct vm_area_struct, vm_pgoff)
-#define LXGR_OFF_VMA_FILE   offsetof(struct vm_area_struct, vm_file)
-
-#define LXGR_OFF_FILE_PATH    offsetof(struct file, f_path)
-#define LXGR_OFF_PATH_DENTRY  offsetof(struct path, dentry)
-#define LXGR_OFF_DENTRY_NAME  offsetof(struct dentry, d_name)
-#define LXGR_OFF_QSTR_NAME    offsetof(struct qstr, name)
-#define LXGR_OFF_QSTR_LEN     offsetof(struct qstr, len)
-
-/* < 6.1: VMA list. */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
-#define LXGR_OFF_MM_MMAP     offsetof(struct mm_struct, mmap)
-#define LXGR_OFF_VMA_NEXT    offsetof(struct vm_area_struct, vm_next)
-#endif
-
-/* >= 6.1: maple tree. mr64/ma64/meta offsets come from THIS kernel's own
- * maple_tree.h, and all layouts are stable across 6.1..6.18. */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-#define LXGR_OFF_MM_MMT     offsetof(struct mm_struct, mm_mt)
-#define LXGR_OFF_MT_ROOT    offsetof(struct maple_tree, ma_root)
-#define LXGR_OFF_NODE_SLOT  offsetof(struct maple_node, slot)
-#define LXGR_OFF_MR64_PIVOT offsetof(struct maple_node, mr64.pivot)
-#define LXGR_OFF_MR64_SLOT  offsetof(struct maple_node, mr64.slot)
-#define LXGR_OFF_MR64_META  offsetof(struct maple_node, mr64.meta)
-#define LXGR_OFF_MA64_PIVOT offsetof(struct maple_node, ma64.pivot)
-#define LXGR_OFF_MA64_SLOT  offsetof(struct maple_node, ma64.slot)
-#define LXGR_OFF_MA64_META  offsetof(struct maple_node, ma64.meta)
-#define LXGR_MT_RANGE_SLOTS \
-	(sizeof(((struct maple_node *)0)->mr64.slot) / sizeof(void *))
-#define LXGR_MT_ARANGE_SLOTS \
-	(sizeof(((struct maple_node *)0)->ma64.slot) / sizeof(void *))
-#define LXGR_MT_DENSE_SLOTS \
-	(sizeof(((struct maple_node *)0)->slot) / sizeof(void *))
-#define LXGR_MT_TYPE_MASK    0x0FUL
-#define LXGR_MT_TYPE_SHIFT   3UL
-#define LXGR_MT_ENODE_NULL   0x04UL
-#define LXGR_MT_ROOT_NODE    0x02UL
-#define LXGR_MT_NODE_MASK    0xFFUL
-#define LXGR_MT_DENSE        0UL
-#define LXGR_MT_LEAF_64      1UL
-#define LXGR_MT_RANGE_64     2UL
-#define LXGR_MT_ARANGE_64    3UL
-#endif
-
-#define LXGR_PAGE_SIZE   (1UL << PAGE_SHIFT)
-
-/* arm64 VA geometry from this kernel's headers (4K pages, 39/48-bit VA). */
-#define LXGR_PAGE_OFFSET ((unsigned long)PAGE_OFFSET)
-#define LXGR_USER_VA_TOP ((unsigned long)TASK_SIZE)
-
+#define LXGR_PGD_SHIFT   30UL
+#define LXGR_PMD_SHIFT   21UL
+#define LXGR_PTE_SHIFT   12UL
 #define LXGR_IDX_MASK    0x1ffUL
 #define LXGR_DESC_MASK   0x3UL
 #define LXGR_DESC_BLOCK  0x1UL
@@ -156,25 +71,6 @@
 #define LXGR_PA_MASK     0x0000fffffffff000ULL   /* table ptr / 4K page PA */
 #define LXGR_PMD_BLOCK   0x0000ffffffe00000ULL   /* 2MB block PA           */
 #define LXGR_PGD_BLOCK   0x0000ffffc0000000ULL   /* 1GB block PA           */
-
-/* Page-table levels: 3 (39-bit VA) or 4 (48-bit VA), from the kernel config. */
-#if defined(CONFIG_PGTABLE_LEVELS) && CONFIG_PGTABLE_LEVELS == 4
-#define LXGR_PGT_LEVELS 4
-static const unsigned long lxgr_lvl_shift[LXGR_PGT_LEVELS] = {
-	PGDIR_SHIFT, PUD_SHIFT, PMD_SHIFT, PAGE_SHIFT
-};
-static const unsigned long lxgr_lvl_block[LXGR_PGT_LEVELS] = {
-	LXGR_PGD_BLOCK, LXGR_PGD_BLOCK, LXGR_PMD_BLOCK, 0UL
-};
-#else
-#define LXGR_PGT_LEVELS 3
-static const unsigned long lxgr_lvl_shift[LXGR_PGT_LEVELS] = {
-	PGDIR_SHIFT, PMD_SHIFT, PAGE_SHIFT
-};
-static const unsigned long lxgr_lvl_block[LXGR_PGT_LEVELS] = {
-	LXGR_PGD_BLOCK, LXGR_PMD_BLOCK, 0UL
-};
-#endif
 
 /* On this guest the whole of physical RAM sits in a single contiguous window
  * [phys_off, phys_off + RAM_LIMIT) (MemTotal ~4 GiB). The linear map maps only
@@ -187,20 +83,7 @@ static const unsigned long lxgr_lvl_block[LXGR_PGT_LEVELS] = {
  * are never rejected (any PA beyond it cannot be RAM on this box). */
 #define LXGR_RAM_LIMIT   0x100000000UL
 
-/* A kernel object (task/vma/file/dentry/qstr string) lives in the
- * linearly-mapped RAM window above PAGE_OFFSET. Guard every foreign kernel
- * pointer with this before dereferencing, so a stale/reused address can
- * never fault EL1. */
-static inline int lxgr_kern_ptr(unsigned long p)
-{
-	return (p - LXGR_PAGE_OFFSET) < LXGR_RAM_LIMIT;
-}
-
-/* Reads chunk through the bulk path; 1024 bytes keeps the hex `out` payload
- * (2 chars/byte = 2048 chars) safely under the one PAGE_SIZE buffer that the
- * kernel's param-framework hands to rw_out_get, while cutting the sysfs op
- * count ~4x versus 256-byte chunks (less per-op noise for the read path). */
-#define RW_MAX_SIZE      1024UL
+#define RW_MAX_SIZE      256UL
 
 /* Serialize all state: the overlay serializes too, but a stray reader must
  * not tear rw_buf/rw_status. Self-contained LDXR/STXR spinlock so the module
@@ -236,7 +119,6 @@ static int lxgr_phys_off_ready;
 
 static unsigned char rw_buf[RW_MAX_SIZE];
 static long rw_last_size;                 /* bytes produced by last R op */
-static long rw_text_len;                  /* >0: `out` is raw ASCII text     */
 static long rw_status;
 static char rw_stage[16] = "idle";
 
@@ -256,39 +138,6 @@ static void lxgr_memcpy(void *dst, const void *src, size_t n)
 	const char *s = src;
 	while (n--)
 		*d++ = *s++;
-}
-
-/* substring test (libc strstr is a link-time import, so self-contained). */
-static int lxgr_strstr(const char *hay, const char *needle)
-{
-	size_t hl = lxgr_strlen(hay), nl = lxgr_strlen(needle);
-	size_t i, j;
-
-	if (!nl || nl > hl)
-		return 0;
-	for (i = 0; i + nl <= hl; i++) {
-		for (j = 0; j < nl; j++)
-			if (hay[i + j] != needle[j])
-				break;
-		if (j == nl)
-			return 1;
-	}
-	return 0;
-}
-
-/* exact name match against a (name,len) qstr pair. */
-static int lxgr_name_eq(const unsigned char *name, unsigned long len,
-			const char *want)
-{
-	size_t wl = lxgr_strlen(want);
-	unsigned long k;
-
-	if (len != wl)
-		return 0;
-	for (k = 0; k < len; k++)
-		if (name[k] != (unsigned char)want[k])
-			return 0;
-	return 1;
 }
 
 static unsigned long parse_hex(const char *s)
@@ -385,9 +234,6 @@ static long lxgr_derive_phys_off(void)
 
 /* ================= task list walk ==================================== */
 
-static long lxgr_translate(unsigned long pgd_va, unsigned long va,
-			   unsigned long *pa_out);
-
 /* Walk task_struct.tasks from `current` (always alive - we run in it) until
  * we wrap back to it. Bounded by a hard counter so a concurrently-mutating
  * list can never loop forever. Returns the target's ->mm in *mm_out.
@@ -420,301 +266,65 @@ static long lxgr_find_task(unsigned long want, unsigned long *mm_out)
 	return -ESRCH;
 }
 
-/* Read up to cap bytes of a task's argv string (its cmdline) into out, as a
- * single NUL-terminated C string. Uses the same safe translate/linear-map path
- * as rw_read_custom, so an unmapped/racing arg page just ends the read. */
-static long lxgr_read_cmdline(unsigned long mm, char *out, unsigned long cap)
-{
-	unsigned long arg_start, arg_end, pgd, done = 0;
-
-	if (!lxgr_kern_ptr(mm))
-		return 0;
-	arg_start = *(unsigned long *)(mm + LXGR_OFF_MM_ARGSTART);
-	arg_end   = *(unsigned long *)(mm + LXGR_OFF_MM_ARGEND);
-	if (!arg_start || arg_end <= arg_start)
-		return 0;
-	if (arg_end - arg_start > cap)
-		arg_end = arg_start + cap;
-	pgd = *(unsigned long *)(mm + LXGR_OFF_MM_PGD);
-	if (!pgd)
-		return 0;
-
-	while (arg_start + done < arg_end) {
-		unsigned long pa, chunk, lin, k;
-		long r = lxgr_translate(pgd, arg_start + done, &pa);
-
-		if (r)
-			break;
-		if (!lxgr_safe_virt(pa))
-			break;
-		chunk = LXGR_PAGE_SIZE - (pa & (LXGR_PAGE_SIZE - 1));
-		if (chunk > arg_end - (arg_start + done))
-			chunk = arg_end - (arg_start + done);
-		lin = lxgr_phys_to_virt(pa);
-		for (k = 0; k < chunk; k++) {
-			char c = *(char *)(lin + k);
-			out[done + k] = c;
-			if (c == 0) {
-				out[done + k] = 0;
-				return (long)(done + k);
-			}
-		}
-		done += chunk;
-	}
-	out[done] = 0;
-	return (long)done;
-}
-
-/* Find a task whose cmdline contains `sub` (like the old /proc/<pid>/cmdline
- * scan). Walks the task list exactly like lxgr_find_task — same anchored,
- * bounded, self-contained traversal; the cmdline is read through the page
- * tables, never through /proc. Returns the target pid. */
-static long lxgr_find_task_by_name(const char *sub, unsigned long *pid_out)
-{
-	unsigned long cur = lxgr_current();
-	unsigned long p = cur, nxt, mm;
-	char cmd[192];
-	int i;
-
-	for (i = 0; i < 1048576; i++) {
-		mm = *(unsigned long *)(p + LXGR_OFF_MM);
-		if (mm && lxgr_kern_ptr(mm)) {
-			long n = lxgr_read_cmdline(mm, cmd, sizeof(cmd) - 1);
-			if (n > 0 && lxgr_strstr(cmd, sub)) {
-				*pid_out = *(unsigned long *)(p + LXGR_OFF_PID);
-				return 0;
-			}
-		}
-		nxt = *(unsigned long *)(p + LXGR_OFF_TASKS);
-		if (!nxt)
-			return -ESRCH;
-		p = nxt - LXGR_OFF_TASKS;
-		if (p == cur)
-			break;
-	}
-	return -ESRCH;
-}
-
-/* Resolve the load base of the task's mapping of a named shared object (e.g.
- * libil2cpp.so) — replaces the /proc/<pid>/maps parser. Walks the target's
- * VMAs, and for each offset-0 mapping with a real file match the file's leaf
- * dentry name. Every kernel pointer is guarded by lxgr_kern_ptr before deref,
- * and a file backed by a live vma is itself held alive by the mapping, so this
- * cannot fault EL1. Returns the vm_start. */
-
-/* Shared per-VMA file-name match test (both walkers). */
-static long lxgr_vma_base(unsigned long vma, const char *lib,
-			  unsigned long *out)
-{
-	unsigned long pgoff, f, dentry, dn, dnlen, start;
-
-	if (!lxgr_kern_ptr(vma))
-		return -EFAULT;
-	pgoff = *(unsigned long *)(vma + LXGR_OFF_VMA_PGOFF);
-	f     = *(unsigned long *)(vma + LXGR_OFF_VMA_FILE);
-	if (pgoff != 0 || !f || !lxgr_kern_ptr(f))
-		return -ESRCH;
-	dentry = *(unsigned long *)(f + LXGR_OFF_FILE_PATH + LXGR_OFF_PATH_DENTRY);
-	if (!dentry || !lxgr_kern_ptr(dentry))
-		return -ESRCH;
-	dn   = *(unsigned long *)(dentry + LXGR_OFF_DENTRY_NAME + LXGR_OFF_QSTR_NAME);
-	dnlen = *(unsigned long *)(dentry + LXGR_OFF_DENTRY_NAME + LXGR_OFF_QSTR_LEN);
-	if (dn && dnlen > 0 && dnlen < 128 && lxgr_kern_ptr(dn) &&
-	    lxgr_name_eq((const unsigned char *)dn, dnlen, lib)) {
-		start = *(unsigned long *)(vma + LXGR_OFF_VMA_START);
-		*out = start;
-		return 0;
-	}
-	return -ESRCH;
-}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-/* Self-contained DFS of a maple tree rooted at a node. Type is read from the
- * enode's own tag bits (MAPLE_ENODE_TYPE_SHIFT). Leaf node types (maple_dense
- * / maple_leaf_64) hold VMA pointers directly; internal types (maple_range_64
- * / maple_arange_64) hold child enodes. Returns 0 (found) / -ESRCH / -EFAULT. */
-static long lxgr_mt_walk(unsigned long node, unsigned long type,
-			 const char *lib, unsigned long *out, int depth)
-{
-	unsigned long slot_off, i, slots, end;
-	long r;
-
-	if (depth > 64 || !lxgr_kern_ptr(node))
-		return -ESRCH;
-
-	if (type == LXGR_MT_LEAF_64) {
-		slot_off = node + LXGR_OFF_MR64_SLOT;
-		end = *(unsigned char *)(node + LXGR_OFF_MR64_META);
-		slots = LXGR_MT_RANGE_SLOTS;
-		if (end >= (unsigned char)slots)
-			end = (unsigned char)(slots - 1);
-		for (i = 0; i <= end; i++) {
-			unsigned long v = *(unsigned long *)(slot_off + i * 8);
-			if (!v)
-				continue;
-			r = lxgr_vma_base(v, lib, out);
-			if (r == 0)
-				return 0;
-		}
-		return -ESRCH;
-	}
-
-	if (type == LXGR_MT_RANGE_64) {
-		slot_off = node + LXGR_OFF_MR64_SLOT;
-		end = *(unsigned char *)(node + LXGR_OFF_MR64_META);
-		slots = LXGR_MT_RANGE_SLOTS;
-		if (end >= (unsigned char)slots)
-			end = (unsigned char)(slots - 1);
-		for (i = 0; i <= end; i++) {
-			unsigned long e =
-				*(unsigned long *)(slot_off + i * 8);
-			if (!e)
-				continue;
-			r = lxgr_mt_walk(e & ~LXGR_MT_NODE_MASK,
-					  (e >> LXGR_MT_TYPE_SHIFT) &
-					   LXGR_MT_TYPE_MASK,
-					  lib, out, depth + 1);
-			if (r == 0)
-				return 0;
-		}
-		return -ESRCH;
-	}
-
-	if (type == LXGR_MT_ARANGE_64) {
-		slot_off = node + LXGR_OFF_MA64_SLOT;
-		end = *(unsigned char *)(node + LXGR_OFF_MA64_META);
-		slots = LXGR_MT_ARANGE_SLOTS;
-		if (end >= (unsigned char)slots)
-			end = (unsigned char)(slots - 1);
-		for (i = 0; i <= end; i++) {
-			unsigned long e =
-				*(unsigned long *)(slot_off + i * 8);
-			if (!e)
-				continue;
-			r = lxgr_mt_walk(e & ~LXGR_MT_NODE_MASK,
-					  (e >> LXGR_MT_TYPE_SHIFT) &
-					   LXGR_MT_TYPE_MASK,
-					  lib, out, depth + 1);
-			if (r == 0)
-				return 0;
-		}
-		return -ESRCH;
-	}
-
-	/* maple_dense root: direct leaf entries packed from slot 0. */
-	slot_off = node + LXGR_OFF_NODE_SLOT;
-	slots = LXGR_MT_DENSE_SLOTS;
-	for (i = 0; i < slots; i++) {
-		unsigned long v = *(unsigned long *)(slot_off + i * 8);
-		if (!v)
-			break;
-		r = lxgr_vma_base(v, lib, out);
-		if (r == 0)
-			return 0;
-	}
-	return -ESRCH;
-}
-#endif
-
-static long lxgr_module_base(unsigned long pid, const char *lib,
-			     unsigned long *base_out)
-{
-	unsigned long mm;
-	long r = lxgr_find_task(pid, &mm);
-
-	if (r || !mm || !lxgr_kern_ptr(mm))
-		return -ESRCH;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-	{
-		unsigned long mt, root, node, type;
-
-		mt = mm + LXGR_OFF_MM_MMT;
-		if (!lxgr_kern_ptr(mt))
-			return -ESRCH;
-		root = *(unsigned long *)(mt + LXGR_OFF_MT_ROOT);
-		if (!root)
-			return -ESRCH;
-		if (!(root & LXGR_MT_ROOT_NODE))
-			return lxgr_vma_base(root, lib, base_out);
-		node = root & ~LXGR_MT_NODE_MASK;
-		type = (root >> LXGR_MT_TYPE_SHIFT) & LXGR_MT_TYPE_MASK;
-		r = lxgr_mt_walk(node, type, lib, base_out, 0);
-		return r;
-	}
-#else
-	{
-		unsigned long vma;
-		int i;
-
-		vma = *(unsigned long *)(mm + LXGR_OFF_MM_MMAP);
-		for (i = 0; vma && i < 1048576; i++) {
-			unsigned long next;
-
-			if (!lxgr_kern_ptr(vma))
-				break;
-			next = *(unsigned long *)(vma + LXGR_OFF_VMA_NEXT);
-			r = lxgr_vma_base(vma, lib, base_out);
-			if (r == 0)
-				return 0;
-			vma = next;
-		}
-	}
-	return -ESRCH;
-#endif
-}
-
 /* ================= page table walk =================================== */
 
 /* Translate user VA to physical PA through mm->pgd (a linear-map VA of the
- * top-level table). Generic walk: 3 levels (39-bit VA, PGD/PMD/PTE) or
- * 4 levels (48-bit VA, PGD/PUD/PMD/PTE), with 1GB/2MB block descriptors at
- * the intermediate levels and 4K pages at the leaf. */
+ * top-level table). Handles 1GB/2MB blocks and 4K pages, per-level. */
 static long lxgr_translate(unsigned long pgd_va, unsigned long va,
 			   unsigned long *pa_out)
 {
-	unsigned long e, lin;
-	int lvl;
+	unsigned long e, t;
+	unsigned long idx;
 
 	if (va >= LXGR_USER_VA_TOP)
 		return -EINVAL;
 
-	/* level 0: entry is in the top-level table itself (pgd_va is a kernel VA). */
-	lin = pgd_va;
-	for (lvl = 0; lvl < LXGR_PGT_LEVELS; lvl++) {
-		unsigned long idx = (va >> lxgr_lvl_shift[lvl]) & LXGR_IDX_MASK;
-		unsigned long t;
+	/* level 0 (PGD, bits 38:30) */
+	idx = (va >> LXGR_PGD_SHIFT) & LXGR_IDX_MASK;
+	e = *(volatile unsigned long *)(pgd_va + idx * 8);
+	t = e & LXGR_DESC_MASK;
+	if (t == LXGR_DESC_BLOCK) {
+		*pa_out = (e & LXGR_PGD_BLOCK) + (va & 0x3fffffffUL);
+		return 0;
+	}
+	if (t != LXGR_DESC_TABLE)
+		return -EFAULT;
 
-		e = *(volatile unsigned long *)(lin + idx * 8);
-		t = e & LXGR_DESC_MASK;
-
-		if (t == LXGR_DESC_BLOCK) {
-			/* block descriptor (1GB/2MB) at an intermediate level. */
-			if (lvl == LXGR_PGT_LEVELS - 1)
-				return -EFAULT;
-			*pa_out = (e & lxgr_lvl_block[lvl]) +
-				  (va & ((1UL << lxgr_lvl_shift[lvl]) - 1));
-			return 0;
-		}
-		if (t != LXGR_DESC_TABLE)
-			return -EFAULT;
-		if (lvl == LXGR_PGT_LEVELS - 1)
-			break;
-		/* descend: the referenced page-table page must live in RAM. A
-		 * stale/foreign descriptor (e.g. salvaged from a table the live
-		 * game freed mid-walk) yields a PA outside the RAM window;
-		 * dereferencing its linear address faults at EL1 (panic), so
-		 * reject it up front. */
-		lin = lxgr_safe_virt(e & LXGR_PA_MASK);
+	/* level 1 (PMD, bits 29:21): the referenced page-table page must live in
+	 * RAM. A stale/foreign descriptor (e.g. salvaged from a table the live
+	 * game freed mid-walk) yields a PA outside the RAM window; dereferencing
+	 * its linear address faults at EL1 (panic), so reject it up front. */
+	idx = (va >> LXGR_PMD_SHIFT) & LXGR_IDX_MASK;
+	{
+		unsigned long lin = lxgr_safe_virt(e & LXGR_PA_MASK);
 		if (!lin)
 			return -EFAULT;
+		e = *(volatile unsigned long *)(lin + idx * 8);
 	}
+	t = e & LXGR_DESC_MASK;
+	if (t == LXGR_DESC_BLOCK) {
+		*pa_out = (e & LXGR_PMD_BLOCK) + (va & 0x1fffffUL);
+		return 0;
+	}
+	if (t != LXGR_DESC_TABLE)
+		return -EFAULT;
 
-	/* leaf PTE: valid page descriptor = 0b11. Final guard on the data
-	 * page PA before exposing it to caller. */
+	/* level 2 (PTE, bits 20:12): same safety guard on the table page, then a
+	 * final guard on the data page PA before exposing it to caller. */
+	idx = (va >> LXGR_PTE_SHIFT) & LXGR_IDX_MASK;
+	{
+		unsigned long lin = lxgr_safe_virt(e & LXGR_PA_MASK);
+		if (!lin)
+			return -EFAULT;
+		e = *(volatile unsigned long *)(lin + idx * 8);
+	}
+	t = e & LXGR_DESC_MASK;
+	if (t != LXGR_DESC_TABLE)        /* valid page descriptor = 0b11 */
+		return -EFAULT;
 	if (!lxgr_safe_virt(e & LXGR_PA_MASK))
 		return -EFAULT;
-	*pa_out = (e & LXGR_PA_MASK) + (va & (LXGR_PAGE_SIZE - 1));
+
+	*pa_out = (e & LXGR_PA_MASK) + (va & 0xfffUL);
 	return 0;
 }
 
@@ -805,52 +415,16 @@ static int next_field(const char **pp, char *buf, int bufsz)
 	return n;
 }
 
-/* ASCII payload for the `out` param (decimal pid / hex base). */
-static void lxgr_put_dec(unsigned long v)
-{
-	char tmp[24];
-	int k = 23, i = 0;
-
-	tmp[k] = 0;
-	do {
-		tmp[--k] = '0' + (v % 10);
-		v /= 10;
-	} while (v && k > 0);
-	while (k < 23)
-		rw_buf[i++] = (unsigned char)tmp[k++];
-	rw_text_len = i;
-}
-
-static void lxgr_put_hex(unsigned long v)
-{
-	static const char hx[] = "0123456789abcdef";
-	int i = 0, k, lead;
-
-	for (k = 15; k >= 0; k--)
-		rw_buf[i++] = (unsigned char)hx[(v >> (k * 4)) & 0xf];
-	lead = 0;
-	while (lead < i - 1 && rw_buf[lead] == '0')
-		lead++;
-	if (lead) {
-		for (k = lead; k < i; k++)
-			rw_buf[k - lead] = rw_buf[k];
-		i -= lead;
-	}
-	rw_text_len = i;
-}
-
 static int rw_set(const char *val, const struct kernel_param *kp)
 {
 	const char *p = val;
 	char f[24];
-	char name[96];
 	char op;
 	unsigned long pid, addr, size, value;
-	long r = 0;
+	long r;
 
 	(void)kp;
 	lxgr_spin_lock();
-	rw_text_len = 0;
 	STAGE("parse");
 	while (*p == ' ')
 		p++;
@@ -862,44 +436,6 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 	else
 		goto bad;
 
-	/* ---- discovery ops: P,<cmdline-substr> -> pid; B,<pid>,<lib> -> base ---- */
-	if (op == 'P' || op == 'B') {
-		unsigned long bpid = 0;
-		int n = 0;
-
-		if (op == 'B') {
-			if (next_field(&p, f, sizeof(f)) <= 0)
-				goto bad;
-			bpid = parse_dec(f);
-			if (bpid <= 0 || bpid > 0x7fffffff)
-				goto bad;
-		}
-		while (*p && *p != ',' && n < (int)sizeof(name) - 1)
-			name[n++] = *p++;
-		name[n] = 0;
-		if (n <= 0)
-			goto bad;
-		STAGE("derive");
-		r = lxgr_derive_phys_off();
-		if (r)
-			goto finish;
-		if (op == 'P') {
-			unsigned long found;
-			STAGE("pid");
-			r = lxgr_find_task_by_name(name, &found);
-			if (r == 0)
-				lxgr_put_dec(found);
-		} else {
-			unsigned long base;
-			STAGE("base");
-			r = lxgr_module_base(bpid, name, &base);
-			if (r == 0)
-				lxgr_put_hex(base);
-		}
-		goto finish;
-	}
-
-	/* ---- R/W ops (unchanged layout) ---- */
 	if (next_field(&p, f, sizeof(f)) <= 0)
 		goto bad;
 	pid = parse_dec(f);
@@ -934,14 +470,13 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 bad:
 	rw_status = -EINVAL;
 	rw_last_size = 0;
-	rw_text_len = 0;
 	lxgr_spin_unlock();
 	return 0;
 ok:
 	STAGE("derive");
 	r = lxgr_derive_phys_off();
 	if (r)
-		goto finish;
+		goto fail;
 
 	switch (op) {
 	case 'R':
@@ -952,8 +487,11 @@ ok:
 		STAGE("write");
 		r = rw_write_direct(pid, addr, size, value);
 		break;
+	default:
+		r = -EINVAL;
+		break;
 	}
-finish:
+fail:
 	if (r == 0) {
 		rw_status = 0;
 		if (op == 'R')
@@ -964,7 +502,6 @@ finish:
 	} else {
 		rw_status = r;
 		rw_last_size = 0;
-		rw_text_len = 0;
 	}
 	lxgr_spin_unlock();
 	return 0;
@@ -983,16 +520,6 @@ static int rw_out_get(char *buf, const struct kernel_param *kp)
 
 	(void)kp;
 	lxgr_spin_lock();
-	if (rw_text_len > 0) {
-		long m = rw_text_len;
-		if (m > (long)RW_MAX_SIZE)
-			m = (long)RW_MAX_SIZE;
-		for (i = 0; i < m; i++)
-			buf[i] = (char)rw_buf[i];
-		buf[i] = '\0';
-		lxgr_spin_unlock();
-		return (int)m;
-	}
 	s = rw_last_size;
 	if (s <= 0) {
 		buf[0] = '\0';
