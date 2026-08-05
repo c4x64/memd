@@ -148,6 +148,12 @@ jobs:
           cd android-kernel
           scripts/config --disable LOCALVERSION_AUTO
           scripts/config --set-str LOCALVERSION "-android15-8-4k-Wild"
+          # The device config trims unused ksyms against the Android KMI
+          # whitelist (abi_symbollist.raw), an artifact only the GKI
+          # build_abi.sh pipeline generates. Disable the trim: module_layout
+          # and printk are core exports kept regardless, so their CRCs and the
+          # struct layouts are unchanged by this.
+          scripts/config --disable TRIM_UNUSED_KSYMS
           # CFI_CLANG is on in the device config, so build with clang.
           make ARCH=$ARCH LLVM=1 olddefconfig
           grep -E '^CONFIG_(LOCALVERSION|CC_IS_CLANG|CFI_CLANG|SMP|PREEMPT|MODULE_UNLOAD|MODVERSIONS|THREAD_INFO_IN_TASK)' .config
