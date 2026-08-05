@@ -92,79 +92,91 @@ jobs:
           name: rwbridge-${{ matrix.kver }}
           path: kmod/rwbridge.ko
 
-  # ── The 7th, DYNAMIC build: the user's own kernel ───────────────────────
-  # Fork this repo, then set these repo variables
-  #   Settings → Secrets and variables → Actions → Variables:
-  #     USER_KERNEL_URL    direct URL to a kernel tarball (linux-*.tar.xz)
-  #                        e.g. https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.7.2.tar.xz
-  #     USER_KERNEL_VER    the kernel version string, e.g. 6.7.2
-  #     USER_KERNEL_LOCALVER  optional LOCALVERSION (vermagic suffix) to match
-  #                        a vendor kernel, e.g. -v5.21.770-optimizations-5.21.771.4051
-  # On push (or workflow_dispatch) this job downloads that kernel, builds a
-  # rwbridge.ko for it and uploads it as its own artifact. 6 + 1 = 7 kos.
-  kmod-user:
+  # ── The 7th build: the API 36 emulator's GKI kernel (ranchu) ───────────
+  # The BlueStacks vendored build was removed (no longer a target). In its
+  # place this job builds rwbridge.ko for the Android Studio arm64 emulator,
+  # which runs the GKI kernel
+  #    6.6.66-android15-8-4k-Wild     (vermagic: "6.6.66-android15-8-4k-Wild
+  #     SMP preempt mod_unload modversions aarch64")
+  # WildKernels builds of this image are clang/CFI, and the running kernel
+  # exposes its EXACT build config via /proc/config.gz. That config is
+  # committed as kmod/configs/ranchu-6.6.66-android15-8-4k-Wild.config and
+  # reused here verbatim (minus the LOCALVERSION tweak), so struct module
+  # size, symbol CRCs (modversions) and every offsetof() layout rwbridge.c
+  # derives from the headers match the device byte-for-byte. 6 + 1 = 7 kos.
+  kmod-ranchu:
     runs-on: ubuntu-latest
-    if: vars.USER_KERNEL_URL != ''
     env:
       ARCH: arm64
-      CROSS_COMPILE: aarch64-linux-gnu-
-      KVER: ${{ vars.USER_KERNEL_VER }}
-      LOCALVER: ${{ vars.USER_KERNEL_LOCALVER || '' }}
-      USER_KERNEL_URL: ${{ vars.USER_KERNEL_URL }}
+      LLVM: 1
+      KVER: 6.6.66
+      KVER_FULL: 6.6.66-android15-8-4k-Wild
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install cross toolchain
+      - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            libssl-dev libelf-dev bison flex
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev \
+            python3 cpio zip unzip git-lfs
 
-      - name: Fetch & extract user kernel source
+      - name: Sparse-checkout prebuilt clang
         run: |
-          wget -q -O kernel.tar.xz "$USER_KERNEL_URL" || \
-            { echo "cannot download USER_KERNEL_URL: $USER_KERNEL_URL"; exit 1; }
-          tar xf kernel.tar.xz
-          D=$(ls -d linux-* 2>/dev/null | head -1)
-          [ -n "$D" ] || { echo "no linux-* dir in tarball"; exit 1; }
-          [ "$D" = "linux-$KVER" ] || mv "$D" "linux-$KVER"
-          ls -d linux-$KVER
+          git clone --depth 1 --branch android-platform-15.0.0_r17 \
+            --filter=blob:none --sparse \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            /opt/clang
+          cd /opt/clang
+          git sparse-checkout set clang-r510928
+          git lfs install && git lfs pull
+          ls -la clang-r510928/bin/clang clang-r510928/bin/ld.lld
 
-      - name: Configure kernel to match target vermagic
+      - name: Checkout GKI kernel (android15-6.6 @ 6.6.66)
+        uses: actions/checkout@v4
+        with:
+          repository: android/kernel_common
+          ref: 9de961d64563
+          path: android-kernel
+          fetch-depth: 1
+
+      - name: Configure kernel from device config
         run: |
-          cd linux-$KVER
-          make ARCH=$ARCH defconfig
+          export PATH=/opt/clang/clang-r510928/bin:$PATH
+          export ARCH=arm64 LLVM=1
+          cp kmod/configs/ranchu-${{ env.KVER_FULL }}.config android-kernel/.config
+          cd android-kernel
           scripts/config --disable LOCALVERSION_AUTO
-          scripts/config --set-str LOCALVERSION "$LOCALVER"
-          scripts/config --enable MODULES
-          scripts/config --enable MODULE_UNLOAD
-          scripts/config --enable MODVERSIONS
-          scripts/config --enable SMP
-          scripts/config --enable PREEMPT
-          make ARCH=$ARCH olddefconfig
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) vmlinux
-          [ ! -f Module.symvers ] && [ -f vmlinux.symvers ] && cp vmlinux.symvers Module.symvers
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
+          scripts/config --set-str LOCALVERSION "-android15-8-4k-Wild"
+          # CFI_CLANG is on in the device config, so build with clang.
+          make ARCH=$ARCH LLVM=1 olddefconfig
+          grep -E '^CONFIG_(LOCALVERSION|CC_IS_CLANG|CFI_CLANG|SMP|PREEMPT|MODULE_UNLOAD|MODVERSIONS|THREAD_INFO_IN_TASK)' .config
+          # Build vmlinux so modpost emits the real EXPORT_SYMBOL CRCs for
+          # this exact kernel+config (Module.symvers), then prepare the tree
+          # for the external kmod link.
+          make ARCH=$ARCH LLVM=1 -j$(nproc) vmlinux
+          make ARCH=$ARCH LLVM=1 prepare modules_prepare scripts
           ls -la Module.symvers
           head -5 Module.symvers
 
       - name: Build kmod
         run: |
+          export PATH=/opt/clang/clang-r510928/bin:$PATH
+          export ARCH=arm64 LLVM=1
           cd kmod
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE KDIR="$GITHUB_WORKSPACE/linux-$KVER"
+          make ARCH=$ARCH LLVM=1 KDIR="$GITHUB_WORKSPACE/android-kernel"
 
       - name: Show vermagic
         run: |
-          modinfo kmod/rwbridge.ko || \
-          aarch64-linux-gnu-objcopy -O binary --only-section=.modinfo \
+          export PATH=/opt/clang/clang-r510928/bin:$PATH
+          modinfo kmod/rwbridge.ko 2>/dev/null || \
+          llvm-objcopy -O binary --only-section=.modinfo \
             kmod/rwbridge.ko /dev/stdout | strings | grep -i vermagic
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rwbridge-${{ vars.USER_KERNEL_VER }}${{ vars.USER_KERNEL_LOCALVER || '' }}
+          name: rwbridge-${{ env.KVER_FULL }}
           path: kmod/rwbridge.ko
 
   # ── KernelSU-Next kernel + manager for the emulator (ranchu) ──────────

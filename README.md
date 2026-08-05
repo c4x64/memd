@@ -30,8 +30,9 @@ differs between 5.10 / 5.15 / 6.1 / 6.6 / 6.12 / 6.18, and `task_struct`/
   build against, you get that kernel's correct layout (3- or 4-level walk).
 - CI (`.github/workflows/build.yml`) builds **one `.ko` per kernel major**
   against that kernel's own source/CRCs + **one** additional build for the
-  fork owner's custom kernel (repo variables `USER_KERNEL_URL`,
-  `USER_KERNEL_VER`, optional `USER_KERNEL_LOCALVER`).
+  API 36 emulator's GKI kernel (`6.6.66-android15-8-4k-Wild`) from the
+  android15-6.6 source + the running device's own `/proc/config.gz`
+  (committed as `kmod/configs/ranchu-6.6.66-android15-8-4k-Wild.config`).
 - `build.sh` bundles every `kmod_bin/rwbridge-*.ko` into `dist/run.sh`.
 - `run.sh` extracts them and `insmod`s the one whose **vermagic matches** the
   target device (kernel CRC check refuses mismatches) — no `--force`, no
@@ -67,4 +68,5 @@ The module reads all layout constants (`offsetof`, `PAGE_OFFSET`, `TASK_SIZE`,
 pgtable shifts) from the headers of whatever `KDIR` you point it at, so just
 build against the exact kernel your device runs. To build for a device whose
 kernel is not one of the 6 stock majors, point `KDIR` at that kernel's source
-tree (or use the fork's `USER_KERNEL_URL` CI path).
+tree — for the API 36 emulator, the `kmod-ranchu` CI job does this
+automatically (android15-6.6 source + device config + matching LOCALVERSION).
