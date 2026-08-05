@@ -38,6 +38,8 @@
  * Operations (sysfs param `rw`, comma separated, same interface as before):
  *   R,pid,addr,size        read user VA, result hex (byte0 first) in `out`
  *   W,pid,addr,size,value  write value to user VA (writes native LE bytes)
+ *   P,<cmdline-substr>     find pid by argv substring (in-kernel; `out`=dec)
+ *   B,<pid>,<lib>          load base of file-backed lib mapping (`out`=hex)
  * Plus `status` (errno of last op), `out` (hex), `stage` (debug) params.
  *
  * Link-time imports: module_layout, _printk. Only.
@@ -736,87 +738,6 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 		goto finish;
 	}
 
-	/* ---- debug: D,0,0,0 -> current mm arg/env region head (TEMPORARY) ---- */
-	if (op == 'D') {
-		unsigned long cur, mm, v[8];
-		int i;
-
-		STAGE("debug");
-		cur = lxgr_current();
-		mm = *(unsigned long *)(cur + LXGR_OFF_MM);
-		v[0] = mm;
-		v[1] = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGSTART) : 0;
-		v[2] = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGEND) : 0;
-		v[3] = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGSTART + 0x18) : 0; /* env_start */
-		v[4] = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGSTART + 0x20) : 0; /* env_end   */
-		v[5] = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGSTART - 0x28) : 0; /* start_stack */
-		v[6] = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGSTART - 0x20) : 0; /* brk */
-		v[7] = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_MMAP) : 0;
-		for (i = 0; i < 8; i++)
-			lxgr_memcpy(rw_buf + i * 8, &v[i], 8);
-		size = 8 * 8;
-		r = 0;
-		goto finish;
-	}
-
-	/* ---- debug: C,<sub>,0,0 -> dump what cmdline_has scans for current ---- */
-	if (op == 'C') {
-		unsigned long cur, mm, pgd, ase, ae, cap, dd = 0;
-		unsigned long sublen;
-		unsigned char scan[4096];
-		long m = 0;
-		int nn = 0;
-
-		while (*p && *p != ',' && nn < (int)sizeof(name) - 1)
-			name[nn++] = *p++;
-		name[nn] = 0;
-		while (nn > 0 && (name[nn - 1] == '\n' || name[nn - 1] == '\r' ||
-				 name[nn - 1] == ' '))
-			name[--nn] = 0;
-		sublen = lxgr_strlen(name);
-
-		cur = lxgr_current();
-		mm = *(unsigned long *)(cur + LXGR_OFF_MM);
-		pgd = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_PGD) : 0;
-		ase = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGSTART) : 0;
-		ae = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGEND) : 0;
-		if (pgd && ae > ase) {
-			cap = ae - ase;
-			if (cap > 4095)
-				cap = 4095;
-			while (dd < cap) {
-				unsigned long pa, chunk, lin;
-				long rr = lxgr_translate(pgd, ase + dd, &pa);
-				if (rr)
-					break;
-				if (!lxgr_safe_virt(pa))
-					break;
-				chunk = LXGR_PAGE_SIZE - (pa & (LXGR_PAGE_SIZE - 1));
-				if (chunk > cap - dd)
-					chunk = cap - dd;
-				lin = lxgr_phys_to_virt(pa);
-				lxgr_memcpy(scan + dd, (const void *)lin, chunk);
-				dd += chunk;
-			}
-			scan[dd] = 0;
-			if (sublen && sublen < dd) {
-				unsigned long i;
-				for (i = 0; i + sublen <= dd; i++)
-					if (lxgr_memcmp(scan + i, name, sublen) == 0) {
-						m = 1;
-						break;
-					}
-			}
-		}
-		lxgr_memcpy(rw_buf, &m, 8);
-		if (dd > (RW_MAX_SIZE - 8))
-			dd = RW_MAX_SIZE - 8;
-		lxgr_memcpy(rw_buf + 8, scan, dd);
-		size = 8 + dd;
-		r = 0;
-		goto finish;
-	}
-
 	/* ---- R/W ops (unchanged layout) ---- */
 	if (next_field(&p, f, sizeof(f)) <= 0)
 		goto bad;
@@ -875,7 +796,7 @@ finish:
 fail:
 	if (r == 0) {
 		rw_status = 0;
-		if (op == 'R' || op == 'D' || op == 'C')
+		if (op == 'R')
 			rw_last_size = (long)size;
 		else
 			rw_last_size = 0;
