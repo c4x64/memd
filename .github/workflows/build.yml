@@ -211,6 +211,8 @@ jobs:
             /opt/clang
           cd /opt/clang
           git sparse-checkout set clang-r510928
+          git lfs install && git lfs pull
+          ls -la clang-r510928/bin/ld.lld clang-r510928/bin/clang
 
       - name: Build Image
         run: |
