@@ -30,9 +30,11 @@ differs between 5.10 / 5.15 / 6.1 / 6.6 / 6.12 / 6.18, and `task_struct`/
   build against, you get that kernel's correct layout (3- or 4-level walk).
 - CI (`.github/workflows/build.yml`) builds **one `.ko` per kernel major**
   against that kernel's own source/CRCs + **one** additional build for the
-  API 36 emulator's GKI kernel (`6.6.66-android15-8-4k-Wild`) from the
-  android15-6.6 source + the running device's own `/proc/config.gz`
-  (committed as `kmod/configs/ranchu-6.6.66-android15-8-4k-Wild.config`).
+  BlueStacks (bst) emulator's vendor kernel (`5.15.137-v5.21.770-optimizations-
+  5.21.771.4051`) — the same 5.15.137 base but with the vendor `LOCALVERSION`
+  so vermagic matches, and a hand-written `Module.symvers` whose CRCs were
+  extracted from the device's own modules' `__versions` sections (a stock
+  vmlinux build can't reproduce the vendor config's CRCs).
 - `build.sh` bundles every `kmod_bin/rwbridge-*.ko` into `dist/run.sh`.
 - `run.sh` extracts them and `insmod`s the one whose **vermagic matches** the
   target device (kernel CRC check refuses mismatches) — no `--force`, no
@@ -68,5 +70,6 @@ The module reads all layout constants (`offsetof`, `PAGE_OFFSET`, `TASK_SIZE`,
 pgtable shifts) from the headers of whatever `KDIR` you point it at, so just
 build against the exact kernel your device runs. To build for a device whose
 kernel is not one of the 6 stock majors, point `KDIR` at that kernel's source
-tree — for the API 36 emulator, the `kmod-ranchu` CI job does this
-automatically (android15-6.6 source + device config + matching LOCALVERSION).
+tree — for the BlueStacks emulator, the `5.15-vendor` CI job does this
+automatically (5.15.137 source + the device's own CRCs + matching
+`LOCALVERSION`).

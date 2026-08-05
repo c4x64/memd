@@ -12,6 +12,12 @@ jobs:
   # PAGE_OFFSET/TASK_SIZE, pgtable shifts), so each build is correct for its
   # kernel with no offsets file. Vermagic encodes the full release (w.x.y),
   # so a .ko only loads on a kernel with an exact vermagic match.
+  #
+  # The 7th entry (5.15-vendor) is the BlueStacks (bst) emulator's vendor
+  # kernel: same 5.15.137 base but with the vendor LOCALVERSION so the
+  # vermagic matches exactly, and a hand-written Module.symvers whose CRCs
+  # were extracted from the device's own modules (the vendor config can't be
+  # reproduced by a stock vmlinux build).
   kmod:
     runs-on: ubuntu-latest
     strategy:
@@ -30,10 +36,19 @@ jobs:
           tag: "6.12"
         - kver: "6.18"            # pin to a stable 6.18.y patch before enabling
           tag: "6.18"
+        # bst / BlueStacks vendor kernel: 5.15.137 with the vendor LOCALVERSION
+        # and CRCs pulled from the device's own bst modules.
+        - kver: "5.15.137"
+          localver: "-v5.21.770-optimizations-5.21.771.4051"
+          tag: "5.15-vendor"
+          hand_crcs: "1"
     env:
       ARCH: arm64
       CROSS_COMPILE: aarch64-linux-gnu-
       KVER: ${{ matrix.kver }}
+      LOCALVER: ${{ matrix.localver || '' }}
+      TAG: ${{ matrix.tag }}
+      HAND_CRCS: ${{ matrix.hand_crcs || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,21 +72,28 @@ jobs:
           cd linux-$KVER
           make ARCH=$ARCH defconfig
           scripts/config --disable LOCALVERSION_AUTO
-          scripts/config --set-str LOCALVERSION ""
+          scripts/config --set-str LOCALVERSION "$LOCALVER"
           scripts/config --enable MODULES
           scripts/config --enable MODULE_UNLOAD
           scripts/config --enable MODVERSIONS
           scripts/config --enable SMP
           scripts/config --enable PREEMPT
           make ARCH=$ARCH olddefconfig
-          # Build vmlinux so modpost emits the real EXPORT_SYMBOL CRCs for
-          # this exact kernel+config (vmlinux.symvers on 5.10, Module.symvers
-          # on 5.15+; normalize to Module.symvers).
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) vmlinux
-          [ ! -f Module.symvers ] && [ -f vmlinux.symvers ] && cp vmlinux.symvers Module.symvers
-          # vmlinux alone does not generate scripts/module.lds (only
-          # modules_prepare/scripts do), needed for the external kmod link.
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
+          if [ -n "$HAND_CRCS" ]; then
+            # bst vendor kernel: the CRCs below were extracted from the
+            # device's own modules' __versions sections (this exact 5.15.137
+            # vendor config can't be reproduced by a stock vmlinux build).
+            # rwbridge.c links only module_layout + _printk.
+            printf '0x93375eb6\tmodule_layout\tvmlinux\tEXPORT_SYMBOL\t\n0x92997ed8\t_printk\tvmlinux\tEXPORT_SYMBOL\t\n' > Module.symvers
+            make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
+          else
+            # Stock kernel: build vmlinux so modpost emits the real
+            # EXPORT_SYMBOL CRCs for this exact kernel+config.
+            make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) vmlinux
+            # Build vmlinux but Module.symvers comes from modpost.
+            [ ! -f Module.symvers ] && [ -f vmlinux.symvers ] && cp vmlinux.symvers Module.symvers
+            make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
+          fi
           ls -la Module.symvers
           head -5 Module.symvers
 
@@ -89,106 +111,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rwbridge-${{ matrix.kver }}
+          name: rwbridge-${{ matrix.kver }}${{ matrix.localver || '' }}
           path: kmod/rwbridge.ko
-
-  # ── The 7th build: the API 36 emulator's GKI kernel (ranchu) ───────────
-  # The BlueStacks vendored build was removed (no longer a target). In its
-  # place this job builds rwbridge.ko for the Android Studio arm64 emulator,
-  # which runs the GKI kernel
-  #    6.6.66-android15-8-4k-Wild     (vermagic: "6.6.66-android15-8-4k-Wild
-  #     SMP preempt mod_unload modversions aarch64")
-  # WildKernels builds of this image are clang/CFI, and the running kernel
-  # exposes its EXACT build config via /proc/config.gz. That config is
-  # committed as kmod/configs/ranchu-6.6.66-android15-8-4k-Wild.config and
-  # reused here verbatim (minus the LOCALVERSION tweak), so struct module
-  # size, symbol CRCs (modversions) and every offsetof() layout rwbridge.c
-  # derives from the headers match the device byte-for-byte. 6 + 1 = 7 kos.
-  kmod-ranchu:
-    runs-on: ubuntu-latest
-    env:
-      ARCH: arm64
-      LLVM: 1
-      KVER: 6.6.66
-      KVER_FULL: 6.6.66-android15-8-4k-Wild
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison flex libssl-dev libelf-dev \
-            python3 cpio zip unzip git-lfs
-
-      - name: Sparse-checkout prebuilt clang
-        run: |
-          git clone --depth 1 --branch android-platform-15.0.0_r17 \
-            --filter=blob:none --sparse \
-            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-            /opt/clang
-          cd /opt/clang
-          git sparse-checkout set clang-r510928
-          git lfs install && git lfs pull
-          ls -la clang-r510928/bin/clang clang-r510928/bin/ld.lld
-
-      - name: Checkout GKI kernel (android15-6.6 @ 6.6.66)
-        uses: actions/checkout@v4
-        with:
-          repository: android/kernel_common
-          ref: b66429556fb8cd9718a39198ef7aec8a1fa9ec32
-          path: android-kernel
-          fetch-depth: 1
-
-      - name: Configure kernel from device config
-        run: |
-          export PATH=/opt/clang/clang-r510928/bin:$PATH
-          export ARCH=arm64 LLVM=1
-          # With LOCALVERSION_AUTO off, setlocalversion only omits the "+"
-          # when the LOCALVERSION var is set (even empty); the CI checkout is
-          # at a non-tag commit, which would otherwise append "+" and break
-          # vermagic against the running -Wild kernel.
-          export LOCALVERSION=
-          cp kmod/configs/ranchu-${{ env.KVER_FULL }}.config android-kernel/.config
-          cd android-kernel
-          scripts/config --disable LOCALVERSION_AUTO
-          scripts/config --set-str LOCALVERSION "-android15-8-4k-Wild"
-          # The device config trims unused ksyms against the Android KMI
-          # whitelist (abi_symbollist.raw), an artifact only the GKI
-          # build_abi.sh pipeline generates. Disable the trim: module_layout
-          # and printk are core exports kept regardless, so their CRCs and the
-          # struct layouts are unchanged by this.
-          scripts/config --disable TRIM_UNUSED_KSYMS
-          # CFI_CLANG is on in the device config, so build with clang.
-          make ARCH=$ARCH LLVM=1 olddefconfig
-          grep -E '^CONFIG_(LOCALVERSION|CC_IS_CLANG|CFI_CLANG|SMP|PREEMPT|MODULE_UNLOAD|MODVERSIONS|THREAD_INFO_IN_TASK)' .config
-          # Build vmlinux so modpost emits the real EXPORT_SYMBOL CRCs for
-          # this exact kernel+config (Module.symvers), then prepare the tree
-          # for the external kmod link.
-          make ARCH=$ARCH LLVM=1 -j$(nproc) vmlinux
-          [ ! -f Module.symvers ] && [ -f vmlinux.symvers ] && cp vmlinux.symvers Module.symvers
-          make ARCH=$ARCH LLVM=1 prepare modules_prepare scripts
-          ls -la Module.symvers
-          head -5 Module.symvers
-
-      - name: Build kmod
-        run: |
-          export PATH=/opt/clang/clang-r510928/bin:$PATH
-          export ARCH=arm64 LLVM=1
-          cd kmod
-          make ARCH=$ARCH LLVM=1 KDIR="$GITHUB_WORKSPACE/android-kernel"
-
-      - name: Show vermagic
-        run: |
-          export PATH=/opt/clang/clang-r510928/bin:$PATH
-          modinfo kmod/rwbridge.ko 2>/dev/null || \
-          llvm-objcopy -O binary --only-section=.modinfo \
-            kmod/rwbridge.ko /dev/stdout | strings | grep -i vermagic
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rwbridge-${{ env.KVER_FULL }}
-          path: kmod/rwbridge.ko
-
-
