@@ -393,6 +393,59 @@ static long rw_write_direct(unsigned long pid, unsigned long addr,
 	return 0;
 }
 
+/* ================= debug probes (temporary, offset extraction) ======= */
+
+/* Like lxgr_find_task but also hands back the found task_struct VA. */
+static long lxgr_find_task_va(unsigned long want, unsigned long *task_out,
+			      unsigned long *mm_out)
+{
+	unsigned long cur = lxgr_current();
+	unsigned long p = cur, nxt, pid;
+	int i;
+
+	pid = *(unsigned long *)(p + LXGR_OFF_PID);
+	if ((pid & 0xffffffffUL) > 0x7fffffffUL)
+		return -EIO;
+
+	for (i = 0; i < 1048576; i++) {
+		pid = *(unsigned long *)(p + LXGR_OFF_PID);
+		if ((unsigned int)pid == (unsigned int)want) {
+			if (task_out)
+				*task_out = p;
+			if (mm_out)
+				*mm_out = *(unsigned long *)(p + LXGR_OFF_MM);
+			return 0;
+		}
+		nxt = *(unsigned long *)(p + LXGR_OFF_TASKS);
+		if (!nxt)
+			return -ESRCH;
+		p = nxt - LXGR_OFF_TASKS;
+		if (p == cur)
+			break;
+	}
+	return -ESRCH;
+}
+
+/* Read raw bytes from the linear map (kernel VAs) into rw_buf. */
+static long lxgr_kread(unsigned long va, unsigned long size)
+{
+	unsigned long off;
+
+	if (va < LXGR_PAGE_OFFSET)
+		return -EINVAL;
+	off = va - LXGR_PAGE_OFFSET;
+	if (off >= LXGR_RAM_LIMIT)
+		return -EFAULT;
+	if (size == 0 || size > RW_MAX_SIZE)
+		return -EINVAL;
+	if (va + size < va)
+		return -EINVAL;
+	if (off + size > LXGR_RAM_LIMIT)
+		return -EFAULT;
+	lxgr_memcpy(rw_buf, (const void *)va, size);
+	return 0;
+}
+
 /* ================= param set: guaranteed entry point ================= */
 
 #define STAGE(s) lxgr_memcpy(rw_stage, (s), sizeof(s) - 1), \
@@ -453,6 +506,10 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 		value = parse_hex(f);
 	}
 
+	/* ---- debug probes: T,<pid>,0,0 -> task+mm VAs; K,<kva>,<size> ---- */
+	if (op == 'T' || op == 'K')
+		goto probe;
+
 	/* ---- strict validation: nothing here may ever crash ---- */
 	if (!(op == 'R' || op == 'W'))
 		goto bad;
@@ -467,6 +524,23 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 	if (addr + size < addr)      /* wraparound */
 		goto bad;
 	goto ok;
+probe:
+	STAGE("probe");
+	r = 0;
+	if (op == 'T') {
+		unsigned long tv, mv;
+
+		r = lxgr_find_task_va(pid, &tv, &mv);
+		if (r == 0) {
+			lxgr_memcpy(rw_buf, &tv, 8);
+			lxgr_memcpy(rw_buf + 8, &mv, 8);
+			size = 16;
+		}
+	} else {
+		STAGE("kread");
+		r = lxgr_kread(addr, size);
+	}
+	goto done;
 bad:
 	rw_status = -EINVAL;
 	rw_last_size = 0;
@@ -491,10 +565,11 @@ ok:
 		r = -EINVAL;
 		break;
 	}
+done:
 fail:
 	if (r == 0) {
 		rw_status = 0;
-		if (op == 'R')
+		if (op == 'R' || op == 'T' || op == 'K')
 			rw_last_size = (long)size;
 		else
 			rw_last_size = 0;
