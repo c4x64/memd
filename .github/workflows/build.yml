@@ -206,7 +206,8 @@ jobs:
 
       - name: Sparse-checkout prebuilt clang
         run: |
-          git clone --depth 1 --filter=blob:none --sparse \
+          git clone --depth 1 --branch android-platform-15.0.0_r17 \
+            --filter=blob:none --sparse \
             https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
             /opt/clang
           cd /opt/clang
