@@ -69,7 +69,7 @@
 #define LXGR_OFF_VMA_FILE   0xa0UL  /* struct vm_area_struct.vm_file  */
 
 #define LXGR_OFF_FILE_PATH      0x10UL  /* struct file.f_path          */
-#define LXGR_OFF_PATH_DENTRY    0x18UL  /* struct path.dentry (in f_path) */
+#define LXGR_OFF_PATH_DENTRY    0x08UL  /* struct path.dentry (offset within f_path) */
 #define LXGR_OFF_DENTRY_NAME    0x20UL  /* struct dentry.d_name (qstr) */
 #define LXGR_OFF_QSTR_NAME      0x08UL  /* struct qstr.name           */
 #define LXGR_OFF_QSTR_LEN       0x04UL  /* struct qstr.len (u32)      */
@@ -736,6 +736,29 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 		goto finish;
 	}
 
+	/* ---- debug: D,0,0,0 -> current mm arg/env region head (TEMPORARY) ---- */
+	if (op == 'D') {
+		unsigned long cur, mm, v[8];
+		int i;
+
+		STAGE("debug");
+		cur = lxgr_current();
+		mm = *(unsigned long *)(cur + LXGR_OFF_MM);
+		v[0] = mm;
+		v[1] = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGSTART) : 0;
+		v[2] = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGEND) : 0;
+		v[3] = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGSTART + 0x18) : 0; /* env_start */
+		v[4] = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGSTART + 0x20) : 0; /* env_end   */
+		v[5] = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGSTART - 0x28) : 0; /* start_stack */
+		v[6] = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGSTART - 0x20) : 0; /* brk */
+		v[7] = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_MMAP) : 0;
+		for (i = 0; i < 8; i++)
+			lxgr_memcpy(rw_buf + i * 8, &v[i], 8);
+		size = 8 * 8;
+		r = 0;
+		goto finish;
+	}
+
 	/* ---- R/W ops (unchanged layout) ---- */
 	if (next_field(&p, f, sizeof(f)) <= 0)
 		goto bad;
@@ -794,7 +817,7 @@ finish:
 fail:
 	if (r == 0) {
 		rw_status = 0;
-		if (op == 'R')
+		if (op == 'R' || op == 'D')
 			rw_last_size = (long)size;
 		else
 			rw_last_size = 0;
