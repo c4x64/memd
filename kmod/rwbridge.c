@@ -759,6 +759,64 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 		goto finish;
 	}
 
+	/* ---- debug: C,<sub>,0,0 -> dump what cmdline_has scans for current ---- */
+	if (op == 'C') {
+		unsigned long cur, mm, pgd, ase, ae, cap, dd = 0;
+		unsigned long sublen;
+		unsigned char scan[4096];
+		long m = 0;
+		int nn = 0;
+
+		while (*p && *p != ',' && nn < (int)sizeof(name) - 1)
+			name[nn++] = *p++;
+		name[nn] = 0;
+		while (nn > 0 && (name[nn - 1] == '\n' || name[nn - 1] == '\r' ||
+				 name[nn - 1] == ' '))
+			name[--nn] = 0;
+		sublen = lxgr_strlen(name);
+
+		cur = lxgr_current();
+		mm = *(unsigned long *)(cur + LXGR_OFF_MM);
+		pgd = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_PGD) : 0;
+		ase = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGSTART) : 0;
+		ae = mm ? *(unsigned long *)(mm + LXGR_OFF_MM_ARGEND) : 0;
+		if (pgd && ae > ase) {
+			cap = ae - ase;
+			if (cap > 4095)
+				cap = 4095;
+			while (dd < cap) {
+				unsigned long pa, chunk, lin;
+				long rr = lxgr_translate(pgd, ase + dd, &pa);
+				if (rr)
+					break;
+				if (!lxgr_safe_virt(pa))
+					break;
+				chunk = LXGR_PAGE_SIZE - (pa & (LXGR_PAGE_SIZE - 1));
+				if (chunk > cap - dd)
+					chunk = cap - dd;
+				lin = lxgr_phys_to_virt(pa);
+				lxgr_memcpy(scan + dd, (const void *)lin, chunk);
+				dd += chunk;
+			}
+			scan[dd] = 0;
+			if (sublen && sublen < dd) {
+				unsigned long i;
+				for (i = 0; i + sublen <= dd; i++)
+					if (lxgr_memcmp(scan + i, name, sublen) == 0) {
+						m = 1;
+						break;
+					}
+			}
+		}
+		lxgr_memcpy(rw_buf, &m, 8);
+		if (dd > (RW_MAX_SIZE - 8))
+			dd = RW_MAX_SIZE - 8;
+		lxgr_memcpy(rw_buf + 8, scan, dd);
+		size = 8 + dd;
+		r = 0;
+		goto finish;
+	}
+
 	/* ---- R/W ops (unchanged layout) ---- */
 	if (next_field(&p, f, sizeof(f)) <= 0)
 		goto bad;
@@ -817,7 +875,7 @@ finish:
 fail:
 	if (r == 0) {
 		rw_status = 0;
-		if (op == 'R' || op == 'D')
+		if (op == 'R' || op == 'D' || op == 'C')
 			rw_last_size = (long)size;
 		else
 			rw_last_size = 0;
