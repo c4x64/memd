@@ -207,6 +207,28 @@ static void lxgr_put_hex(unsigned long v)
 	rw_text_len = i;
 }
 
+/* Append `v` in minimal hex to rw_buf at offset `off`; returns the new length.
+ * Keeps a running comma-separated list in B for caller-side parsing. */
+static int lxgr_put_hex_at(int off, unsigned long v)
+{
+	static const char hx[] = "0123456789abcdef";
+	char tmp[17];
+	int k, n = 0;
+
+	for (k = 15; k >= 0; k--)
+		tmp[n++] = (unsigned char)hx[(v >> (k * 4)) & 0xf];
+	/* strip leading zeros (keep at least one digit) */
+	{
+		int s = 0;
+		while (s < n - 1 && tmp[s] == '0')
+			s++;
+		for (k = s; k < n && off < RW_MAX_SIZE; k++)
+			rw_buf[off++] = (unsigned char)tmp[k];
+	}
+	rw_text_len = off;
+	return off;
+}
+
 static unsigned long parse_hex(const char *s)
 {
 	unsigned long v = 0;
@@ -585,16 +607,19 @@ static long lxgr_kstr(unsigned long va, unsigned long max, char *out)
 	return 0;
 }
 
-/* B,<pid>,<lib>: walk the target's VMA list (mm->mmap / vma->vm_next), find
- * the file-backed mapping whose dentry basename matches `lib`, and return the
- * lowest vm_start (its ELF base) via lxgr_put_hex. Fully in-kernel: the file
- * name comes from the live struct file/dentry, never from /proc. */
+/* B,<pid>,<lib>: walk the target's VMA list (mm->mmap / vma->vm_next), find the
+ * file-backed mapping whose dentry basename matches `lib`, and return
+ * EVERY pgoff==0 vm_start (each is a full ELF base of that lib) as a
+ * comma-separated hex list via rw_buf/rw_text_len. A lib is sometimes mapped
+ * more than once as a complete image (e.g. an inert/on-disk copy plus the live
+ * runtime copy); returning all of them lets the caller pick the one it needs.
+ * Fully in-kernel: the file name comes from the live struct file/dentry, never
+ * from /proc. */
 static long lxgr_module_base(unsigned long pid, const char *lib)
 {
 	unsigned long task, mm, mmap_va, vma, nxt;
 	unsigned long liblen = lxgr_strlen(lib);
-	unsigned long best = 0;
-	int i;
+	int i, wrote = 0;
 
 	if (liblen == 0 || liblen > 63)
 		return -EINVAL;
@@ -616,7 +641,7 @@ static long lxgr_module_base(unsigned long pid, const char *lib)
 			break;             /* stale list / not a user vma */
 		file = *(unsigned long *)(vma + LXGR_OFF_VMA_FILE);
 		pgoff = *(unsigned long *)(vma + LXGR_OFF_VMA_PGOFF);
-		if (file >= LXGR_PAGE_OFFSET) {
+		if (file >= LXGR_PAGE_OFFSET && pgoff == 0) {
 			dentry = *(unsigned long *)(file + LXGR_OFF_FILE_PATH +
 						    LXGR_OFF_PATH_DENTRY);
 			if (dentry >= LXGR_PAGE_OFFSET) {
@@ -630,12 +655,11 @@ static long lxgr_module_base(unsigned long pid, const char *lib)
 				    lxgr_kstr(dn, len + 1, nm) == 0 &&
 				    len == liblen &&
 				    !lxgr_memcmp(nm, lib, liblen)) {
-					/* lib found: prefer the offset-0 mapping,
-					 * else the lowest vma of this lib. */
-					if (pgoff == 0)
-						return (long)start;
-					if (!best || start < best)
-						best = start;
+					/* full (pgoff==0) base of this lib. */
+					if (wrote && rw_text_len < RW_MAX_SIZE - 20)
+						rw_buf[rw_text_len++] = ',';
+					lxgr_put_hex_at(rw_text_len, start);
+					wrote++;
 				}
 			}
 		}
@@ -644,7 +668,9 @@ static long lxgr_module_base(unsigned long pid, const char *lib)
 			break;
 		vma = nxt;
 	}
-	return best ? (long)best : -ESRCH;
+	if (!wrote)
+		return -ESRCH;
+	return 0;
 }
 
 /* ================= param set: guaranteed entry point ================= */
@@ -727,13 +753,8 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 			}
 		} else {
 			STAGE("base");
+			/* list of pgoff==0 bases written to rw_buf by lxgr_module_base */
 			r = lxgr_module_base(bpid, name);
-			if (r > 0) {
-				lxgr_put_hex((unsigned long)r);
-				r = 0;
-			} else if (r == 0) {
-				r = -ESRCH;
-			}
 		}
 		goto finish;
 	}
