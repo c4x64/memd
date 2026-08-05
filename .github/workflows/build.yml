@@ -83,8 +83,16 @@ jobs:
             # bst vendor kernel: the CRCs below were extracted from the
             # device's own modules' __versions sections (this exact 5.15.137
             # vendor config can't be reproduced by a stock vmlinux build).
-            # rwbridge.c links only module_layout + _printk.
-            printf '0x93375eb6\tmodule_layout\tvmlinux\tEXPORT_SYMBOL\t\n0x92997ed8\t_printk\tvmlinux\tEXPORT_SYMBOL\t\n' > Module.symvers
+            # rwbridge.c links module_layout + _printk (+ memset emitted by the
+            # compiler for kernel-header inline helpers pulled in by the
+            # discovery ops; kept in the symvers or modpost fails with
+            # "memset undefined"). Since 4dc38b0 the arm64 memory.h PAGE_OFFSET
+            # macro also references the exported int vabits_actual when built
+            # with a non-48-bit VA config, so modpost needs that CRC too
+            # ("vabits_actual undefined"). All CRCs are from the stock 5.15.137
+            # vmlinux EXCEPT module_layout, which is the device's own
+            # __versions value (0x93375eb6).
+            printf '0x93375eb6\tmodule_layout\tvmlinux\tEXPORT_SYMBOL\t\n0x92997ed8\t_printk\tvmlinux\tEXPORT_SYMBOL\t\n0xdcb764ad\tmemset\tvmlinux\tEXPORT_SYMBOL\t\n0xc56a41e6\tvabits_actual\tvmlinux\tEXPORT_SYMBOL\t\n' > Module.symvers
             make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare modules_prepare scripts
           else
             # Stock kernel: build vmlinux so modpost emits the real
