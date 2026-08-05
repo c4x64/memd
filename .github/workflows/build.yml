@@ -136,7 +136,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: android/kernel_common
-          ref: 9de961d64563bf935713301d350a242df59ae980
+          ref: b66429556fb8cd9718a39198ef7aec8a1fa9ec32
           path: android-kernel
           fetch-depth: 1
 
