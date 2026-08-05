@@ -144,6 +144,11 @@ jobs:
         run: |
           export PATH=/opt/clang/clang-r510928/bin:$PATH
           export ARCH=arm64 LLVM=1
+          # With LOCALVERSION_AUTO off, setlocalversion only omits the "+"
+          # when the LOCALVERSION var is set (even empty); the CI checkout is
+          # at a non-tag commit, which would otherwise append "+" and break
+          # vermagic against the running -Wild kernel.
+          export LOCALVERSION=
           cp kmod/configs/ranchu-${{ env.KVER_FULL }}.config android-kernel/.config
           cd android-kernel
           scripts/config --disable LOCALVERSION_AUTO
