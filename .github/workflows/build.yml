@@ -166,3 +166,63 @@ jobs:
         with:
           name: rwbridge-${{ vars.USER_KERNEL_VER }}${{ vars.USER_KERNEL_LOCALVER || '' }}
           path: kmod/rwbridge.ko
+
+  # ── KernelSU-Next kernel + manager for the emulator (ranchu) ──────────
+  # The android-studio arm64 emulator boots the GKI kernel that ships as
+  # kernel-ranchu in the system image. Replacing it with this Image gives the
+  # emulator kernel-level KSU root. The manager APK is pulled from the SAME
+  # KernelSU-Next tag the kernel is integrated against, so the kernel's
+  # embedded ksud and the manager UAPI versions always match (no
+  # "uapi mismatch" like prebuilt WildKernels images cause).
+  ksu-ranchu:
+    runs-on: ubuntu-latest
+    env:
+      KSU_TAG: v3.3.0
+      BRANCH: android15-6.6
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev \
+            python3 cpio zip unzip git
+
+      - name: Checkout GKI kernel (ranchu base)
+        uses: actions/checkout@v4
+        with:
+          repository: android/kernel_common
+          ref: ${{ env.BRANCH }}
+          path: android-kernel
+          fetch-depth: 1
+
+      - name: Integrate KernelSU-Next ${{ env.KSU_TAG }}
+        run: |
+          cd android-kernel
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ env.KSU_TAG }}/kernel/setup.sh" \
+            | bash -s "${{ env.KSU_TAG }}"
+          echo 'CONFIG_KSU=y' >> arch/arm64/configs/gki_defconfig
+
+      - name: Build Image (kleaf build.sh)
+        run: |
+          cd android-kernel
+          ./build/build.sh --arch arm64 gki_defconfig
+          ls -la out/*/dist/Image
+
+      - name: Download matching manager APK
+        run: |
+          mkdir -p dist
+          URL=$(curl -sL "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/tags/${{ env.KSU_TAG }}" \
+            | grep -oE '"browser_download_url": "[^"]*release\.apk"' \
+            | grep -v spoofed | head -1 | cut -d'"' -f4)
+          echo "APK: $URL"
+          curl -sL -o dist/KernelSU-Next_${{ env.KSU_TAG }}.apk "$URL"
+
+      - name: Upload kernel + manager
+        uses: actions/upload-artifact@v4
+        with:
+          name: ksu-ranchu-${{ env.KSU_TAG }}
+          path: |
+            android-kernel/out/*/dist/Image
+            dist/*.apk
