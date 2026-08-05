@@ -187,7 +187,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison flex libssl-dev libelf-dev \
-            python3 cpio zip unzip git
+            python3 cpio zip unzip git-lfs
 
       - name: Checkout GKI kernel (ranchu base)
         uses: actions/checkout@v4
@@ -204,11 +204,22 @@ jobs:
             | bash -s "${{ env.KSU_TAG }}"
           echo 'CONFIG_KSU=y' >> arch/arm64/configs/gki_defconfig
 
-      - name: Build Image (kleaf build.sh)
+      - name: Sparse-checkout prebuilt clang
         run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            /opt/clang
+          cd /opt/clang
+          git sparse-checkout set clang-r510928
+
+      - name: Build Image
+        run: |
+          export PATH=/opt/clang/clang-r510928/bin:$PATH
+          export ARCH=arm64 LLVM=1
           cd android-kernel
-          ./build/build.sh --arch arm64 gki_defconfig
-          ls -la out/*/dist/Image
+          make ARCH=$ARCH LLVM=1 CC=clang gki_defconfig
+          make ARCH=$ARCH LLVM=1 CC=clang -j$(nproc) Image
+          ls -la arch/arm64/boot/Image
 
       - name: Download matching manager APK
         run: |
@@ -224,5 +235,5 @@ jobs:
         with:
           name: ksu-ranchu-${{ env.KSU_TAG }}
           path: |
-            android-kernel/out/*/dist/Image
+            android-kernel/arch/arm64/boot/Image
             dist/*.apk
