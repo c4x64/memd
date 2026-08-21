@@ -120,7 +120,7 @@ static unsigned long lxgr_user_va_top = LXGR_DEF_USER_VA_TOP;
 static unsigned long lxgr_pgd_shift   = LXGR_DEF_PGD_SHIFT;
 
 /* Run-time derivation knobs (loader-supplied, `derive=1` to enable). */
-static int  lxgr_derive = 0;         /* try header-free self-derived layout   */
+static unsigned long lxgr_derive = 0;  /* try header-free self-derived layout */
 static unsigned long lxgr_pid_anchor = 0;  /* pid of the LOADING process      */
 
 /* Helper accessors honoring the derived layout. */
@@ -145,28 +145,102 @@ static inline unsigned long PGD_SHIFT(void)      { return lxgr_pgd_shift; }
 static inline unsigned long PAGE_OFF(void)       { return lxgr_page_offset; }
 static inline unsigned long USER_VA_TOP(void)    { return lxgr_user_va_top; }
 
-module_param(lxgr_off_tasks, ulong, 0644);
-module_param(lxgr_off_pid, ulong, 0644);
-module_param(lxgr_off_mm, ulong, 0644);
-module_param(lxgr_off_comm, ulong, 0644);
-module_param(lxgr_off_mm_pgd, ulong, 0644);
-module_param(lxgr_off_mm_mmap, ulong, 0644);
-module_param(lxgr_off_mm_argstart, ulong, 0644);
-module_param(lxgr_off_mm_argend, ulong, 0644);
-module_param(lxgr_off_vma_start, ulong, 0644);
-module_param(lxgr_off_vma_next, ulong, 0644);
-module_param(lxgr_off_vma_pgoff, ulong, 0644);
-module_param(lxgr_off_vma_file, ulong, 0644);
-module_param(lxgr_off_file_path, ulong, 0644);
-module_param(lxgr_off_path_dentry, ulong, 0644);
-module_param(lxgr_off_dentry_name, ulong, 0644);
-module_param(lxgr_off_qstr_name, ulong, 0644);
-module_param(lxgr_off_qstr_len, ulong, 0644);
-module_param(lxgr_page_offset, ulong, 0644);
-module_param(lxgr_user_va_top, ulong, 0644);
-module_param(lxgr_pgd_shift, ulong, 0644);
-module_param(lxgr_derive, int, 0644);
-module_param(lxgr_pid_anchor, ulong, 0644);
+/* ── param plumbing WITHOUT importing param_ops_* ─────────────────────────
+ * module_param(n, ulong/int/bool, ...) references the kernel's exported
+ * param_ops_ulong/int/bool — extra link-time imports (and MODVERSIONS CRCs)
+ * we refuse to need: the vendor symvers carries only module_layout/_printk/
+ * memset/vabits_actual. So all numeric params share ONE custom ops pair with
+ * hand-rolled parsers (decimal or 0x-hex for ulongs; int accepts -/+; bool
+ * accepts 1/0/y/n). Same insmod/sysfs behaviour as the standard macros. */
+static int lxgr_p_set(const char *val, const struct kernel_param *kp)
+{
+	unsigned long v = 0;
+	int neg = 0;
+
+	if (!val || !*val)
+		return -EINVAL;
+	if (*val == '-') { neg = 1; val++; }
+	else if (*val == '+') val++;
+
+	if (val[0] == '0' && (val[1] == 'x' || val[1] == 'X')) {
+		val += 2;
+		if (!*val)
+			return -EINVAL;
+		for (; *val; val++) {
+			int d;
+			if (*val >= '0' && *val <= '9') d = *val - '0';
+			else if (*val >= 'a' && *val <= 'f') d = *val - 'a' + 10;
+			else if (*val >= 'A' && *val <= 'F') d = *val - 'A' + 10;
+			else return -EINVAL;
+			if (v > (ULONG_MAX >> 4))
+				return -ERANGE;
+			v = (v << 4) | (unsigned long)d;
+		}
+	} else {
+		for (; *val; val++) {
+			if (*val < '0' || *val > '9')
+				return -EINVAL;
+			if (v > (ULONG_MAX - 9) / 10)
+				return -ERANGE;
+			v = v * 10 + (unsigned long)(*val - '0');
+		}
+	}
+	if (neg)
+		v = 0UL - v;
+	*(unsigned long *)kp->arg = v;
+	return 0;
+}
+
+static int lxgr_p_get(char *buf, const struct kernel_param *kp)
+{
+	unsigned long v = *(unsigned long *)kp->arg;
+	char tmp[24];
+	int i = 0, n = 0;
+
+	if ((long)v < 0) {
+		buf[n++] = '-';
+		v = 0UL - v;
+	}
+	do {
+		tmp[i++] = (char)('0' + (v % 10));
+		v /= 10;
+	} while (v);
+	while (i)
+		buf[n++] = tmp[--i];
+	buf[n] = '\0';
+	return n;
+}
+
+static const struct kernel_param_ops lxgr_param_ops = {
+	.set = lxgr_p_set,
+	.get = lxgr_p_get,
+};
+
+#define LXGR_PARAM_ULONG(name) \
+	module_param_cb(name, &lxgr_param_ops, &name, 0644)
+
+module_param_cb(lxgr_derive, &lxgr_param_ops, &lxgr_derive, 0644);
+LXGR_PARAM_ULONG(lxgr_off_tasks);
+LXGR_PARAM_ULONG(lxgr_off_pid);
+LXGR_PARAM_ULONG(lxgr_off_mm);
+LXGR_PARAM_ULONG(lxgr_off_comm);
+LXGR_PARAM_ULONG(lxgr_off_mm_pgd);
+LXGR_PARAM_ULONG(lxgr_off_mm_mmap);
+LXGR_PARAM_ULONG(lxgr_off_mm_argstart);
+LXGR_PARAM_ULONG(lxgr_off_mm_argend);
+LXGR_PARAM_ULONG(lxgr_off_vma_start);
+LXGR_PARAM_ULONG(lxgr_off_vma_next);
+LXGR_PARAM_ULONG(lxgr_off_vma_pgoff);
+LXGR_PARAM_ULONG(lxgr_off_vma_file);
+LXGR_PARAM_ULONG(lxgr_off_file_path);
+LXGR_PARAM_ULONG(lxgr_off_path_dentry);
+LXGR_PARAM_ULONG(lxgr_off_dentry_name);
+LXGR_PARAM_ULONG(lxgr_off_qstr_name);
+LXGR_PARAM_ULONG(lxgr_off_qstr_len);
+LXGR_PARAM_ULONG(lxgr_page_offset);
+LXGR_PARAM_ULONG(lxgr_user_va_top);
+LXGR_PARAM_ULONG(lxgr_pgd_shift);
+LXGR_PARAM_ULONG(lxgr_pid_anchor);
 
 /* Universal (kernel-model independent) page-table constants: 4K pages, 9-bit
  * indices, ARM64 descriptor type bits. These never change across kernels. */
@@ -1294,7 +1368,7 @@ static int __init rwbridge_init(void)
 	pr_info("rwbridge: self-contained module loaded "
 		"(offsets tasks=%lu pid=%lu mm=%lu comm=%lu pgd=%lu "
 		"arg=%lu/%lu; geometry pgd_shift=%lu levels=%d pa_off=0x%lx "
-		"phys=0x%lx derive=%d)\n",
+		"phys=0x%lx derive=%lu)\n",
 		OF_TASKS(), OF_PID(), OF_MM(), OF_COMM(), OF_MM_PGD(),
 		OF_MM_ARGSTART(), OF_MM_ARGEND(),
 		PGD_SHIFT(), lxgr_levels, lxgr_page_offset, lxgr_phys_off,
