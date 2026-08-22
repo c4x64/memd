@@ -567,12 +567,14 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 {
 	unsigned long mm, o, pgo, budget = lxgr_scan_budget;
 	int g, ao;
+	unsigned long n_mm = 0, n_pair = 0, n_pgd = 0;
 
 	for (o = 0; o < 4096; o += 8) {
 		cond_resched();
 		mm = lxgr_krd(cur + o);
 		if (!lxgr_kva_ok(mm))
 			continue;
+		n_mm++;
 		/* arg_start/arg_end candidate pairs are read once per (mm,ao)
 		 * and pre-filtered BEFORE any page-table work: real argv spans
 		 * are tiny and low. This collapses the scan by orders of
@@ -597,6 +599,7 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 				continue;
 			if ((as & 7) || (as < 0x1000))
 				continue;
+			n_pair++;
 
 			for (pgo = 0; pgo < 2048; pgo += 8) {
 				cond_resched();
@@ -608,6 +611,7 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 					continue;
 				if (!lxgr_kva_ok(pgd))
 					continue;
+				n_pgd++;
 
 				STAGE("drv:mm");
 				pr_info("rwbridge: [drv] mm probe enter\n");
@@ -653,7 +657,8 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 		}
 	}
 out:
-	pr_warn("rwbridge: derive scan exhausted (budget=%lu)\n", budget);
+	pr_warn("rwbridge: scan end budget=%lu mm=%lu pair=%lu pgd=%lu\n",
+		budget, n_mm, n_pair, n_pgd);
 	return -ENOENT;
 }
 
