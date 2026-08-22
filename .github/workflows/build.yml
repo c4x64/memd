@@ -144,12 +144,17 @@ jobs:
           sudo apt-get install -y clang lld llvm >/dev/null 2>&1 || true
           KSRC_GCC=$GITHUB_WORKSPACE/linux-$KVER
           KSRC=/tmp/kx/linux-$KVER
-          cd $KSRC
           make ARCH=$ARCH LLVM=1 defconfig
-          make ARCH=$ARCH LLVM=1 -j$(nproc) prepare modules_prepare scripts 2>/dev/null || \
-            { ./scripts/config -d DEBUG_INFO_REDUCED -d DEBUG_INFO_SPLIT \
-                -d GDB_SCRIPTS; make ARCH=$ARCH LLVM=1 olddefconfig; \
-              make ARCH=$ARCH LLVM=1 -j$(nproc) prepare modules_prepare scripts; }
+          # MODVERSIONS ON: emits a native __versions section (genksyms).
+          # Without it the ko loads nowhere: MODVERSIONS kernels treat a
+          # missing table as force-load -> silent -ENOEXEC, and full-string
+          # vermagic compare fails (release prefix differs per device).
+          # With it: vermagic compares SUFFIX-only and the loader patches
+          # just module_layout's CRC from the target's own vendor kos.
+          $KSRC/scripts/config --file $KSRC/.config \
+            -e MODVERSIONS \
+            -d DEBUG_INFO_REDUCED -d DEBUG_INFO_SPLIT -d GDB_SCRIPTS
+          make ARCH=$ARCH LLVM=1 olddefconfig
           for S in $KSRC_GCC/Module.symvers $GITHUB_WORKSPACE/Module.symvers; do
             [ -f "$S" ] && cp "$S" $KSRC/ && break
           done
