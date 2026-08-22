@@ -159,6 +159,7 @@ jobs:
           done
           ls -la $KSRC/Module.symvers
           rm -f $GITHUB_WORKSPACE/kmod/rwbridge.o $GITHUB_WORKSPACE/kmod/rwbridge.ko
+          export KDIR=$KSRC
           make -C $KSRC M=$GITHUB_WORKSPACE/kmod ARCH=$ARCH LLVM=1 modules
           cp $GITHUB_WORKSPACE/kmod/rwbridge.ko rwbridge-kcfi.ko
 
