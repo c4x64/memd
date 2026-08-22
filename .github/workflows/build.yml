@@ -155,6 +155,7 @@ jobs:
             -e MODVERSIONS \
             -d DEBUG_INFO_REDUCED -d DEBUG_INFO_SPLIT -d GDB_SCRIPTS
           make -C $KSRC ARCH=$ARCH LLVM=1 olddefconfig
+          make -C $KSRC ARCH=$ARCH LLVM=1 -j$(nproc) prepare modules_prepare scripts
           for S in $KSRC_GCC/Module.symvers $GITHUB_WORKSPACE/Module.symvers; do
             [ -f "$S" ] && cp "$S" $KSRC/ && break
           done
