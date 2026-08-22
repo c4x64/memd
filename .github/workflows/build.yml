@@ -144,7 +144,7 @@ jobs:
           sudo apt-get install -y clang lld llvm >/dev/null 2>&1 || true
           KSRC_GCC=$GITHUB_WORKSPACE/linux-$KVER
           KSRC=/tmp/kx/linux-$KVER
-          make ARCH=$ARCH LLVM=1 defconfig
+          make -C $KSRC ARCH=$ARCH LLVM=1 defconfig
           # MODVERSIONS ON: emits a native __versions section (genksyms).
           # Without it the ko loads nowhere: MODVERSIONS kernels treat a
           # missing table as force-load -> silent -ENOEXEC, and full-string
@@ -154,7 +154,7 @@ jobs:
           $KSRC/scripts/config --file $KSRC/.config \
             -e MODVERSIONS \
             -d DEBUG_INFO_REDUCED -d DEBUG_INFO_SPLIT -d GDB_SCRIPTS
-          make ARCH=$ARCH LLVM=1 olddefconfig
+          make -C $KSRC ARCH=$ARCH LLVM=1 olddefconfig
           for S in $KSRC_GCC/Module.symvers $GITHUB_WORKSPACE/Module.symvers; do
             [ -f "$S" ] && cp "$S" $KSRC/ && break
           done
