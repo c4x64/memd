@@ -62,9 +62,16 @@ jobs:
 
       - name: Fetch & extract kernel source
         run: |
-          wget -q https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-$KVER.tar.xz || \
-            wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$KVER.tar.xz || \
-            { echo "no tarball for $KVER"; exit 1; }
+          # cdn.kernel.org has outages; fall through every known mirror.
+          MAJ=${KVER%%.*}
+          for base in \
+            "https://cdn.kernel.org/pub/linux/kernel/v${MAJ}.x" \
+            "https://mirrors.edge.kernel.org/pub/linux/kernel/v${MAJ}.x" \
+            "https://www.kernel.org/pub/linux/kernel/v${MAJ}.x"; do
+            wget -q --timeout=60 "$base/linux-$KVER.tar.xz" && break
+            rm -f linux-$KVER.tar.xz
+          done
+          [ -f linux-$KVER.tar.xz ] || { echo "no tarball for $KVER (all mirrors)"; exit 1; }
           tar xf linux-$KVER.tar.xz
 
       - name: Configure kernel to match target vermagic
