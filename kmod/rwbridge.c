@@ -492,6 +492,28 @@ static long lxgr_translate(unsigned long pgd_va, unsigned long va,
  * Any candidate that fails the linear-window/type gates is REJECTED before
  * it is ever dereferenced, so garbage offsets can never fault (panic). */
 
+/* Geometry-independent user-space ceiling: the larger VA top of both
+ * candidate geometries (48-bit). Used for pre-filtering mm-field garbage
+ * before any geometry is committed. */
+#define LXGR_USER_TOP_MAX 0x0001000000000000ULL
+
+/* Printable-ASCII check at a translated PA: argv strings are text. */
+static int lxgr_probe_bytes(unsigned long pa)
+{
+	unsigned char b[8];
+	unsigned long lin;
+	int i;
+
+	lin = lxgr_safe_virt(pa);
+	if (!lin)
+		return 0;
+	lxgr_memcpy(b, (const void *)lin, sizeof(b));
+	for (i = 0; i < (int)sizeof(b); i++)
+		if (b[i] < 0x20 || b[i] > 0x7e)
+			return 0;
+	return 1;
+}
+
 /* Only VAs in [PAGE_OFF, PAGE_OFF + RAM_LIMIT) are guaranteed mapped real
  * RAM (the same window safe_virt() uses). Reading anything else as a
  * "kernel VA" risks an EL1 fault, so every heuristic deref is gated on
@@ -521,47 +543,7 @@ static const struct lxgr_geom {
 	{ 0xffff800000000000ULL, 0x1000000000000ULL,   39UL },
 };
 
-/* Try to find (arg_start,arg_end) inside candidate mm such that argv reads
- * back as printable ASCII THROUGH the candidate pgd + geometry. If it works,
- * the whole MM/MM_PGD/phys_off/geometry chain is proven correct. */
-static int lxgr_probe_arg(unsigned long mm, unsigned long ao, unsigned long pgd,
-			  unsigned long *as_out, unsigned long *ae_out)
-{
-	unsigned long as, ae, pa, off, i;
-	unsigned char b[8];
-
-	as = lxgr_krd(mm + ao);
-	ae = lxgr_krd(mm + ao + 8);
-	if (!lxgr_kva_ok(mm + ao) || !lxgr_kva_ok(mm + ao + 8))
-		return 0;
-	if (!as || !ae || ae <= as)
-		return 0;
-	if (as >= USER_VA_TOP() || ae > USER_VA_TOP())
-		return 0;
-	/* 64 MiB: absurd for argv, still bounded. The printable-ASCII readback
-	 * is the real filter; this only stops a pathological scan. */
-	if (ae - as > 0x4000000)
-		return 0;
-
-	off = as + (ae - as) / 2;
-	if (lxgr_translate(pgd, off, &pa))
-		return 0;
-	{
-		unsigned long lin = lxgr_safe_virt(pa);
-		/* the 8-byte probe must stay inside the RAM window: a copy that
-		 * straddles the window top could fault EL1. */
-		unsigned long tail = (pa - lxgr_phys_off) + sizeof(b);
-		if (!lin || tail > lxgr_ram_limit)
-			return 0;
-		lxgr_memcpy(b, (const void *)lin, sizeof(b));
-	}
-	for (i = 0; i < sizeof(b); i++)
-		if (b[i] < 0x20 || b[i] > 0x7e)
-			return 0;
-	*as_out = as;
-	*ae_out = ae;
-	return 1;
-}
+/* (old probe_arg folded into derive_geom_mm: pairs pre-filtered, one midpoint probe) */
 
 /* Apply geometry candidates against every (mm,pgd) pair from cur, running
  * the argv readback test. On success commits mm/pgd/phys_off/argstart/argend
@@ -570,58 +552,88 @@ static int lxgr_probe_arg(unsigned long mm, unsigned long ao, unsigned long pgd,
  * treat a non-zero return as "do not trust this layout". */
 static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 {
-	unsigned long mm, o, pgo;
-	int g;
+	unsigned long mm, o, pgo, budget = 4000000UL;
+	int g, ao;
 
 	for (o = 0; o < 4096; o += 8) {
 		mm = lxgr_krd(cur + o);
 		if (!lxgr_kva_ok(mm))
 			continue;
-		for (pgo = 0; pgo < 2048; pgo += 8) {
-			unsigned long pgd;
-			if (!lxgr_kva_ok(mm + pgo))
-				continue;
-			pgd = lxgr_krd(mm + pgo);
-			unsigned long po, as = 0, ae = 0;
-			int ao;
+		/* arg_start/arg_end candidate pairs are read once per (mm,ao)
+		 * and pre-filtered BEFORE any page-table work: real argv spans
+		 * are tiny and low. This collapses the scan by orders of
+		 * magnitude — translate only runs for plausible pairs. */
+		for (ao = 0; ao < 2048; ao += 8) {
+			unsigned long as, ae;
 
-			if (!pgd || (pgd & (LXGR_PAGE_SIZE - 1)))
+			if (!lxgr_kva_ok(mm + ao) ||
+			    !lxgr_kva_ok(mm + ao + 8))
 				continue;
-			if (!lxgr_kva_ok(pgd))
+			as = lxgr_krd(mm + ao);
+			ae = lxgr_krd(mm + ao + 8);
+			if (!as || !ae || ae <= as)
+				continue;
+			if (as >= LXGR_USER_TOP_MAX || ae > LXGR_USER_TOP_MAX)
+				continue;
+			/* argv+envp block: small (bytes..KBs), never MBs */
+			if ((ae - as) < 8 || (ae - as) > 0x2000)
+				continue;
+			if ((as & 7) || (as < 0x1000))
 				continue;
 
-			for (g = 0; g < 2; g++) {
-				lxgr_page_offset = lxgr_geoms[g].page_off;
-				lxgr_user_va_top = lxgr_geoms[g].user_top;
-				lxgr_pgd_shift = lxgr_geoms[g].pgd_shift;
-				lxgr_init_shifts();   /* rebuild levels from PGD_SHIFT */
-
-				po = ttbr0 - (pgd - lxgr_page_offset);
-				/* phys_off (memstart) is a raw PA base: it can be
-				 * ~0 on low-RAM 48-bit devices or several GiB on
-				 * high-RAM boxes. Only bound the top so garbage
-				 * pgd candidates are rejected; the argv readback
-				 * is the real verification. */
-				if (po > 0x20000000000ULL)
+			for (pgo = 0; pgo < 2048; pgo += 8) {
+				unsigned long pgd;
+				if (!lxgr_kva_ok(mm + pgo))
+					continue;
+				pgd = lxgr_krd(mm + pgo);
+				if (!pgd || (pgd & (LXGR_PAGE_SIZE - 1)))
+					continue;
+				if (!lxgr_kva_ok(pgd))
 					continue;
 
-				lxgr_phys_off = po;
-				lxgr_phys_off_ready = 1;
+				for (g = 0; g < 2 && budget; g++, budget--) {
+					unsigned long po, pa;
 
-				for (ao = 0; ao < 2048; ao += 8) {
-					if (lxgr_probe_arg(mm, ao, pgd,
-							   &as, &ae)) {
+					lxgr_page_offset =
+						lxgr_geoms[g].page_off;
+					lxgr_user_va_top =
+						lxgr_geoms[g].user_top;
+					lxgr_pgd_shift =
+						lxgr_geoms[g].pgd_shift;
+					lxgr_init_shifts();
+
+					po = ttbr0 - (pgd - lxgr_page_offset);
+					if (po > 0x20000000000ULL)
+						continue;
+
+					lxgr_phys_off = po;
+					lxgr_phys_off_ready = 1;
+
+					/* ONE midpoint probe decides this
+					 * whole (pgd, geom) branch. */
+					if (lxgr_translate(
+					      pgd, as + (ae - as) / 2,
+					      &pa) == 0 &&
+					    lxgr_probe_bytes(pa)) {
 						lxgr_off_mm = o;
 						lxgr_off_mm_pgd = pgo;
 						lxgr_off_mm_argstart = ao;
 						lxgr_off_mm_argend = ao + 8;
+						pr_info("rwbridge: derived "
+							"mm=%lu pgd=%lu "
+							"arg=%lu/%lu\n",
+							o, pgo, ao, ao + 8);
 						return 0;
 					}
+					lxgr_phys_off_ready = 0;
 				}
-				lxgr_phys_off_ready = 0;
+				if (!budget)
+					goto out;
 			}
 		}
 	}
+out:
+	pr_warn("rwbridge: derive scan exhausted (budget=%lu)\n", budget);
 	return -ENOENT;
 }
 
