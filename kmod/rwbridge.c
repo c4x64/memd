@@ -687,7 +687,7 @@ static long lxgr_derive_layout(void)
 			if (!lxgr_kva_ok(nb))
 				break;
 			node = nb;
-			if (++cnt > 1048576)
+			if (++cnt > 16384)
 				break;
 			if (node == cur)
 				break;
@@ -863,7 +863,7 @@ static long lxgr_find_task(unsigned long want, unsigned long *mm_out)
 	if ((pid & 0xffffffffUL) > 0x7fffffffUL)
 		return -EIO;               /* layout sanity: current->pid sane */
 
-	for (i = 0; i < 1048576; i++) {
+	for (i = 0; i < 16384; i++) {
 		pid = *(unsigned long *)(p + OF_PID());
 		if ((unsigned int)pid == (unsigned int)want) {
 			*mm_out = *(unsigned long *)(p + OF_MM());
@@ -1051,7 +1051,7 @@ static long lxgr_find_task_va(unsigned long want, unsigned long *task_out,
 	if ((pid & 0xffffffffUL) > 0x7fffffffUL)
 		return -EIO;
 
-	for (i = 0; i < 1048576; i++) {
+	for (i = 0; i < 16384; i++) {
 		pid = *(unsigned long *)(p + OF_PID());
 		if ((unsigned int)pid == (unsigned int)want) {
 			if (task_out)
@@ -1132,7 +1132,7 @@ static long lxgr_find_pid_cmdline(const char *sub)
 	if ((pid & 0xffffffffUL) > 0x7fffffffUL)
 		return -EIO;
 
-	for (i = 0; i < 1048576; i++) {
+	for (i = 0; i < 16384; i++) {
 		pid = *(unsigned long *)(p + OF_PID());
 		if ((unsigned int)pid >= 1 &&
 		    lxgr_task_cmdline_has(p, sub))
@@ -1184,7 +1184,7 @@ static long lxgr_module_base(unsigned long pid, const char *lib)
 	if (!mmap_va || mmap_va < PAGE_OFF())
 		return -ESRCH;
 
-	for (vma = mmap_va, i = 0; i < 1048576; i++) {
+	for (vma = mmap_va, i = 0; i < 16384; i++) {
 		unsigned long start, file, pgoff, dentry, dn, hl;
 		unsigned long len;
 		char nm[96];
