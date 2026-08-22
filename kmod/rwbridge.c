@@ -532,6 +532,8 @@ static int lxgr_probe_arg(unsigned long mm, unsigned long ao, unsigned long pgd,
 
 	as = lxgr_krd(mm + ao);
 	ae = lxgr_krd(mm + ao + 8);
+	if (!lxgr_kva_ok(mm + ao) || !lxgr_kva_ok(mm + ao + 8))
+		return 0;
 	if (!as || !ae || ae <= as)
 		return 0;
 	if (as >= USER_VA_TOP() || ae > USER_VA_TOP())
@@ -576,7 +578,10 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 		if (!lxgr_kva_ok(mm))
 			continue;
 		for (pgo = 0; pgo < 2048; pgo += 8) {
-			unsigned long pgd = lxgr_krd(mm + pgo);
+			unsigned long pgd;
+			if (!lxgr_kva_ok(mm + pgo))
+				continue;
+			pgd = lxgr_krd(mm + pgo);
 			unsigned long po, as = 0, ae = 0;
 			int ao;
 

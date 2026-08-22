@@ -132,38 +132,35 @@ jobs:
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE KDIR="$GITHUB_WORKSPACE/linux-$KVER"
           cp rwbridge.ko rwbridge-gcc.ko
 
-      - name: Build kmod (clang KCFI flavor — GKI CONFIG_CFI_CLANG kernels)
-        # GKI 5.15+ kernels instrument indirect calls (CONFIG_CFI_CLANG):
-        # every kernel->module callback (param .set/.get, i.e. the whole
-        # sysfs interface) traps unless the module carries matching KCFI
-        # type hashes. Those come from clang -fsanitize=kcfi.
-        # Uses the SECOND pristine tree (LLVM=1 end to end). Module.symvers
-        # is copied from the gcc pass — genksyms CRCs derive from C types,
-        # not compiler, so they stay valid.
+      - name: Build kmod (clang CFI flavor — GKI CONFIG_CFI_CLANG kernels)
+        # GKI 5.15 hardening is CLASSIC CFI (kernel/cfi.c, find_check_fn
+        # report path) riding on ThinLTO — NOT kcfi (that is 6.x+). Every
+        # kernel->module callback (param .set/.get = the whole sysfs
+        # interface) traps unless the module is instrumented the same way.
+        # Enabling LTO_CLANG_THIN + CFI_CLANG via KCONFIG makes kbuild add
+        # every required flag itself; hand-injected KCFLAGS bypass that.
+        # MODVERSIONS stays ON so vermagic compares suffix-only and genksyms
+        # emits __versions natively; loader patches only module_layout.
         run: |
           sudo apt-get install -y clang lld llvm >/dev/null 2>&1 || true
           KSRC_GCC=$GITHUB_WORKSPACE/linux-$KVER
           KSRC=/tmp/kx/linux-$KVER
           make -C $KSRC ARCH=$ARCH LLVM=1 defconfig
-          # MODVERSIONS ON: emits a native __versions section (genksyms).
-          # Without it the ko loads nowhere: MODVERSIONS kernels treat a
-          # missing table as force-load -> silent -ENOEXEC, and full-string
-          # vermagic compare fails (release prefix differs per device).
-          # With it: vermagic compares SUFFIX-only and the loader patches
-          # just module_layout's CRC from the target's own vendor kos.
           $KSRC/scripts/config --file $KSRC/.config \
+            -e LTO_CLANG_THIN \
+            -e CFI_CLANG \
             -e MODVERSIONS \
             -d DEBUG_INFO_REDUCED -d DEBUG_INFO_SPLIT -d GDB_SCRIPTS
           make -C $KSRC ARCH=$ARCH LLVM=1 olddefconfig
+          grep -E "^CONFIG_(LTO_CLANG_THIN|CFI_CLANG|MODVERSIONS)=" $KSRC/.config || true
           make -C $KSRC ARCH=$ARCH LLVM=1 -j$(nproc) prepare modules_prepare scripts
           for S in $KSRC_GCC/Module.symvers $GITHUB_WORKSPACE/Module.symvers; do
             [ -f "$S" ] && cp "$S" $KSRC/ && break
           done
           ls -la $KSRC/Module.symvers
-          cd $GITHUB_WORKSPACE/kmod
-          rm -f rwbridge.o rwbridge.ko
-          make ARCH=$ARCH LLVM=1 KCFLAGS="-fsanitize=kcfi" KDIR=$KSRC
-          cp rwbridge.ko rwbridge-kcfi.ko
+          rm -f $GITHUB_WORKSPACE/kmod/rwbridge.o $GITHUB_WORKSPACE/kmod/rwbridge.ko
+          make -C $KSRC M=$GITHUB_WORKSPACE/kmod ARCH=$ARCH LLVM=1 modules
+          cp $GITHUB_WORKSPACE/kmod/rwbridge.ko rwbridge-kcfi.ko
 
       - name: Show vermagic
         run: |
