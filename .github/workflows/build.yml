@@ -73,6 +73,9 @@ jobs:
           done
           [ -f linux-$KVER.tar.xz ] || { echo "no tarball for $KVER (all mirrors)"; exit 1; }
           tar xf linux-$KVER.tar.xz
+          # second tree for the clang/KCFI pass — kbuild forbids mixing a
+          # gcc-dirtied in-tree build with O=, and flavors must stay isolated.
+          mkdir /tmp/kx && tar xf linux-$KVER.tar.xz -C /tmp/kx
 
       - name: Configure kernel to match target vermagic
         run: |
@@ -123,26 +126,26 @@ jobs:
         # every kernel->module callback (param .set/.get, i.e. the whole
         # sysfs interface) traps unless the module carries matching KCFI
         # type hashes. Those come from clang -fsanitize=kcfi.
-        # Built in a SEPARATE O= tree: the gcc-prepared tree bakes
-        # CONFIG_DEBUG_INFO_REDUCED whose CFLAGS (-femit-struct-debug-
-        # baseonly/-fconserve-stack) are gcc-only and reach clang unfiltered.
-        # Module.symvers is copied from the gcc pass — genksyms CRCs derive
-        # from C types, not compiler, so they stay valid.
+        # Uses the SECOND pristine tree (LLVM=1 end to end). Module.symvers
+        # is copied from the gcc pass — genksyms CRCs derive from C types,
+        # not compiler, so they stay valid.
         run: |
           sudo apt-get install -y clang lld llvm >/dev/null 2>&1 || true
-          O=$GITHUB_WORKSPACE/lx-clang
-          KSRC=$GITHUB_WORKSPACE/linux-$KVER
-          make -C $KSRC O=$O ARCH=$ARCH CC=clang LLVM=1 defconfig
-          $KSRC/scripts/config --file $O/.config -d DEBUG_INFO_REDUCED \
-            -d DEBUG_INFO_SPLIT -d DEBUG_INFO_DWARF_TOOLCHAINS_DEFAULT \
-            -d GDB_SCRIPTS || true
-          make -C $KSRC O=$O ARCH=$ARCH CC=clang LLVM=1 olddefconfig
-          make -C $KSRC O=$O ARCH=$ARCH CC=clang LLVM=1 prepare modules_prepare scripts
-          cp $KSRC/Module.symvers $O/ 2>/dev/null || true
-          cd kmod
+          KSRC_GCC=$GITHUB_WORKSPACE/linux-$KVER
+          KSRC=/tmp/kx/linux-$KVER
+          cd $KSRC
+          make ARCH=$ARCH LLVM=1 defconfig
+          make ARCH=$ARCH LLVM=1 -j$(nproc) prepare modules_prepare scripts 2>/dev/null || \
+            { ./scripts/config -d DEBUG_INFO_REDUCED -d DEBUG_INFO_SPLIT \
+                -d GDB_SCRIPTS; make ARCH=$ARCH LLVM=1 olddefconfig; \
+              make ARCH=$ARCH LLVM=1 -j$(nproc) prepare modules_prepare scripts; }
+          for S in $KSRC_GCC/Module.symvers $GITHUB_WORKSPACE/Module.symvers; do
+            [ -f "$S" ] && cp "$S" $KSRC/ && break
+          done
+          ls -la $KSRC/Module.symvers
+          cd $GITHUB_WORKSPACE/kmod
           rm -f rwbridge.o rwbridge.ko
-          make ARCH=$ARCH CC=clang LLVM=1 KCFLAGS="-fsanitize=kcfi" \
-            KDIR=$O
+          make ARCH=$ARCH LLVM=1 KCFLAGS="-fsanitize=kcfi" KDIR=$KSRC
           cp rwbridge.ko rwbridge-kcfi.ko
 
       - name: Show vermagic
