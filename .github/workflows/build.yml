@@ -160,7 +160,11 @@ jobs:
           ls -la $KSRC/Module.symvers
           rm -f $GITHUB_WORKSPACE/kmod/rwbridge.o $GITHUB_WORKSPACE/kmod/rwbridge.ko
           export KDIR=$KSRC
-          make -C $KSRC M=$GITHUB_WORKSPACE/kmod ARCH=$ARCH LLVM=1 modules
+          # trap-mode CFI: our own check failures brk() instead of calling
+          # __ubsan_handle_cfi_check_fail_abort (a vmlinux-only symbol that
+          # out-of-tree modpost cannot resolve without the kernel symvers).
+          make -C $KSRC M=$GITHUB_WORKSPACE/kmod ARCH=$ARCH LLVM=1 \
+            KCFLAGS="-fsanitize-trap=cfi" modules
           cp $GITHUB_WORKSPACE/kmod/rwbridge.ko rwbridge-kcfi.ko
 
       - name: Show vermagic
