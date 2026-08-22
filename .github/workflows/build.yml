@@ -122,20 +122,28 @@ jobs:
         # GKI 5.15+ kernels instrument indirect calls (CONFIG_CFI_CLANG):
         # every kernel->module callback (param .set/.get, i.e. the whole
         # sysfs interface) traps unless the module carries matching KCFI
-        # type hashes. Those come from clang -fsanitize=kcfi. The hash is
-        # derived from the C type signature, so a near-version clang is fine.
+        # type hashes. Those come from clang -fsanitize=kcfi.
+        # Built in a SEPARATE O= tree: the gcc-prepared tree bakes
+        # CONFIG_DEBUG_INFO_REDUCED whose CFLAGS (-femit-struct-debug-
+        # baseonly/-fconserve-stack) are gcc-only and reach clang unfiltered.
+        # Module.symvers is copied from the gcc pass — genksyms CRCs derive
+        # from C types, not compiler, so they stay valid.
         run: |
           sudo apt-get install -y clang lld llvm >/dev/null 2>&1 || true
+          O=$GITHUB_WORKSPACE/lx-clang
+          KSRC=$GITHUB_WORKSPACE/linux-$KVER
+          make -C $KSRC O=$O ARCH=$ARCH CC=clang LLVM=1 defconfig
+          $KSRC/scripts/config --file $O/.config -d DEBUG_INFO_REDUCED \
+            -d DEBUG_INFO_SPLIT -d DEBUG_INFO_DWARF_TOOLCHAINS_DEFAULT \
+            -d GDB_SCRIPTS || true
+          make -C $KSRC O=$O ARCH=$ARCH CC=clang LLVM=1 olddefconfig
+          make -C $KSRC O=$O ARCH=$ARCH CC=clang LLVM=1 prepare modules_prepare scripts
+          cp $KSRC/Module.symvers $O/ 2>/dev/null || true
           cd kmod
-          make clean >/dev/null 2>&1 || true
-          make ARCH=$ARCH \
-            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip \
-            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump \
-            KCFLAGS="-fsanitize=kcfi" \
-            KDIR="$GITHUB_WORKSPACE/linux-$KVER"
+          rm -f rwbridge.o rwbridge.ko
+          make ARCH=$ARCH CC=clang LLVM=1 KCFLAGS="-fsanitize=kcfi" \
+            KDIR=$O
           cp rwbridge.ko rwbridge-kcfi.ko
-          # sanity: kcfi builds must actually carry the type-hash preamble
-          llvm-strip --strip-debug -o /dev/null rwbridge-kcfi.ko 2>/dev/null || true
 
       - name: Show vermagic
         run: |
