@@ -569,6 +569,7 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 	int g, ao;
 
 	for (o = 0; o < 4096; o += 8) {
+		cond_resched();
 		mm = lxgr_krd(cur + o);
 		if (!lxgr_kva_ok(mm))
 			continue;
@@ -577,6 +578,8 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 		 * are tiny and low. This collapses the scan by orders of
 		 * magnitude — translate only runs for plausible pairs. */
 		for (ao = 0; ao < 2048; ao += 8) {
+			if ((ao & 255) == 0)
+				cond_resched();
 			unsigned long as, ae;
 
 			if (!lxgr_kva_ok(mm + ao) ||
@@ -595,6 +598,7 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 				continue;
 
 			for (pgo = 0; pgo < 2048; pgo += 8) {
+				cond_resched();
 				unsigned long pgd;
 				if (!lxgr_kva_ok(mm + pgo))
 					continue;
@@ -667,6 +671,7 @@ static long lxgr_derive_layout(void)
 
 	/* ---- OF_TASKS: circular doubly-linked list anchored at cur ---- */
 	for (t = 0; t < 4096; t += 8) {
+		cond_resched();   /* voluntary-preempt kernels need the hint */
 		unsigned long nxt = lxgr_krd(cur + t);        /* ->next      */
 		unsigned long prv = lxgr_krd(cur + t + 8);    /* ->prev      */
 		unsigned long nbase, pbase, node;
@@ -690,6 +695,8 @@ static long lxgr_derive_layout(void)
 		node = cur;
 		cnt = 0;
 		for (;;) {
+			if ((++cnt & 255) == 0)
+				cond_resched();
 			unsigned long nx = lxgr_krd(node + t);
 			unsigned long nb;
 			if (!nx || !lxgr_kva_ok(nx))
