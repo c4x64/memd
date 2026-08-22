@@ -122,6 +122,9 @@ static unsigned long lxgr_pgd_shift   = LXGR_DEF_PGD_SHIFT;
 /* Run-time derivation knobs (loader-supplied, `derive=1` to enable). */
 static unsigned long lxgr_derive = 0;  /* try header-free self-derived layout */
 static unsigned long lxgr_pid_anchor = 0;  /* pid of the LOADING process      */
+/* Linear-window bound (bytes). Default 4 GiB; widened at runtime by
+ * lxgr_derive_ram_limit(), or pinned by the loader via the param below. */
+static unsigned long lxgr_ram_limit = 0x100000000UL;
 
 /* Helper accessors honoring the derived layout. */
 static inline unsigned long OF_TASKS(void)       { return lxgr_off_tasks; }
@@ -263,8 +266,7 @@ LXGR_PARAM_ULONG(lxgr_pid_anchor);
  * The bound is deliberately generous so genuine pages are never rejected,
  * yet never trusts a PA whose linear VA could sit past real RAM (fault).
  * RUNTIME-DERIVED: lxgr_derive_ram_limit() widens this from observed PAs;
- * a param (lxgr_ram_limit_gb) can force it for exotic memory maps. */
-static unsigned long lxgr_ram_limit = 0x100000000UL;   /* default 4 GiB */
+ * the lxgr_ram_limit param can force it for exotic memory maps. */
 
 #define RW_MAX_SIZE      256UL
 
