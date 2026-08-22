@@ -112,19 +112,41 @@ jobs:
           ls -la Module.symvers
           head -5 Module.symvers
 
-      - name: Build kmod
+      - name: Build kmod (gcc flavor — vendor kernels without CFI)
         run: |
           cd kmod
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE KDIR="$GITHUB_WORKSPACE/linux-$KVER"
+          cp rwbridge.ko rwbridge-gcc.ko
+
+      - name: Build kmod (clang KCFI flavor — GKI CONFIG_CFI_CLANG kernels)
+        # GKI 5.15+ kernels instrument indirect calls (CONFIG_CFI_CLANG):
+        # every kernel->module callback (param .set/.get, i.e. the whole
+        # sysfs interface) traps unless the module carries matching KCFI
+        # type hashes. Those come from clang -fsanitize=kcfi. The hash is
+        # derived from the C type signature, so a near-version clang is fine.
+        run: |
+          sudo apt-get install -y clang lld llvm >/dev/null 2>&1 || true
+          cd kmod
+          make clean >/dev/null 2>&1 || true
+          make ARCH=$ARCH \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump \
+            KCFLAGS="-fsanitize=kcfi" \
+            KDIR="$GITHUB_WORKSPACE/linux-$KVER"
+          cp rwbridge.ko rwbridge-kcfi.ko
+          # sanity: kcfi builds must actually carry the type-hash preamble
+          llvm-strip --strip-debug -o /dev/null rwbridge-kcfi.ko 2>/dev/null || true
 
       - name: Show vermagic
         run: |
-          modinfo kmod/rwbridge.ko || \
+          modinfo kmod/rwbridge-gcc.ko || \
           aarch64-linux-gnu-objcopy -O binary --only-section=.modinfo \
-            kmod/rwbridge.ko /dev/stdout | strings | grep -i vermagic
+            kmod/rwbridge-gcc.ko /dev/stdout | strings | grep -i vermagic
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: rwbridge-${{ matrix.kver }}${{ matrix.localver || '' }}
-          path: kmod/rwbridge.ko
+          path: |
+            kmod/rwbridge-gcc.ko
+            kmod/rwbridge-kcfi.ko
