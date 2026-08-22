@@ -1403,6 +1403,63 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 		return 0;
 	}
 
+	/* ---- M,<pid>: dump task->mm diagnostics (debug) ---- */
+	if (op == 'M') {
+		unsigned long tcur, q, nxt, tgt_mm = 0;
+		long anchor = 0;
+		int i;
+
+		if (next_field(&p, f, sizeof(f)) > 0)
+			anchor = parse_dec(f);
+		else
+			anchor = (long)lxgr_current_pid();
+		tcur = lxgr_current();
+		q = tcur;
+		for (i = 0; i < 16384; i++) {
+			unsigned long tp = *(unsigned long *)(q + OF_PID());
+
+			if ((unsigned int)tp == (unsigned int)anchor) {
+				tgt_mm = *(unsigned long *)(q + OF_MM());
+				break;
+			}
+			nxt = *(unsigned long *)(q + OF_TASKS());
+			if (!nxt)
+				break;
+			q = nxt - OF_TASKS();
+			if (q == tcur)
+				break;
+		}
+		rw_text_len = 0;
+		if (!tgt_mm) {
+			lxgr_memcpy(rw_buf, "NO_MM", 6);
+			rw_text_len = 5;
+		} else {
+			char hx[] = "0123456789abcdef";
+			unsigned long v[8];
+			int j, k;
+
+			for (j = 0; j < 8; j++)
+				v[j] = *(unsigned long *)(tgt_mm + j * 8);
+			for (j = 0; j < 8; j++) {
+				for (k = 15; k >= 0 && rw_text_len <
+				     (long)(RW_MAX_SIZE - 2); k--)
+					rw_buf[rw_text_len++] =
+					    (unsigned char)hx[(v[j]>>(k*4))&0xf];
+				rw_buf[rw_text_len++] =
+				    (j < 7) ? ',' : '\0'-0+0;
+			}
+			if (rw_text_len > 0 &&
+			    rw_buf[rw_text_len-1] != ',')
+				{ /* keep */ }
+			if (rw_text_len &&
+			    rw_buf[rw_text_len-1] == (unsigned char)'\0')
+				rw_text_len--;
+		}
+		rw_status = 0;
+		lxgr_spin_unlock();
+		return 0;
+	}
+
 	/* ---- R/W ops (unchanged layout) ---- */
 	if (next_field(&p, f, sizeof(f)) <= 0)
 		goto bad;
