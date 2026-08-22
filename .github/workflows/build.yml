@@ -62,20 +62,31 @@ jobs:
 
       - name: Fetch & extract kernel source
         run: |
-          # cdn.kernel.org has outages; fall through every known mirror.
+          # cdn.kernel.org has outages; fall through every known mirror,
+          # with retries, then the git snapshot as last resort.
           MAJ=${KVER%%.*}
-          for base in \
-            "https://cdn.kernel.org/pub/linux/kernel/v${MAJ}.x" \
-            "https://mirrors.edge.kernel.org/pub/linux/kernel/v${MAJ}.x" \
-            "https://www.kernel.org/pub/linux/kernel/v${MAJ}.x"; do
-            wget -q --timeout=60 "$base/linux-$KVER.tar.xz" && break
-            rm -f linux-$KVER.tar.xz
+          for try in 1 2 3; do
+            for base in \
+              "https://cdn.kernel.org/pub/linux/kernel/v${MAJ}.x" \
+              "https://mirrors.edge.kernel.org/pub/linux/kernel/v${MAJ}.x" \
+              "https://www.kernel.org/pub/linux/kernel/v${MAJ}.x" \
+              "https://mirrors.tuna.tsinghua.edu.cn/kernel/v${MAJ}.x"; do
+              wget -q --timeout=90 "$base/linux-$KVER.tar.xz" && break 2
+              rm -f linux-$KVER.tar.xz
+            done
+            echo "mirror pass $try failed; retrying"
+            sleep 10
           done
-          [ -f linux-$KVER.tar.xz ] || { echo "no tarball for $KVER (all mirrors)"; exit 1; }
-          tar xf linux-$KVER.tar.xz
+          [ -f linux-$KVER.tar.xz ] || \
+            git clone --depth 1 --branch "v$KVER" \
+              https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+              linux-$KVER || true
+          [ -f linux-$KVER.tar.xz -o -d linux-$KVER ] || { echo "no source for $KVER"; exit 1; }
+          if [ ! -d linux-$KVER ]; then tar xf linux-$KVER.tar.xz; fi
           # second tree for the clang/KCFI pass — kbuild forbids mixing a
           # gcc-dirtied in-tree build with O=, and flavors must stay isolated.
-          mkdir /tmp/kx && tar xf linux-$KVER.tar.xz -C /tmp/kx
+          mkdir -p /tmp/kx
+          cp -a linux-$KVER /tmp/kx/
 
       - name: Configure kernel to match target vermagic
         run: |
