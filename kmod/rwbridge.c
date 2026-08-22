@@ -605,6 +605,7 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 					continue;
 
 				STAGE("drv:mm");
+				pr_info("rwbridge: [drv] mm probe enter\n");
 				for (g = 0; g < 2 && budget; g++, budget--) {
 					unsigned long po, pa;
 
@@ -817,6 +818,7 @@ static long lxgr_bootstrap(void)
 	};
 
 	STAGE("drv:tasks");
+	pr_info("rwbridge: [drv] tasks scan enter\n");
 	cur = lxgr_current();
 	asm volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
 	ttbr0 &= LXGR_PA_MASK;
@@ -824,6 +826,7 @@ static long lxgr_bootstrap(void)
 		return -ENOENT;
 
 	STAGE("drv:pid");
+	pr_info("rwbridge: [drv] pid anchor=%lu enter\n", lxgr_pid_anchor);
 	/* no anchor supplied? the WRITER is a fine one: its own argv is what
 	 * the readback verifies against (sysfs D-op context). */
 	if (!lxgr_pid_anchor)
@@ -853,6 +856,7 @@ static long lxgr_bootstrap(void)
 				g, lxgr_page_offset, lxgr_pgd_shift,
 				lxgr_phys_off);
 			STAGE("drv:ram");
+			pr_info("rwbridge: [drv] ram-limit widen\n");
 			lxgr_derive_ram_limit();
 			return 0;
 		}
@@ -1542,10 +1546,10 @@ static int rw_stage_get(char *buf, const struct kernel_param *kp)
 	size_t n;
 
 	(void)kp;
-	lxgr_spin_lock();
+	/* LOCKLESS on purpose: diagnostics must stay readable while a D-op
+	 * redrive holds the main spinlock. Worst case is a torn label. */
 	n = lxgr_strlen(rw_stage);
 	lxgr_memcpy(buf, rw_stage, n);
-	lxgr_spin_unlock();
 	buf[n] = '\0';
 	return (int)n;
 }
