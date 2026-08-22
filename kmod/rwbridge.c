@@ -591,8 +591,9 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 				continue;
 			if (as >= LXGR_USER_TOP_MAX || ae > LXGR_USER_TOP_MAX)
 				continue;
-			/* argv+envp block: small (bytes..KBs), never MBs */
-			if ((ae - as) < 8 || (ae - as) > 0x2000)
+			/* argv+envp block: >=8 bytes, under 1 MiB (Android shells carry
+			 * huge envp blocks — BOOTCLASSPATH alone dwarfs 8 KB). */
+			if ((ae - as) < 8 || (ae - as) > 0x100000)
 				continue;
 			if ((as & 7) || (as < 0x1000))
 				continue;
