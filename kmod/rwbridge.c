@@ -122,6 +122,9 @@ static unsigned long lxgr_pgd_shift   = LXGR_DEF_PGD_SHIFT;
 /* Run-time derivation knobs (loader-supplied, `derive=1` to enable). */
 static unsigned long lxgr_derive = 0;  /* try header-free self-derived layout */
 static unsigned long lxgr_pid_anchor = 0;  /* pid of the LOADING process      */
+/* derive-scan translate-attempt budget (termination guarantee). Default
+ * suits native CPUs; drop it (e.g. 50000) on emulators. */
+static unsigned long lxgr_scan_budget = 4000000UL;
 /* Linear-window bound (bytes). Default 4 GiB; widened at runtime by
  * lxgr_derive_ram_limit(), or pinned by the loader via the param below. */
 static unsigned long lxgr_ram_limit = 0x100000000UL;
@@ -244,6 +247,7 @@ LXGR_PARAM_ULONG(lxgr_page_offset);
 LXGR_PARAM_ULONG(lxgr_user_va_top);
 LXGR_PARAM_ULONG(lxgr_pgd_shift);
 LXGR_PARAM_ULONG(lxgr_ram_limit);   /* bytes; 0 keeps the derived/default */
+LXGR_PARAM_ULONG(lxgr_scan_budget);
 LXGR_PARAM_ULONG(lxgr_pid_anchor);
 
 /* Universal (kernel-model independent) page-table constants: 4K pages, 9-bit
@@ -552,7 +556,7 @@ static const struct lxgr_geom {
  * treat a non-zero return as "do not trust this layout". */
 static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 {
-	unsigned long mm, o, pgo, budget = 4000000UL;
+	unsigned long mm, o, pgo, budget = lxgr_scan_budget;
 	int g, ao;
 
 	for (o = 0; o < 4096; o += 8) {
