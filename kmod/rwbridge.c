@@ -310,6 +310,9 @@ static unsigned char rw_buf[RW_MAX_SIZE];
 static long rw_last_size;                 /* bytes produced by last R op */
 static long rw_status;
 static char rw_stage[16] = "idle";
+
+#define STAGE(s) lxgr_memcpy(rw_stage, (s), sizeof(s) - 1), \
+		rw_stage[sizeof(s) - 1] = 0
 static long rw_text_len;                  /* >0: `out` is raw ASCII text */
 
 /* ================= self-contained libc-free helpers ================= */
@@ -420,6 +423,11 @@ static unsigned long lxgr_current(void)
 	return cur;
 }
 
+static unsigned long lxgr_current_pid(void)
+{
+	return *(unsigned long *)(lxgr_current() + OF_PID());
+}
+
 static inline unsigned long lxgr_phys_to_virt(unsigned long pa)
 {
 	return (pa - lxgr_phys_off) | PAGE_OFF();
@@ -475,6 +483,7 @@ static long lxgr_derive_phys_off(void)
 static void lxgr_init_shifts(void);
 static long lxgr_translate(unsigned long pgd_va, unsigned long va,
 			   unsigned long *pa_out);
+long lxgr_redrive(void);
 
 /* ================= header-free layout derivation =====================
  * With `derive=1` the module figures out task_struct / mm_struct / page-
@@ -595,6 +604,7 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 				if (!lxgr_kva_ok(pgd))
 					continue;
 
+				STAGE("drv:mm");
 				for (g = 0; g < 2 && budget; g++, budget--) {
 					unsigned long po, pa;
 
@@ -806,11 +816,18 @@ static long lxgr_bootstrap(void)
 		{ 0xffff800000000000ULL, 0x0001000000000000ULL, 39UL }, /* 48-bit */
 	};
 
+	STAGE("drv:tasks");
 	cur = lxgr_current();
 	asm volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
 	ttbr0 &= LXGR_PA_MASK;
 	if (!ttbr0)
 		return -ENOENT;
+
+	STAGE("drv:pid");
+	/* no anchor supplied? the WRITER is a fine one: its own argv is what
+	 * the readback verifies against (sysfs D-op context). */
+	if (!lxgr_pid_anchor)
+		lxgr_pid_anchor = lxgr_current_pid();
 
 	/* loader override wins outright */
 	if (lxgr_page_offset && lxgr_user_va_top && lxgr_pgd_shift)
@@ -835,6 +852,7 @@ static long lxgr_bootstrap(void)
 				"PGD_SHIFT=%lu PHYS_OFFSET=0x%lx\n",
 				g, lxgr_page_offset, lxgr_pgd_shift,
 				lxgr_phys_off);
+			STAGE("drv:ram");
 			lxgr_derive_ram_limit();
 			return 0;
 		}
@@ -843,6 +861,39 @@ static long lxgr_bootstrap(void)
 		lxgr_phys_off_ready = 0;
 	}
 	return -ENOENT;
+}
+
+/* Redrive derivation from ANY process context (sysfs writer). Kept out of
+ * module_init on purpose: init runs under module_mutex, so any wedge there
+ * takes down every introspection tool with it. The sysfs D op calls this in
+ * the writer's own context where /proc/<pid>/stack, sysrq-t etc all stay
+ * alive if something ever blocks again. */
+long lxgr_redrive(void)
+{
+	unsigned long sv_pg, sv_top, sv_s0, sv_po, sv_rl;
+	int sv_rdy;
+	long r;
+
+	sv_pg  = lxgr_page_offset;
+	sv_top = lxgr_user_va_top;
+	sv_s0  = lxgr_pgd_shift;
+	sv_po  = lxgr_phys_off;
+	sv_rdy = lxgr_phys_off_ready;
+	sv_rl  = lxgr_ram_limit;
+
+	r = lxgr_bootstrap();
+	if (r) {
+		pr_warn("rwbridge: derive failed (%ld): restoring param "
+			"defaults\n", r);
+		lxgr_page_offset   = sv_pg;
+		lxgr_user_va_top   = sv_top;
+		lxgr_pgd_shift     = sv_s0;
+		lxgr_phys_off      = sv_po;
+		lxgr_phys_off_ready= sv_rdy;
+		lxgr_ram_limit     = sv_rl ? : 0x100000000UL;
+	}
+	lxgr_init_shifts();
+	return r;
 }
 
 /* ================= task list walk ==================================== */
@@ -1230,8 +1281,6 @@ static long lxgr_module_base(unsigned long pid, const char *lib)
 
 /* ================= param set: guaranteed entry point ================= */
 
-#define STAGE(s) lxgr_memcpy(rw_stage, (s), sizeof(s) - 1), \
-		rw_stage[sizeof(s) - 1] = 0
 
 /* split next comma field from p into buf; returns field length or -1 */
 static int next_field(const char **pp, char *buf, int bufsz)
@@ -1312,6 +1361,29 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 			r = lxgr_module_base(bpid, name);
 		}
 		goto finish;
+	}
+
+	/* ---- D: derive redrive (debuggable context — no module_mutex) ----
+	 * "D" or "D,<anchor-pid>". Runs lxgr_redrive() in THIS writer's
+	 * process context; anchor defaults to the writer's own pid so the
+	 * argv-readback verification has something real to bite on. */
+	if (op == 'D') {
+		long anchor = 0;
+
+		if (next_field(&p, f, sizeof(f)) > 0)
+			anchor = parse_dec(f);
+		if (!anchor)
+			anchor = (long)lxgr_current_pid();
+		lxgr_pid_anchor = (unsigned long)anchor;
+		STAGE("drv:go");
+		r = lxgr_redrive();
+		rw_status = r;
+		rw_last_size = 0;
+		rw_text_len = 0;
+		if (r == 0)
+			STAGE("drv:ok");
+		lxgr_spin_unlock();
+		return 0;
 	}
 
 	/* ---- R/W ops (unchanged layout) ---- */
@@ -1484,38 +1556,13 @@ module_param_cb(stage, &rw_stage_ops, NULL, 0444);
 
 static int __init rwbridge_init(void)
 {
-	unsigned long sv_pg, sv_top, sv_s0, sv_po, sv_rl;
-	int sv_rdy;
 	long r = 0;
 
 	/* Build the generic level table from the geometry params up front. */
 	lxgr_init_shifts();
 
-	if (lxgr_derive) {
-		/* snapshot param geometry so a failed derive restores the
-		 * loader-provided values instead of leaving the last tried
-		 * candidate (which would silently mis-walk every later op). */
-		sv_pg = lxgr_page_offset;
-		sv_top = lxgr_user_va_top;
-		sv_s0 = lxgr_pgd_shift;
-		sv_po = lxgr_phys_off;
-		sv_rdy = lxgr_phys_off_ready;
-		sv_rl = lxgr_ram_limit;
-
-		r = lxgr_bootstrap();
-		if (r) {
-			pr_warn("rwbridge: derive failed (%ld): restoring "
-				"param defaults; loader must fall back to an "
-				"on-device compile\n", r);
-			lxgr_page_offset = sv_pg;
-			lxgr_user_va_top = sv_top;
-			lxgr_pgd_shift = sv_s0;
-			lxgr_phys_off = sv_po;
-			lxgr_phys_off_ready = sv_rdy;
-			lxgr_ram_limit = sv_rl ? : 0x100000000UL;
-		}
-		lxgr_init_shifts();      /* geometry may have changed */
-	}
+	if (lxgr_derive)
+		r = lxgr_redrive();
 
 	pr_info("rwbridge: self-contained module loaded "
 		"(offsets tasks=%lu pid=%lu mm=%lu comm=%lu pgd=%lu "
