@@ -240,6 +240,7 @@ LXGR_PARAM_ULONG(lxgr_off_qstr_len);
 LXGR_PARAM_ULONG(lxgr_page_offset);
 LXGR_PARAM_ULONG(lxgr_user_va_top);
 LXGR_PARAM_ULONG(lxgr_pgd_shift);
+LXGR_PARAM_ULONG(lxgr_ram_limit);   /* bytes; 0 keeps the derived/default */
 LXGR_PARAM_ULONG(lxgr_pid_anchor);
 
 /* Universal (kernel-model independent) page-table constants: 4K pages, 9-bit
@@ -259,9 +260,11 @@ LXGR_PARAM_ULONG(lxgr_pid_anchor);
  * that the live game freed/reused mid-walk. Dereferencing such an address via
  * the linear map lands in the unmapped hole above the linear map and faults at
  * EL1 (a panic). So we never build a linear address from an out-of-window PA.
- * The bound is deliberately the full 4 GiB extent so genuine low-memory pages
- * are never rejected (any PA beyond it cannot be RAM on this box). */
-#define LXGR_RAM_LIMIT   0x100000000UL
+ * The bound is deliberately generous so genuine pages are never rejected,
+ * yet never trusts a PA whose linear VA could sit past real RAM (fault).
+ * RUNTIME-DERIVED: lxgr_derive_ram_limit() widens this from observed PAs;
+ * a param (lxgr_ram_limit_gb) can force it for exotic memory maps. */
+static unsigned long lxgr_ram_limit = 0x100000000UL;   /* default 4 GiB */
 
 #define RW_MAX_SIZE      256UL
 
@@ -424,7 +427,7 @@ static inline unsigned long lxgr_phys_to_virt(unsigned long pa)
 static inline unsigned long lxgr_safe_virt(unsigned long pa)
 {
 	unsigned long off = pa - lxgr_phys_off;
-	if (off >= LXGR_RAM_LIMIT)
+	if (off >= lxgr_ram_limit)
 		return 0;
 	return off | PAGE_OFF();
 }
@@ -496,7 +499,7 @@ static inline int lxgr_kva_ok(unsigned long va)
 {
 	if (va < PAGE_OFF())
 		return 0;
-	return (va - PAGE_OFF()) < LXGR_RAM_LIMIT;
+	return (va - PAGE_OFF()) < lxgr_ram_limit;
 }
 
 static unsigned long lxgr_krd(unsigned long va)
@@ -531,7 +534,9 @@ static int lxgr_probe_arg(unsigned long mm, unsigned long ao, unsigned long pgd,
 		return 0;
 	if (as >= USER_VA_TOP() || ae > USER_VA_TOP())
 		return 0;
-	if (ae - as > 0x100000)
+	/* 64 MiB: absurd for argv, still bounded. The printable-ASCII readback
+	 * is the real filter; this only stops a pathological scan. */
+	if (ae - as > 0x4000000)
 		return 0;
 
 	off = as + (ae - as) / 2;
@@ -542,7 +547,7 @@ static int lxgr_probe_arg(unsigned long mm, unsigned long ao, unsigned long pgd,
 		/* the 8-byte probe must stay inside the RAM window: a copy that
 		 * straddles the window top could fault EL1. */
 		unsigned long tail = (pa - lxgr_phys_off) + sizeof(b);
-		if (!lin || tail > LXGR_RAM_LIMIT)
+		if (!lin || tail > lxgr_ram_limit)
 			return 0;
 		lxgr_memcpy(b, (const void *)lin, sizeof(b));
 	}
@@ -707,6 +712,116 @@ static long lxgr_derive_layout(void)
 	return lxgr_derive_geom_mm(cur, ttbr0);
 }
 
+/* Widen the linear-window bound from OBSERVED physical addresses once the
+ * map is proven. Probes a handful of guaranteed-translatable VAs (our own
+ * kernel objects + our argv page through our own tables) and takes 2x the
+ * highest offset seen, clamped to [4 GiB, 1 TiB]. This is a heuristic floor:
+ * pages above it are rejected by safe_virt() (fail-closed) rather than
+ * trusted. A loader may pin lxgr_ram_limit explicitly instead. */
+static void lxgr_derive_ram_limit(void)
+{
+	unsigned long cur = lxgr_current();
+	unsigned long probes[4];
+	unsigned long best = 0;
+	int i;
+
+	probes[0] = cur;                       /* task_struct            */
+	probes[1] = cur + lxgr_off_comm;       /* ->comm bytes           */
+	probes[2] = cur + lxgr_off_pid;
+	/* our argv page through our own tables: user RAM can sit high */
+	{
+		unsigned long mm = *(unsigned long *)(cur + OF_MM());
+		if (mm) {
+			unsigned long pgd = *(unsigned long *)(mm + OF_MM_PGD());
+			unsigned long as = *(unsigned long *)(mm + OF_MM_ARGSTART());
+			unsigned long pa;
+
+			if (pgd && as && as < USER_VA_TOP() &&
+			    lxgr_translate(pgd, as, &pa) == 0 &&
+			    pa >= lxgr_phys_off)
+				probes[3] = pa - lxgr_phys_off;
+			else
+				probes[3] = 0;
+		} else
+			probes[3] = 0;
+	}
+
+	best = 0;
+	for (i = 0; i < 3; i++) {
+		unsigned long va = probes[i];
+		unsigned long off;
+		if (!va || !lxgr_kva_ok(va))
+			continue;
+		off = va - PAGE_OFF();
+		if (off > best)
+			best = off;
+	}
+	if (probes[3] > best)
+		best = probes[3];
+
+	if (best > lxgr_ram_limit / 2 && best <= (1UL << 40))
+		lxgr_ram_limit = best * 2;
+
+	pr_info("rwbridge: ram_limit=0x%lx\n", lxgr_ram_limit);
+}
+
+/* Self-bootstrapping derive entry point. Fixes the ordering trap where the
+ * kva_ok() gate ran against the DEFAULT geometry during the scan: on a
+ * 48-bit-VA kernel every real linear-map address failed the 39-bit default
+ * PAGE_OFFSET test and derive silently found nothing. Here each geometry
+ * candidate is committed FIRST, sanity-gated on current itself being a valid
+ * kernel VA under it, and only then handed to the existing scanner. State is
+ * reset between candidates so a partial fit never leaks into the next try. */
+static long lxgr_bootstrap(void)
+{
+	unsigned long cur, ttbr0;
+	int g;
+	static const struct {
+		unsigned long page_off, user_top, pgd_shift;
+	} geoms[] = {
+		{ 0xffffff8000000000ULL, 0x0000008000000000ULL, 30UL }, /* 39-bit */
+		{ 0xffff800000000000ULL, 0x0001000000000000ULL, 39UL }, /* 48-bit */
+	};
+
+	cur = lxgr_current();
+	asm volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
+	ttbr0 &= LXGR_PA_MASK;
+	if (!ttbr0)
+		return -ENOENT;
+
+	/* loader override wins outright */
+	if (lxgr_page_offset && lxgr_user_va_top && lxgr_pgd_shift)
+		return lxgr_derive_layout();
+
+	for (g = 0; g < 2; g++) {
+		long r;
+
+		lxgr_page_offset  = geoms[g].page_off;
+		lxgr_user_va_top  = geoms[g].user_top;
+		lxgr_pgd_shift    = geoms[g].pgd_shift;
+		lxgr_init_shifts();
+
+		/* candidate geometry must at least place `current` in its own
+		 * linear window before any field of it is touched */
+		if (!lxgr_kva_ok(cur))
+			continue;
+
+		r = lxgr_derive_layout();
+		if (r == 0) {
+			pr_info("rwbridge: bootstrap ok geom=%d PAGE_OFF=0x%lx "
+				"PGD_SHIFT=%lu PHYS_OFFSET=0x%lx\n",
+				g, lxgr_page_offset, lxgr_pgd_shift,
+				lxgr_phys_off);
+			lxgr_derive_ram_limit();
+			return 0;
+		}
+		/* scrub derived state before the next candidate */
+		lxgr_phys_off       = 0;
+		lxgr_phys_off_ready = 0;
+	}
+	return -ENOENT;
+}
+
 /* ================= task list walk ==================================== */
 
 /* Walk task_struct.tasks from `current` (always alive - we run in it) until
@@ -789,8 +904,20 @@ static long lxgr_translate(unsigned long pgd_va, unsigned long va,
 
 	for (l = 0; l < lxgr_levels; l++) {
 		unsigned long shift = lxgr_shifts[l];
+		unsigned long toff;
 
+		/* HARD GATE (self-contained, caller-independent): the table we
+		 * are about to read slots from must itself be inside the linear
+		 * window INCLUDING this level's slot extent — a top-of-RAM table
+		 * page plus idx*8 must never cross past real RAM. This holds even
+		 * when a caller hands us an unvalidated pgd_va. */
+		if (!lxgr_kva_ok(tab))
+			return -EFAULT;
+		toff = tab - PAGE_OFF();
 		idx = (va >> shift) & LXGR_IDX_MASK;
+		if (toff + idx * 8 + 8 > lxgr_ram_limit)
+			return -EFAULT;
+
 		e = *(volatile unsigned long *)(tab + idx * 8);
 		t = e & LXGR_DESC_MASK;
 		if (l == lxgr_levels - 1) {
@@ -1005,7 +1132,7 @@ static long lxgr_kstr(unsigned long va, unsigned long max, char *out)
 	if (va < PAGE_OFF())
 		return -EFAULT;
 	off = va - PAGE_OFF();
-	if (off >= LXGR_RAM_LIMIT || off + max > LXGR_RAM_LIMIT)
+	if (off >= lxgr_ram_limit || off + max > lxgr_ram_limit)
 		return -EFAULT;
 	lxgr_memcpy(out, (const void *)va, max);
 	out[max] = 0;
@@ -1334,7 +1461,7 @@ module_param_cb(stage, &rw_stage_ops, NULL, 0444);
 
 static int __init rwbridge_init(void)
 {
-	unsigned long sv_pg, sv_top, sv_s0, sv_po;
+	unsigned long sv_pg, sv_top, sv_s0, sv_po, sv_rl;
 	int sv_rdy;
 	long r = 0;
 
@@ -1350,8 +1477,9 @@ static int __init rwbridge_init(void)
 		sv_s0 = lxgr_pgd_shift;
 		sv_po = lxgr_phys_off;
 		sv_rdy = lxgr_phys_off_ready;
+		sv_rl = lxgr_ram_limit;
 
-		r = lxgr_derive_layout();
+		r = lxgr_bootstrap();
 		if (r) {
 			pr_warn("rwbridge: derive failed (%ld): restoring "
 				"param defaults; loader must fall back to an "
@@ -1361,6 +1489,7 @@ static int __init rwbridge_init(void)
 			lxgr_pgd_shift = sv_s0;
 			lxgr_phys_off = sv_po;
 			lxgr_phys_off_ready = sv_rdy;
+			lxgr_ram_limit = sv_rl ? : 0x100000000UL;
 		}
 		lxgr_init_shifts();      /* geometry may have changed */
 	}
