@@ -125,6 +125,10 @@ static unsigned long lxgr_pid_anchor = 0;  /* pid of the LOADING process      */
 /* derive-scan translate-attempt budget (termination guarantee). Default
  * suits native CPUs; drop it (e.g. 50000) on emulators. */
 static unsigned long lxgr_scan_budget = 4000000UL;
+/* set by loader alongside lxgr_ram_limit: proves the linear-window bound
+ * reflects REAL DRAM (from /proc/iomem), not a guess. Redrive refuses
+ * without it — an oversized window faults instead of failing. */
+static unsigned long lxgr_have_ram = 0;
 /* Linear-window bound (bytes). Default 4 GiB; widened at runtime by
  * lxgr_derive_ram_limit(), or pinned by the loader via the param below. */
 static unsigned long lxgr_ram_limit = 0x100000000UL;
@@ -248,6 +252,7 @@ LXGR_PARAM_ULONG(lxgr_user_va_top);
 LXGR_PARAM_ULONG(lxgr_pgd_shift);
 LXGR_PARAM_ULONG(lxgr_ram_limit);   /* bytes; 0 keeps the derived/default */
 LXGR_PARAM_ULONG(lxgr_scan_budget);
+LXGR_PARAM_ULONG(lxgr_have_ram);
 LXGR_PARAM_ULONG(lxgr_pid_anchor);
 
 /* Universal (kernel-model independent) page-table constants: 4K pages, 9-bit
@@ -1387,6 +1392,13 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 	if (op == 'D') {
 		long anchor = 0;
 
+		if (!lxgr_have_ram) {
+			rw_status = -EPERM;
+			STAGE("drv:noram");
+			lxgr_spin_unlock();
+			return 0;
+		}
+
 		if (next_field(&p, f, sizeof(f)) > 0)
 			anchor = parse_dec(f);
 		if (!anchor)
@@ -1399,77 +1411,6 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 		rw_text_len = 0;
 		if (r == 0)
 			STAGE("drv:ok");
-		lxgr_spin_unlock();
-		return 0;
-	}
-
-	/* ---- M,<pid>: dump task->mm diagnostics (debug) ---- */
-	if (op == 'M') {
-		unsigned long tcur, q, nxt, tgt_mm = 0;
-		long anchor = 0;
-		int i;
-
-		if (next_field(&p, f, sizeof(f)) > 0)
-			anchor = parse_dec(f);
-		else
-			anchor = (long)lxgr_current_pid();
-		tcur = lxgr_current();
-		q = tcur;
-		for (i = 0; i < 16384; i++) {
-			unsigned long tp;
-
-			if (!lxgr_kva_ok(q + OF_PID()) ||
-			    !lxgr_kva_ok(q + OF_MM()) ||
-			    !lxgr_kva_ok(q + OF_TASKS()))
-				break;          /* param offsets wrong here */
-			tp = *(unsigned long *)(q + OF_PID());
-
-			if ((unsigned int)tp == (unsigned int)anchor) {
-				tgt_mm = *(unsigned long *)(q + OF_MM());
-				break;
-			}
-			nxt = *(unsigned long *)(q + OF_TASKS());
-			if (!nxt || !lxgr_kva_ok(nxt))
-				break;
-			q = nxt - OF_TASKS();
-			if (q == tcur)
-				break;
-		}
-		rw_text_len = 0;
-		if (!tgt_mm) {
-			lxgr_memcpy(rw_buf, "NO_MM", 6);
-			rw_text_len = 5;
-		} else {
-			char hx[] = "0123456789abcdef";
-			unsigned long v[8];
-			int j, k;
-
-			if (!lxgr_kva_ok(tgt_mm) ||
-			    !lxgr_kva_ok(tgt_mm + 64)) {
-				lxgr_memcpy(rw_buf, "MM_OOB", 7);
-				rw_text_len = 6;
-				rw_status = 0;
-				lxgr_spin_unlock();
-				return 0;
-			}
-			for (j = 0; j < 8; j++)
-				v[j] = *(unsigned long *)(tgt_mm + j * 8);
-			for (j = 0; j < 8; j++) {
-				for (k = 15; k >= 0 && rw_text_len <
-				     (long)(RW_MAX_SIZE - 2); k--)
-					rw_buf[rw_text_len++] =
-					    (unsigned char)hx[(v[j]>>(k*4))&0xf];
-				rw_buf[rw_text_len++] =
-				    (j < 7) ? ',' : '\0'-0+0;
-			}
-			if (rw_text_len > 0 &&
-			    rw_buf[rw_text_len-1] != ',')
-				{ /* keep */ }
-			if (rw_text_len &&
-			    rw_buf[rw_text_len-1] == (unsigned char)'\0')
-				rw_text_len--;
-		}
-		rw_status = 0;
 		lxgr_spin_unlock();
 		return 0;
 	}
