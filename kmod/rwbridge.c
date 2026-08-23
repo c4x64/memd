@@ -675,7 +675,13 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 
 					po = ttbr0 -
 					     (pgd - lxgr_page_offset);
-					if (po > 0x20000000000ULL)
+					/* memstart can never exceed the
+					 * MEASURED DRAM span; this also
+					 * instantly kills cross-geometry
+					 * candidates (a 48-bit PAGE_OFFSET
+					 * assumption on a 39-bit kernel
+					 * yields astronomical po). */
+					if (po > lxgr_ram_limit)
 						continue;
 
 					lxgr_phys_off = po;
