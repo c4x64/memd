@@ -526,6 +526,9 @@ static int lxgr_probe_bytes(unsigned long pa)
 	lin = lxgr_safe_virt(pa);
 	if (!lin)
 		return 0;
+	/* 8-byte copy must stay inside the RAM window (top-of-DRAM page) */
+	if ((pa - lxgr_phys_off) + sizeof(b) > lxgr_ram_limit)
+		return 0;
 	lxgr_memcpy(b, (const void *)lin, sizeof(b));
 	for (i = 0; i < (int)sizeof(b); i++)
 		if (b[i] < 0x20 || b[i] > 0x7e)
@@ -1643,8 +1646,17 @@ static int __init rwbridge_init(void)
 	/* Build the generic level table from the geometry params up front. */
 	lxgr_init_shifts();
 
-	if (lxgr_derive)
-		r = lxgr_redrive();
+	if (lxgr_derive) {
+		if (!lxgr_have_ram) {
+			pr_warn("rwbridge: derive=1 without lxgr_have_ram/"
+			        "ram_limit — refusing (window would be a "
+			        "guess); use the sysfs D op after supplying "
+			        "them\n");
+			r = -EPERM;
+		} else {
+			r = lxgr_redrive();
+		}
+	}
 
 	pr_info("rwbridge: self-contained module loaded "
 		"(offsets tasks=%lu pid=%lu mm=%lu comm=%lu pgd=%lu "
