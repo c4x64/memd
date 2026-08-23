@@ -489,6 +489,7 @@ static void lxgr_init_shifts(void);
 static long lxgr_translate(unsigned long pgd_va, unsigned long va,
 			   unsigned long *pa_out);
 long lxgr_redrive(void);
+static void lxgr_derive_ram_limit(void);
 
 /* ================= header-free layout derivation =====================
  * With `derive=1` the module figures out task_struct / mm_struct / page-
@@ -568,59 +569,97 @@ static const struct lxgr_geom {
  * and returns 0; on total failure restores nothing (the caller/memset work),
  * geometry is simply left set to the LAST tried candidate — the operator must
  * treat a non-zero return as "do not trust this layout". */
+/* mm_struct fingerprint (offset-free): a real mm window contains
+ *  - at least one page-aligned linear-map pointer (->pgd)
+ *  - a tight cluster of >=3 user VAs (arg_start/arg_end/env_start/
+ *    env_end/start_brk/start_stack all live within a few MB of each
+ *    other near the stack top) — garbage memory almost never does.
+ * Lead with this BEFORE any page-table work: only fingerprint-passing
+ * candidates reach the translate stage. */
+#define LXGR_MM_WIN_QWORDS 256          /* 2048-byte scan window */
+#define LXGR_CLUSTER_SPAN   0x800000UL  /* 8 MB */
+#define LXGR_USR_MIN        0x40000UL
+
 static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 {
-	unsigned long mm, o, pgo, budget = lxgr_scan_budget;
-	int g, ao;
-	unsigned long n_mm = 0, n_pair = 0, n_pgd = 0;
+	unsigned long mm, o, budget = lxgr_scan_budget;
+	int g;
+	unsigned long n_mm = 0, n_fp = 0;
 
 	for (o = 0; o < 4096; o += 8) {
+		unsigned long win[LXGR_MM_WIN_QWORDS];
+		unsigned long usr[32];
+		int n_usr = 0, i;
+		int pgd_seen = 0;
+
 		cond_resched();
 		mm = lxgr_krd(cur + o);
 		if (!lxgr_kva_ok(mm))
 			continue;
 		n_mm++;
-		/* arg_start/arg_end candidate pairs are read once per (mm,ao)
-		 * and pre-filtered BEFORE any page-table work: real argv spans
-		 * are tiny and low. This collapses the scan by orders of
-		 * magnitude — translate only runs for plausible pairs. */
-		for (ao = 0; ao < 2048; ao += 8) {
-			if ((ao & 255) == 0)
-				cond_resched();
-			unsigned long as, ae;
 
-			if (!lxgr_kva_ok(mm + ao) ||
-			    !lxgr_kva_ok(mm + ao + 8))
-				continue;
-			as = lxgr_krd(mm + ao);
-			ae = lxgr_krd(mm + ao + 8);
-			if (!as || !ae || ae <= as)
-				continue;
-			if (as >= LXGR_USER_TOP_MAX || ae > LXGR_USER_TOP_MAX)
-				continue;
-			/* argv+envp block: >=8 bytes, under 1 MiB (Android shells carry
-			 * huge envp blocks — BOOTCLASSPATH alone dwarfs 8 KB). */
-			if ((ae - as) < 8 || (ae - as) > 0x100000)
-				continue;
-			if ((as & 7) || (as < 0x1000))
-				continue;
-			n_pair++;
+		/* gated bulk read of the candidate window */
+		for (i = 0; i < LXGR_MM_WIN_QWORDS; i++) {
+			if (!lxgr_kva_ok(mm + i * 8))
+				break;
+			win[i] = lxgr_krd(mm + i * 8);
+		}
+		if (i < LXGR_MM_WIN_QWORDS)
+			continue;
 
-			for (pgo = 0; pgo < 2048; pgo += 8) {
-				cond_resched();
-				unsigned long pgd;
-				if (!lxgr_kva_ok(mm + pgo))
-					continue;
-				pgd = lxgr_krd(mm + pgo);
-				if (!pgd || (pgd & (LXGR_PAGE_SIZE - 1)))
-					continue;
-				if (!lxgr_kva_ok(pgd))
-					continue;
-				n_pgd++;
+		for (i = 0; i < LXGR_MM_WIN_QWORDS; i++) {
+			unsigned long v = win[i];
 
-				STAGE("drv:mm");
-				pr_info("rwbridge: [drv] mm probe enter\n");
-				for (g = 0; g < 2 && budget; g++, budget--) {
+			if (v && !(v & (LXGR_PAGE_SIZE - 1)) &&
+			    lxgr_kva_ok(v))
+				pgd_seen = 1;
+			if (v >= LXGR_USR_MIN && v < LXGR_USER_TOP_MAX &&
+			    n_usr < 32)
+				usr[n_usr++] = v;
+		}
+		if (!pgd_seen || n_usr < 3)
+			continue;
+
+		/* tight-cluster test on the user-VA set */
+		{
+			int a, b, best = 0;
+
+			for (a = 0; a < n_usr; a++) {
+				int c = 0;
+
+				for (b = 0; b < n_usr; b++)
+					if (usr[b] >= usr[a] &&
+					    usr[b] - usr[a] <=
+					        LXGR_CLUSTER_SPAN)
+						c++;
+				if (c > best)
+					best = c;
+			}
+			if (best < 3)
+				continue;
+		}
+		n_fp++;
+
+		/* ---- verified-real mm: locate arg pair + prove geometry -- */
+		for (i = 0; i + 1 < LXGR_MM_WIN_QWORDS && budget > 0; i++) {
+			unsigned long as = win[i], ae = win[i + 1];
+			unsigned long pgo;
+
+			if ((ae - as) < 8 || (ae - as) > 0x100000 ||
+			    as < LXGR_USR_MIN || as >= LXGR_USER_TOP_MAX ||
+			    ae > LXGR_USER_TOP_MAX)
+				continue;
+
+			for (pgo = 0; pgo < LXGR_MM_WIN_QWORDS && budget > 0;
+			     pgo++) {
+				unsigned long pgd = win[pgo];
+
+				if (!pgd || (pgd & (LXGR_PAGE_SIZE - 1)) ||
+				    !lxgr_kva_ok(pgd))
+					continue;
+
+				for (g = 0; g < 2 && budget > 0;
+				     g++, budget--) {
 					unsigned long po, pa;
 
 					lxgr_page_offset =
@@ -631,39 +670,39 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 						lxgr_geoms[g].pgd_shift;
 					lxgr_init_shifts();
 
-					po = ttbr0 - (pgd - lxgr_page_offset);
+					po = ttbr0 -
+					     (pgd - lxgr_page_offset);
 					if (po > 0x20000000000ULL)
 						continue;
 
 					lxgr_phys_off = po;
 					lxgr_phys_off_ready = 1;
 
-					/* ONE midpoint probe decides this
-					 * whole (pgd, geom) branch. */
+					STAGE("drv:mm");
 					if (lxgr_translate(
 					      pgd, as + (ae - as) / 2,
 					      &pa) == 0 &&
 					    lxgr_probe_bytes(pa)) {
 						lxgr_off_mm = o;
-						lxgr_off_mm_pgd = pgo;
-						lxgr_off_mm_argstart = ao;
-						lxgr_off_mm_argend = ao + 8;
+						lxgr_off_mm_pgd = pgo * 8;
+						lxgr_off_mm_argstart = i * 8;
+						lxgr_off_mm_argend = i * 8+8;
 						pr_info("rwbridge: derived "
 							"mm=%lu pgd=%lu "
 							"arg=%lu/%lu\n",
-							o, pgo, ao, ao + 8);
+							o, pgo * 8, i * 8,
+							i * 8 + 8);
+						STAGE("drv:ram");
+						lxgr_derive_ram_limit();
 						return 0;
 					}
 					lxgr_phys_off_ready = 0;
 				}
-				if (!budget)
-					goto out;
 			}
 		}
 	}
-out:
-	pr_warn("rwbridge: scan end budget=%lu mm=%lu pair=%lu pgd=%lu\n",
-		budget, n_mm, n_pair, n_pgd);
+	pr_warn("rwbridge: scan end budget=%lu mm=%lu fp=%lu\n",
+		budget, n_mm, n_fp);
 	return -ENOENT;
 }
 
