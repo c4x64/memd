@@ -1416,14 +1416,20 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 		tcur = lxgr_current();
 		q = tcur;
 		for (i = 0; i < 16384; i++) {
-			unsigned long tp = *(unsigned long *)(q + OF_PID());
+			unsigned long tp;
+
+			if (!lxgr_kva_ok(q + OF_PID()) ||
+			    !lxgr_kva_ok(q + OF_MM()) ||
+			    !lxgr_kva_ok(q + OF_TASKS()))
+				break;          /* param offsets wrong here */
+			tp = *(unsigned long *)(q + OF_PID());
 
 			if ((unsigned int)tp == (unsigned int)anchor) {
 				tgt_mm = *(unsigned long *)(q + OF_MM());
 				break;
 			}
 			nxt = *(unsigned long *)(q + OF_TASKS());
-			if (!nxt)
+			if (!nxt || !lxgr_kva_ok(nxt))
 				break;
 			q = nxt - OF_TASKS();
 			if (q == tcur)
@@ -1438,6 +1444,14 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 			unsigned long v[8];
 			int j, k;
 
+			if (!lxgr_kva_ok(tgt_mm) ||
+			    !lxgr_kva_ok(tgt_mm + 64)) {
+				lxgr_memcpy(rw_buf, "MM_OOB", 7);
+				rw_text_len = 6;
+				rw_status = 0;
+				lxgr_spin_unlock();
+				return 0;
+			}
 			for (j = 0; j < 8; j++)
 				v[j] = *(unsigned long *)(tgt_mm + j * 8);
 			for (j = 0; j < 8; j++) {
