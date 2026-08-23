@@ -1453,7 +1453,12 @@ static int rw_set(const char *val, const struct kernel_param *kp)
 			anchor = (long)lxgr_current_pid();
 		lxgr_pid_anchor = (unsigned long)anchor;
 		STAGE("drv:go");
+		/* RELEASE the op lock across the scan: redrive touches only
+		 * derive state, and cond_resched() inside a held LDXR/STXR
+		 * lock lets a spinner steal the vCPU -> livelock. */
+		lxgr_spin_unlock();
 		r = lxgr_redrive();
+		lxgr_spin_lock();
 		rw_status = r;
 		rw_last_size = 0;
 		rw_text_len = 0;
