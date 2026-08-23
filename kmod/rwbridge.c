@@ -641,7 +641,9 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 		n_fp++;
 
 		/* ---- verified-real mm: locate arg pair + prove geometry -- */
-		for (i = 0; i + 1 < LXGR_MM_WIN_QWORDS && budget > 0; i++) {
+		for (i = 0;
+		     i + 1 < LXGR_MM_WIN_QWORDS && budget > 0;
+		     i++, budget--) {
 			unsigned long as = win[i], ae = win[i + 1];
 			unsigned long pgo;
 
@@ -650,8 +652,9 @@ static long lxgr_derive_geom_mm(unsigned long cur, unsigned long ttbr0)
 			    ae > LXGR_USER_TOP_MAX)
 				continue;
 
-			for (pgo = 0; pgo < LXGR_MM_WIN_QWORDS && budget > 0;
-			     pgo++) {
+			for (pgo = 0;
+			     pgo < LXGR_MM_WIN_QWORDS && budget > 0;
+			     pgo++, budget--) {
 				unsigned long pgd = win[pgo];
 
 				if (!pgd || (pgd & (LXGR_PAGE_SIZE - 1)) ||
