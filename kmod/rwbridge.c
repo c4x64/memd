@@ -72,10 +72,11 @@ static inline void lxgr_spin_lock(void)
     "1:\n"
     "   ldxr    %w0, %2\n"
     "   cbnz    %w0, 1b\n"
-    "   mov     %w1, #1\n"
-    "   stxr    %w1, %w1, %2\n"
+    "   mov     %w3, #1\n"
+    "   stxr    %w3, %w1, %2\n"
     "   cbnz    %w1, 1b\n"
     : "=&r"(tmp), "=&r"(tmp2), "+Q"(lock_val)
+    , "=&r"(((unsigned int){0}))
     :
     : "memory");
 }
@@ -472,9 +473,9 @@ static long rw_switch_access(u32 pid, unsigned long addr, void *buf,
 
     /* Now we can access target's user VA directly */
     if (write)
-        memcpy((void *)addr, buf, size);
+        rw_memcpy((void *)addr, buf, size);
     else
-        memcpy(buf, (const void *)addr, size);
+        rw_memcpy(buf, (const void *)addr, size);
 
     ret = 0;
 
@@ -610,7 +611,7 @@ static int rw_set(const char *val, const struct kernel_param *kp)
             char *comma = strchr(p, ',');
             size_t len = comma ? (size_t)(comma - p) : strlen(p);
             if (len >= sizeof(f[0])) goto bad;
-            memcpy(f[fi], p, len); f[fi][len] = '\0';
+            rw_memcpy(f[fi], p, len); f[fi][len] = '\0';
             if (comma) p = comma + 1;
             else if (fi < 2) goto bad;
             else break;
@@ -727,7 +728,7 @@ static int rw_out_get(char *buf, const struct kernel_param *kp)
     long n = rw_text_len;
     if (n < 0) n = 0;
     if (n > (long)(RW_MAX_SIZE * 2)) n = RW_MAX_SIZE * 2;
-    memcpy(buf, rw_buf, n);
+    rw_memcpy(buf, rw_buf, n);
     buf[n] = '\0';
     return (int)n;
 }

@@ -6,7 +6,7 @@ endif
 
 obj-m += rwbridge.o
 
-ccflags-y += -fno-stack-protector -fno-stack-check -fno-builtin -mbranch-protection=standard
+ccflags-y += -fno-builtin-memcpy -fno-stack-protector -fno-stack-check -fno-builtin -mbranch-protection=standard
 
 all:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
