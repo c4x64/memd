@@ -67,14 +67,15 @@ static volatile unsigned int lock_val;
 static inline void lxgr_spin_lock(void)
 {
     unsigned int tmp;
+    unsigned int tmp2;
     asm volatile(
     "1:\n"
-    "   ldxr    %w0, %1\n"
+    "   ldxr    %w0, %2\n"
     "   cbnz    %w0, 1b\n"
-    "   mov     %w0, #1\n"
-    "   stxr    %w0, %w0, %1\n"
-    "   cbnz    %w0, 1b\n"
-    : "=&r"(tmp), "+Q"(lock_val)
+    "   mov     %w1, #1\n"
+    "   stxr    %w1, %w1, %2\n"
+    "   cbnz    %w1, 1b\n"
+    : "=&r"(tmp), "=&r"(tmp2), "+Q"(lock_val)
     :
     : "memory");
 }
@@ -540,6 +541,38 @@ static long strncpy_from_kernel(char *dst, const char *src, long max)
     dst[n] = 0;
     return n;
 }
+
+
+
+/* Self-contained implementations — no kernel symbol imports needed */
+static unsigned long rw_strlen(const char *s)
+{
+    unsigned long n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+static char *rw_strchr(const char *s, int c)
+{
+    while (*s) {
+        if (*s == (char)c) return (char *)s;
+        s++;
+    }
+    return NULL;
+}
+
+static void *rw_memcpy(void *dst, const void *src, unsigned long n)
+{
+    unsigned char *d = dst;
+    const unsigned char *s = src;
+    while (n--) *d++ = *s++;
+    return dst;
+}
+
+/* Use these instead of kernel strlen/strchr/memcpy */
+#define strlen rw_strlen
+#define strchr rw_strchr
+#define memcpy rw_memcpy
 
 
 static int rw_set(const char *val, const struct kernel_param *kp)
