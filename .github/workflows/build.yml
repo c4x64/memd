@@ -1,0 +1,117 @@
+name: build-universal-kmod
+
+# rwbridge is compiled ONCE. The build tree is only a header/source donor —
+# the .ko carries no per-KMI data: struct layouts arrive via the kopts
+# runtime channel (or init-time self-derivation) and vermagic is patched to
+# the running kernel by run.sh at install time.
+#
+# We deliberately build against the OLDEST supported headers (5.10): if the
+# source used any newer-only API, this build breaks — so a green build
+# proves the code is 5.10-compatible, and 5.10-compatible code using only
+# the stable surface runs on every later kernel too.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  universal:
+    runs-on: ubuntu-latest
+    env:
+      ARCH: arm64
+      CROSS_COMPILE: aarch64-linux-gnu-
+      KVER: 5.10.209
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            libssl-dev libelf-dev bison flex bc
+
+      - name: Fetch kernel source (headers donor only)
+        run: |
+          for try in 1 2 3; do
+            for base in \
+              "https://cdn.kernel.org/pub/linux/kernel/v5.x" \
+              "https://mirrors.edge.kernel.org/pub/linux/kernel/v5.x" \
+              "https://mirrors.tuna.tsinghua.edu.cn/kernel/v5.x"; do
+              wget -q --timeout=90 "$base/linux-$KVER.tar.xz" && break 2
+              rm -f linux-$KVER.tar.xz
+            done
+            echo "mirror pass $try failed; retrying"; sleep 10
+          done
+          [ -f linux-$KVER.tar.xz ] || { echo "no source for $KVER"; exit 1; }
+          tar xf linux-$KVER.tar.xz
+
+      - name: Prepare tree (max-length UTS_RELEASE placeholder)
+        run: |
+          cd linux-$KVER
+          # UTS_RELEASE is capped at 63 chars; bake exactly that so ANY
+          # shorter/longer runtime vermagic fits the in-place patch.
+          # "5.10.209" is 8 chars -> EXTRAVERSION supplies the other 55.
+          PAD=$(python3 -c "print('x'*54)")
+          make ARCH=$ARCH defconfig
+          ./scripts/config --disable LOCALVERSION_AUTO
+          ./scripts/config --disable MODVERSIONS
+          ./scripts/config --enable MODULES
+          ./scripts/config --enable MODULE_UNLOAD
+          make ARCH=$ARCH olddefconfig
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
+            EXTRAVERSION="-${PAD}" modules_prepare scripts
+          echo "baked release: $(cat include/generated/utsrelease.h | head -1)"
+          # Donor-tree branch protection would shadow the module's own
+          # -mbranch-protection=bti (last-wins) and strip our BTI landing
+          # pads. The module must carry the ONLY such flag on its cmdline,
+          # so neutralize the donor default (donor tree is build scaffolding
+          # only — vmlinux is never built here).
+          echo "--- donor branch-protection origin ---"
+          grep -rn "mbranch-protection" arch/arm64/Makefile Makefile 2>/dev/null | head -5 || true
+          sed -i "s/-mbranch-protection=[^ ']*/ /g" arch/arm64/Makefile Makefile 2>/dev/null || true
+          echo "--- after neutralize ---"
+          grep -rn "mbranch-protection" arch/arm64/Makefile Makefile 2>/dev/null | head -5 || echo "(none left)"
+
+      - name: Build universal module
+        run: |
+          cd kmod
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
+            KDIR="$GITHUB_WORKSPACE/linux-$KVER"
+
+      - name: Universality gate (imports, versions, placeholder)
+        run: |
+          cd kmod
+          make CROSS_COMPILE=$CROSS_COMPILE KDIR="$GITHUB_WORKSPACE/linux-$KVER" check-universal
+
+      - name: Vermagic patch self-test (mirrors run.sh)
+        run: |
+          cd kmod
+          cp rwbridge.ko /tmp/patchtest.ko
+          # vendor-style long target incl. extras
+          TARGET="vermagic=5.15.137-android13-8-gabcdef1-ab1234567 SMP preempt mod_unload aarch64"
+          python3 - /tmp/patchtest.ko "$TARGET" <<'PYEOF'
+          import sys
+          ko, want = sys.argv[1], sys.argv[2].encode()
+          b = bytearray(open(ko, 'rb').read())
+          i = b.find(b'vermagic=')
+          assert i >= 0
+          j = b.find(b'\x00', i)
+          assert len(want) <= j - i, "placeholder too short for target"
+          b[i:i+len(want)] = want
+          for k in range(i+len(want), j): b[k] = 0
+          open(ko, 'wb').write(b)
+          PYEOF
+          strings /tmp/patchtest.ko | grep -x "$TARGET" \
+            || { echo "patch self-test FAILED"; exit 1; }
+          echo "patch self-test passed"
+
+      - name: Upload artifact (single universal build + installer)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rwbridge-universal
+          path: |
+            kmod/rwbridge.ko
+            run.sh

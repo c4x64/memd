@@ -1,0 +1,258 @@
+#!/system/bin/sh
+# rwbridge run.sh — install the UNIVERSAL single-build .ko on any 5.10+ kernel.
+#
+# There is exactly one rwbridge.ko (no per-KMI matrix). Three things that
+# used to be compile-time are resolved here, at runtime:
+#   1. vermagic — the baked placeholder is patched in a temp copy to match
+#      the running kernel (dmesg-feedback retry if extras differ), then
+#      insmod runs clean (no --force, ever).
+#   2. kernel layout data — kopts="..." carries per-kernel offsets for
+#      kernels whose structs the init-time scanner can't derive (table below
+#      + RWBRIDGE_KOPTS env override). Absent keys self-derive on-device.
+#   3. diagnostics — printk candidates are surveyed (informational; the
+#      module imports none) and the session log is saved to
+#      /sdcard/MemoryD/N.log (next free number).
+#
+# Requires root. Nothing persists (no boot scripts); worst case is one reboot.
+# Layout: this script + rwbridge.ko side by side (CI artifact, /data/local/tmp).
+
+MODNAME="rwbridge"
+KO=""
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+TMPKO="/data/local/tmp/rwbridge-run.ko"
+
+log() { echo "[rwbridge] $1"; }
+die() { echo "[rwbridge] ERROR: $1"; exit 1; }
+
+# 0. Already loaded — leave it alone.
+if grep -q "^${MODNAME} " /proc/modules 2>/dev/null; then
+    log "already loaded, skipping"
+    exit 0
+fi
+
+# 1. Locate the universal .ko.
+for c in "${SCRIPT_DIR}/rwbridge.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge.ko"; do
+    if [ -f "$c" ]; then KO="$c"; break; fi
+done
+[ -n "$KO" ] || die "rwbridge.ko not found next to run.sh"
+
+KVER=$(uname -r)
+log "kernel: $KVER"
+
+# 2. CFI safety gate (/proc/config.gz present on GKI).
+# Non-CFI kernels: always fine. CFI kernels: kernel->module callbacks may
+# trap on first sysfs access (single reboot worst case, nothing persists).
+CFI="unknown"
+if [ -f /proc/config.gz ]; then
+    if gzip -dc /proc/config.gz 2>/dev/null | grep -q "^CONFIG_CFI_CLANG=y"; then
+        CFI="yes"
+    else
+        CFI="no"
+    fi
+fi
+if [ "$CFI" = "yes" ]; then
+    log "WARNING: CFI-enforcing kernel — if the first sysfs access reboots,"
+    log "  this kernel needs a CFI build (source needs no change, flags only)."
+    log "  dmesg signature to confirm: 'CFI failure'. Continuing in 3s..."
+    sleep 3
+else
+    log "CFI: $CFI (proceeding)"
+fi
+
+# 3. Resolve the TARGET vermagic value.
+# Priority: full vermagic from any on-device .ko (exact, incl. extras) ...
+TARGET_VM=""
+for d in /vendor/lib/modules /vendor_dlkm/lib/modules /system/lib/modules \
+         /vendor/lib/modules/*/extra; do
+    [ -d "$d" ] || continue
+    for k in "$d"/*.ko; do
+        [ -f "$k" ] || continue
+        V=$(strings "$k" 2>/dev/null | grep '^vermagic=' | head -1)
+        if [ -n "$V" ]; then TARGET_VM="$V"; break 2; fi
+    done
+done
+# ... fallback: uname -r + GKI-standard extras.
+if [ -z "$TARGET_VM" ]; then
+    TARGET_VM="vermagic=${KVER} SMP preempt mod_unload aarch64"
+    log "no on-device .ko for vermagic reference; using fallback"
+fi
+log "target: $TARGET_VM"
+
+# 4. Patch a temp copy (binary-safe; python3 fast path, dd fallback).
+cp -f "$KO" "$TMPKO" || die "cannot stage temp copy"
+chmod 600 "$TMPKO"
+
+patch_vermagic() {
+    _ko="$1"; _want="$2"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$_ko" "$_want" <<'PYEOF'
+import sys
+ko, want = sys.argv[1], sys.argv[2].encode()
+b = bytearray(open(ko, 'rb').read())
+i = b.find(b'vermagic=')
+assert i >= 0, "no vermagic in ko"
+j = b.find(b'\x00', i)
+have_len = j - i
+want_b = want.encode() if isinstance(want, str) else want
+assert len(want_b) <= have_len, "target vermagic longer than baked (%d > %d)" % (len(want_b), have_len)
+b[i:i+len(want_b)] = want_b
+for k in range(i+len(want_b), j): b[k] = 0
+open(ko, 'wb').write(b)
+print("patched %d bytes (field %d)" % (len(want_b), have_len))
+PYEOF
+        return $?
+    fi
+    # dd fallback (busybox/toybox-safe): locate offset, find the NUL
+    # terminator with od (tr cannot handle NUL bytes portably), overwrite +
+    # NUL-pad. All lengths include the "vermagic=" prefix on both sides.
+    _off=$(grep -abo 'vermagic=' "$_ko" 2>/dev/null | head -1 | cut -d: -f1)
+    [ -n "$_off" ] || { echo "cannot locate vermagic"; return 1; }
+    _end=$(dd if="$_ko" bs=1 skip="$_off" count=200 2>/dev/null | od -A d -t x1 -v | awk '{for(i=2;i<=NF;i++) if($i=="00"){print $1+i-2; exit}}')
+    [ -n "$_end" ] || { echo "cannot find vermagic terminator"; return 1; }
+    # (od offsets are relative to the dd skip point, i.e. to _off.)
+    _have=$((_end + 1))
+    _want_len=$(printf '%s' "$_want" | wc -c)
+    if [ "$_want_len" -gt "$_have" ]; then
+        echo "target vermagic longer than baked ($_want_len > $_have)"; return 1
+    fi
+    printf '%s' "$_want" | dd of="$_ko" bs=1 seek="$_off" conv=notrunc 2>/dev/null || return 1
+    _pad=$((_have - _want_len))
+    if [ "$_pad" -gt 0 ]; then
+        dd if=/dev/zero of="$_ko" bs=1 seek=$((_off + _want_len)) count="$_pad" conv=notrunc 2>/dev/null || return 1
+    fi
+    echo "patched $_want_len bytes (field $_have)"
+    return 0
+}
+
+patch_vermagic "$TMPKO" "$TARGET_VM" || die "vermagic patch failed"
+log "vermagic patched"
+
+# 5. kopts: built-in per-kernel table + env override.
+# Format per entry: "prefix|key=val,key=val". Prefix matches uname -r start.
+KOPTS=""
+case " $KVER " in
+    # examples (extend as real devices report derive gaps):
+    # *"5.10."*) KOPTS="task_pid_off=..." ;;
+    *) KOPTS="" ;;
+esac
+if [ -n "$RWBRIDGE_KOPTS" ]; then KOPTS="$RWBRIDGE_KOPTS"; fi
+# Bring-up modes (staged trust — see README): stability soak first
+# (load + idle, no scans), then read-only sessions, writes last.
+if [ -n "$RWBRIDGE_STABILITY" ]; then
+    KOPTS="${KOPTS:+$KOPTS,}stability=1"
+fi
+if [ -n "$RWBRIDGE_READONLY" ]; then
+    KOPTS="${KOPTS:+$KOPTS,}readonly=1"
+fi
+if [ -n "$KOPTS" ]; then
+    log "kopts: $KOPTS"
+    INSMOD_OPTS="kopts=\"$KOPTS\""
+else
+    log "kopts: none (full self-derive)"
+    INSMOD_OPTS=""
+fi
+
+# 6. Printk-family candidate search (informational).
+# The module imports no printk-family symbol, so this never blocks loading;
+# it only records what this kernel offers, for the log header.
+printk_candidates() {
+    grep -E ' (_printk|printk|printk_deferred|vprintk|printk_once)$' /proc/kallsyms 2>/dev/null \
+        | awk '{print $3}' | sort -u | tr '\n' ' '
+}
+CANDS=$(printk_candidates)
+if [ -z "$CANDS" ]; then
+    CANDS="(none exported — module unaffected: zero-import logging)"
+fi
+log "printk candidates on this kernel: $CANDS"
+
+# 7. Persist the session log: /sdcard/MemoryD/<next>.log where <next> is one
+# past the highest existing numeric name (0.log first, then 1, 2, ...).
+# Best-effort: an unwritable sdcard never fails the install.
+dump_log() {
+    _why="$1"
+    _dir="/sdcard/MemoryD"
+    mkdir -p "$_dir" 2>/dev/null
+    _next=0
+    if [ -d "$_dir" ]; then
+        for _f in "$_dir"/*.log; do
+            [ -f "$_f" ] || continue
+            _b=$(basename "$_f" .log)
+            case "$_b" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            if [ "$_b" -ge "$_next" ] 2>/dev/null; then
+                _next=$((_b + 1))
+            fi
+        done
+    fi
+    LASTLOG="$_dir/$_next.log"
+    {
+        echo "=== rwbridge session log ($_why) ==="
+        echo "date: $(date 2>/dev/null)"
+        echo "kernel: $(uname -r)"
+        echo "printk candidates: $CANDS"
+        echo "--- module log param ---"
+        cat /sys/module/rwbridge/parameters/log 2>/dev/null || echo "(module not loaded)"
+        echo "--- stage/status ---"
+        echo "stage=$(cat /sys/module/rwbridge/parameters/stage 2>/dev/null)"
+        echo "status=$(cat /sys/module/rwbridge/parameters/status 2>/dev/null)"
+        echo "--- dmesg (rwbridge) ---"
+        dmesg 2>/dev/null | grep -i rwbridge | tail -30
+    } > "$LASTLOG" 2>/dev/null
+    if [ -f "$LASTLOG" ]; then
+        log "session log: $LASTLOG"
+    else
+        log "note: could not write $LASTLOG (sdcard unwritable?)"
+        LASTLOG="(unwritten)"
+    fi
+}
+
+# 8. Load (never --force) + verify, with dmesg-feedback vermagic retry.
+# If the kernel rejects our extras guess (e.g. it expects a `modversions`
+# token we didn't bake), dmesg names the exact string it wants
+# ("should be '...'") — re-patch the temp copy to that and retry once.
+# This keeps vermagic fully runtime: no build matrix, no guessing.
+try_insmod() {
+    # sync first: if insmod panics the device, everything echoed so far
+    # must already be on disk for post-reboot forensics (panic = no sync).
+    sync 2>/dev/null
+    # shellcheck disable=SC2086
+    eval insmod '"$TMPKO"' $INSMOD_OPTS 2>/dev/null
+    return $?
+}
+
+if ! try_insmod; then
+    WANT=$(dmesg 2>/dev/null | grep -o "should be '[^']*'" | tail -1 | sed "s/^should be '//;s/'\$//")
+    # dmesg prints the expected string WITHOUT the "vermagic=" tag, but the
+    # patch offset points AT the tag — restore the prefix or the tag is
+    # destroyed and the retry artifact is malformed (no vermagic at all).
+    case "$WANT" in
+        vermagic=*) ;;
+        ?*) WANT="vermagic=$WANT" ;;
+    esac
+    if [ -n "$WANT" ]; then
+        log "kernel wants different vermagic; re-patching and retrying once"
+        log "want: $WANT"
+        cp -f "$KO" "$TMPKO" || die "cannot re-stage temp copy"
+        chmod 600 "$TMPKO"
+        patch_vermagic "$TMPKO" "$WANT" || die "vermagic re-patch failed"
+        if ! try_insmod; then
+            dump_log "insmod-retry"
+            die "insmod failed twice (see dmesg + $LASTLOG)"
+        fi
+    else
+        dump_log "insmod"
+        die "insmod failed (see dmesg + $LASTLOG)"
+    fi
+fi
+rm -f "$TMPKO"
+sleep 1
+STAGE=$(cat /sys/module/rwbridge/parameters/stage 2>/dev/null)
+log "loaded; stage=$STAGE"
+if [ "$STAGE" != "ok" ]; then
+    log "note: derivation did not complete"
+    log "  fix: pass RWBRIDGE_KOPTS=\"task_pid_off=..,task_mm_off=..,...\" and retry"
+fi
+
+dump_log "install"
+echo "[rwbridge] done"
