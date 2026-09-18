@@ -314,9 +314,25 @@ static int find_pid_offset(unsigned long cur)
         if (!bok)
             continue;
         a = (u32)aw; b = (u32)bw;
+        if (!(a == b && a > 0 && a < 4194304))
+            continue;
+        /* Isolated-pair rule: pid/tgid is exactly 2-wide. The classic
+         * false hit is prio/static_prio/normal_prio (all 120 for normal
+         * tasks) — a run of 3+. Skip any match with an equal neighbor
+         * on either side. */
+        {
+            unsigned long nb = 0, pf = 0;
+            int nok = 0, fok = 0;
+            if (i + 2 < SCAN_RANGE / 4)
+                SAFE_READ64(nb, (unsigned long)&p[i + 2], nok);
+            if (i > 0)
+                SAFE_READ64(pf, (unsigned long)&p[i - 1], fok);
+            if ((nok && (u32)nb == a) || (fok && (u32)pf == a))
+                continue;
+        }
         /* pid and tgid are adjacent; leader has pid == tgid */
-        if (a == b && a > 0 && a < 4194304)
-            return i * 4;
+        pr_info("rwbridge: pid candidate off=%d val=%u\n", i * 4, a);
+        return i * 4;
     }
     return -1;
 }
