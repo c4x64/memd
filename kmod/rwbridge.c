@@ -331,7 +331,6 @@ static int find_pid_offset(unsigned long cur)
                 continue;
         }
         /* pid and tgid are adjacent; leader has pid == tgid */
-        pr_info("rwbridge: pid candidate off=%d val=%u\n", i * 4, a);
         return i * 4;
     }
     return -1;
