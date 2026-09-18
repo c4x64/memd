@@ -98,7 +98,7 @@ static void rb_put_hex(unsigned long v)
 #define PAGE_SIZE_4K     0x1000UL
 #define PAGE_MASK_4K     (~(PAGE_SIZE_4K - 1))
 #define PA_LOW_BITS      47UL       /* arm64 PA width up to 48 bits */
-#define PA_MASK          ((1UL << PA_LOW_BITS) - 1) & ~PAGE_MASK_4K
+#define PA_MASK          ((1UL << PA_LOW_BITS) - 1) & PAGE_MASK_4K
 
 /* ── module state ──────────────────────────────────────────────────────── */
 
@@ -387,7 +387,7 @@ static int find_mm_candidates(unsigned long cur, unsigned long po)
             if (!qok)
                 continue;
 
-            if (q > po && !(q & PAGE_MASK_4K)) {
+            if (q > po && !(q & (PAGE_SIZE_4K - 1))) {
                 /* pgd-shaped content; proof decides */
                 mm_cand_off[mm_cand_n] = (unsigned long)i * 8UL;
                 mm_cand_mm[mm_cand_n] = candidate;
