@@ -1626,6 +1626,40 @@ int rw_set(const char *val, const struct kernel_param *kp)
         return 0;
     }
 
+    case 'V': {
+        /* Verify-u32: V,<byteoff>,<hexval> reads one u32 at cur_task+off
+         * and compares with val. Single ex-table-guarded read pair —
+         * F-class safety, no sweep, no walk. Used to validate candidate
+         * offsets (pid at 1496, comm probes) synchronously inside the
+         * live writer: status 0 = match, -EIO = mismatch, -EFAULT =
+         * unreadable. Reports the observed u32 in `out` always. */
+        u64 voff = 0, vval = 0;
+        unsigned long vw = 0;
+        int vok = 0;
+        char *comma2;
+        parse_hex(p, &voff);
+        comma2 = strchr(p, ',');
+        if (comma2)
+            parse_hex(comma2 + 1, &vval);
+        if (voff >= SCAN_RANGE) {
+            rw_status = -EINVAL;
+            rw_text_len = 0;
+            rb_spin_unlock();
+            return 0;
+        }
+        SAFE_READ64(vw, cur_task + (unsigned long)voff, vok);
+        if (vok) {
+            u32 seen = (u32)vw;
+            put_hex_bytes(0, (const u8 *)&seen, 4);
+            rw_status = (seen == (u32)vval) ? 0 : -EIO;
+        } else {
+            rw_status = -EFAULT;
+            rw_text_len = 0;
+        }
+        rb_spin_unlock();
+        return 0;
+    }
+
     case 'S': {
         /* Single derive step: S,<0..7> runs exactly one step
          * (regs/pid/po/mm/tasks/comm/arg/fin). Steps must run in order
