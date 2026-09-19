@@ -246,7 +246,11 @@ static void put_hex_bytes(unsigned long off, const u8 *data, unsigned long len)
 {
     static const char hx[] = "0123456789abcdef";
     unsigned long i;
-    for (i = 0; i < len && off + 1 < RW_MAX_SIZE * 2; i++) {
+    /* Bound is RW_MAX_SIZE (rw_buf size), NOT 2x: callers hex-dump into
+     * rw_buf itself (R-case dumps size bytes -> 2x chars), so output
+     * must fit the 256B buffer; excess truncates instead of smashing
+     * neighboring BSS (lock word, offsets, ring). */
+    for (i = 0; i < len && off + 1 < RW_MAX_SIZE; i++) {
         rw_buf[off++] = hx[data[i] >> 4];
         rw_buf[off++] = hx[data[i] & 0xf];
     }
@@ -1507,6 +1511,8 @@ int rw_set(const char *val, const struct kernel_param *kp)
             if (r == 0) {
                 rw_status = 0;
                 rw_text_len = (long)size_s64 * 2;
+                if (rw_text_len > (long)RW_MAX_SIZE - 1)
+                    rw_text_len = (long)RW_MAX_SIZE - 1;
                 put_hex_bytes(0, rw_buf, size_s64);
                 STAGE("ok");
             } else {
@@ -1743,18 +1749,17 @@ bad:
  * are parsed before init, so derive_all() already honors them. */
 int kopts_param_set(const char *val, const struct kernel_param *kp)
 {
-    unsigned long n = 0;
-    while (val[n] && n < sizeof(kopts_buf) - 1) {
-        kopts_buf[n] = val[n];
-        n++;
-    }
-    kopts_buf[n] = '\0';
-    /* strip trailing newline (sysfs writes include one) */
-    while (n > 0 && (kopts_buf[n-1] == '\n' || kopts_buf[n-1] == '\r'))
-        kopts_buf[--n] = '\0';
-    kopts_parse_apply(kopts_buf);
-    kopts_log_state();
-    return 0;
+    /* Runtime kopts writes are DISABLED (stub returns -EPERM).
+     * Reason: on this hypervisor, sysfs writes to this attribute
+     * intermittently wedge the writer unkillably (R-spin holding
+     * param_lock, killing all param access until reboot), while the
+     * identical parser is provably bounded — the fault lies below our
+     * code (sysfs buffer termination / kernfs path), so no runtime
+     * write is safe to offer. Offsets travel via the insmod kopts=
+     * string (parsed once at load from NUL-terminated module args).
+     * .get stays for inspection. */
+    (void)val; (void)kp;
+    return -EPERM;
 }
 
 int kopts_param_get(char *buf, const struct kernel_param *kp)
