@@ -1406,7 +1406,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
      * offsets are process-independent and stay cached. */
     asm volatile("mrs %0, sp_el0" : "=r"(cur_task));
 
-    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S') {
+    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V') {
         /* Lazy first-use derivation: some loaders drop init sections
          * (the initcall pointer lives in one, so init never runs, yet
          * state=Live with pristine data). Deriving here makes operation
@@ -1414,10 +1414,11 @@ int rw_set(const char *val, const struct kernel_param *kp)
          * fast-path where loaders are sane. Idempotent: a second caller
          * while one derives just recomputes the same values.
          * 'F' (fault probe) bypasses derive: it tests the fixup armor
-         * itself and must run even when derive is broken/unknown. */
+         * itself and must run even when derive is broken/unknown.
+         * 'V' (verify-u32) also bypasses: single guarded read, no walk. */
         derive_all();
     }
-    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S') {
+    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V') {
         rw_status = -EPERM;
         STAGE("no_derive");
         return 0;
