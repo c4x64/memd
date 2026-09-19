@@ -333,7 +333,7 @@ static int find_pid_offset(unsigned long cur)
      * returning the first: first-match-wins false-positives on stable
      * fields (prio triplet, 460/460). Isolation filtering happens in a
      * bounded post-pass over the recorded matches only. */
-    for (i = 0; i < SCAN_RANGE / 4 - 1; i++) {
+    for (i = 0; i < PID_SCAN_WORDS; i++) {
         if (dbg_scancap > 0 && i >= dbg_scancap)
             break;
         aw = 0; bw = 0; aok = 0; bok = 0;
@@ -408,6 +408,14 @@ static unsigned long find_page_offset(unsigned long cur)
  * how offsets get missed on new layouts. Up to MM_CAND_MAX collected.
  */
 #define MM_CAND_MAX 16
+/* pid/tgid live in the first 1KB of task_struct on every known 5.15
+ * layout (observed at byte 632 here). The pid sweep defaults to this
+ * 1KB window: small sweeps are proven instant on-device, while full
+ * 8K sweeps intermittently wedge (mechanism under investigation —
+ * every scan that ever completed on-device exited early). Discovery
+ * is one-time per kernel anyway (pin the validated offset via kopts);
+ * an explicit S,1.<cap> still overrides for bring-up bisect. */
+#define PID_SCAN_WORDS 256
 static int mm_cand_n;
 static unsigned long mm_cand_off[MM_CAND_MAX];
 static unsigned long mm_cand_mm[MM_CAND_MAX];
