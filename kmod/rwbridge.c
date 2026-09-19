@@ -172,6 +172,7 @@ static int kopt_readonly;
  * already separates derive-vs-switch. */
 static int kopt_stub;
 static char kopts_buf[512];
+static int kopts_init_done;   /* 0 during insmod arg parsing, 1 after init */
 
 /* Forward declarations (defined beside the sysfs parser below) */
 static int kopts_parse_apply(const char *s);
@@ -1749,17 +1750,27 @@ bad:
  * are parsed before init, so derive_all() already honors them. */
 int kopts_param_set(const char *val, const struct kernel_param *kp)
 {
-    /* Runtime kopts writes are DISABLED (stub returns -EPERM).
-     * Reason: on this hypervisor, sysfs writes to this attribute
-     * intermittently wedge the writer unkillably (R-spin holding
-     * param_lock, killing all param access until reboot), while the
-     * identical parser is provably bounded — the fault lies below our
-     * code (sysfs buffer termination / kernfs path), so no runtime
-     * write is safe to offer. Offsets travel via the insmod kopts=
-     * string (parsed once at load from NUL-terminated module args).
-     * .get stays for inspection. */
-    (void)val; (void)kp;
-    return -EPERM;
+    /* Two-phase kopts: LOAD-TIME args parse normally (kernel arg memory
+     * is NUL-terminated, proven safe); RUNTIME sysfs writes return
+     * -EPERM without touching anything. Reason: sysfs writes to this
+     * attribute intermittently wedge the writer unkillably on this
+     * hypervisor (R-spin, param_lock held, all param I/O dead until
+     * reboot), while identical parsing at load is clean — fault lies
+     * below our code (kernfs/sysfs path). Offsets travel via
+     * insmod kopts="..." only. .get stays for inspection. */
+    unsigned long n = 0;
+    (void)kp;
+    if (kopts_init_done)
+        return -EPERM;
+    while (val[n] && n < sizeof(kopts_buf) - 1) {
+        kopts_buf[n] = val[n];
+        n++;
+    }
+    kopts_buf[n] = '\0';
+    while (n > 0 && (kopts_buf[n-1] == '\n' || kopts_buf[n-1] == '\r'))
+        kopts_buf[--n] = '\0';
+    kopts_parse_apply(kopts_buf);
+    return 0;
 }
 
 int kopts_param_get(char *buf, const struct kernel_param *kp)
@@ -1854,8 +1865,7 @@ int rwbridge_init(void)
     /* NOTE: no utsname()/current derefs here — those bake in struct layouts.
      * The loader (run.sh) already prints uname -r from userspace. */
         { rb_puts("rwbridge: loading (universal single-build, kopts runtime)"); rb_putc('\n'); };
-    kopts_log_state();
-    {
+    kopts_log_state();    {
         int r = derive_all();
         /* Always succeed load: with zero log imports there is no reason to
          * refuse, and the ring + stage stay readable for diagnosis. Ops
@@ -1865,12 +1875,14 @@ int rwbridge_init(void)
         else
                         { rb_puts("rwbridge: init ok"); rb_putc('\n'); };
     }
+    kopts_init_done = 1;
     return 0;
 }
 
 void rwbridge_exit(void)
 {
         { rb_puts("rwbridge: unloaded"); rb_putc('\n'); };
+    kopts_init_done = 0;
 }
 
 module_init(rwbridge_init);
