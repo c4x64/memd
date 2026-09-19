@@ -109,6 +109,7 @@ static char rw_stage[16] = "idle";
 
 static unsigned long cur_task;         /* sp_el0 value at init */
 static unsigned long pid_offset;       /* offset of pid in task_struct */
+static int dbg_scancap;                /* S-step sweep cap (u32 slots, 0=full) */
 static int pid_ncands;                /* isolated-pair candidates listed by S1 */
 static int pid_cand_off[8];
 static unsigned int pid_cand_val[8];
@@ -333,6 +334,8 @@ static int find_pid_offset(unsigned long cur)
      * fields (prio triplet, 460/460). Isolation filtering happens in a
      * bounded post-pass over the recorded matches only. */
     for (i = 0; i < SCAN_RANGE / 4 - 1; i++) {
+        if (dbg_scancap > 0 && i >= dbg_scancap)
+            break;
         aw = 0; bw = 0; aok = 0; bok = 0;
         SAFE_READ64(aw, (unsigned long)&p[i], aok);
         if (!aok)
@@ -1626,6 +1629,25 @@ int rw_set(const char *val, const struct kernel_param *kp)
         int n;
         parse_hex(p, &sn);
         n = (int)sn;
+        /* Optional sweep cap for wedge-bisect: "S,1.64" caps step 1's
+         * sweep at 64 u32 slots (wall-time the echo per cap to find a
+         * poison word). No dot = full range (dbg_scancap=0). */
+        {
+            const char *dot = buf;
+            dbg_scancap = 0;
+            while (*dot && *dot != '.')
+                dot++;
+            if (*dot == '.') {
+                int cap = 0;
+                dot++;
+                while (*dot >= '0' && *dot <= '9') {
+                    cap = cap * 10 + (*dot - '0');
+                    dot++;
+                }
+                if (cap > 0 && cap < SCAN_RANGE / 4)
+                    dbg_scancap = cap;
+            }
+        }
         if (sn > 7 || (sn == 0 && p[0] != '0')) {
             rw_status = -EINVAL;
             rw_text_len = 0;
