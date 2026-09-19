@@ -90,6 +90,14 @@ static void rb_put_hex(unsigned long v)
 #define RW_MAX_SIZE      256UL
 #define SCAN_RANGE       8192        /* bytes of task_struct to scan (mm can
                                        sit past 4K on big android configs) */
+/* pid/tgid live in the first 1KB of task_struct on every known 5.15
+ * layout (observed at byte 632 here). The pid sweep defaults to this
+ * 1KB window: small sweeps are proven instant on-device, while full
+ * 8K sweeps intermittently wedge (mechanism under investigation —
+ * every scan that ever completed on-device exited early). Discovery
+ * is one-time per kernel anyway (pin the validated offset via kopts);
+ * an explicit S,1.<cap> still overrides for bring-up bisect. */
+#define PID_SCAN_WORDS 256
 #define MM_SCAN_RANGE    1024        /* bytes of mm_struct to scan */
 #define TASK_WALK_MAX    16384
 #define NAME_LEN         16
@@ -408,14 +416,6 @@ static unsigned long find_page_offset(unsigned long cur)
  * how offsets get missed on new layouts. Up to MM_CAND_MAX collected.
  */
 #define MM_CAND_MAX 16
-/* pid/tgid live in the first 1KB of task_struct on every known 5.15
- * layout (observed at byte 632 here). The pid sweep defaults to this
- * 1KB window: small sweeps are proven instant on-device, while full
- * 8K sweeps intermittently wedge (mechanism under investigation —
- * every scan that ever completed on-device exited early). Discovery
- * is one-time per kernel anyway (pin the validated offset via kopts);
- * an explicit S,1.<cap> still overrides for bring-up bisect. */
-#define PID_SCAN_WORDS 256
 static int mm_cand_n;
 static unsigned long mm_cand_off[MM_CAND_MAX];
 static unsigned long mm_cand_mm[MM_CAND_MAX];
