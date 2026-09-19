@@ -317,50 +317,50 @@ static int read_u32_at(unsigned long addr, u32 *out)
 
 static int find_pid_offset(unsigned long cur)
 {
-    unsigned long wprev = 0, wcur = 0;
-    int wi, ok = 0;
+    unsigned int *p = (unsigned int *)cur;
+    unsigned long aw, bw;
+    int aok, bok;
+    u32 a, b;
+    int i;
     int match_idx[16];
     int nmatch = 0;
     int mi;
-    u32 plo, phi, clo, chi;
 
     pid_ncands = 0;
-    /* Pass 1: single u64 sweep. Each word yields an internal pair
-     * (lo==hi at u32 index 2w) and a cross pair with the previous
-     * word's high half (u32 index 2w-1). */
-    for (wi = 0; wi < SCAN_RANGE / 8; wi++) {
-        wcur = 0; ok = 0;
-        SAFE_READ64(wcur, cur + wi * 8, ok);
-        if (!ok) {
-            wprev = 0;
+    /* Sweep shaped exactly like the proven first-match scanner (returns
+     * were observed on-device), but record every equal-pair instead of
+     * returning the first: first-match-wins false-positives on stable
+     * fields (prio triplet, 460/460). Isolation filtering happens in a
+     * bounded post-pass over the recorded matches only. */
+    for (i = 0; i < SCAN_RANGE / 4 - 1; i++) {
+        aw = 0; bw = 0; aok = 0; bok = 0;
+        SAFE_READ64(aw, (unsigned long)&p[i], aok);
+        if (!aok)
             continue;
-        }
-        plo = (u32)(wprev >> 32); clo = (u32)wcur;
-        phi = clo; chi = (u32)(wcur >> 32);
-        if (wi > 0 && plo == clo && plo > 0 && plo < 4194304 &&
-            nmatch < 16)
-            match_idx[nmatch++] = wi * 2 - 1;
-        if (phi == chi && phi > 0 && phi < 4194304 && nmatch < 16)
-            match_idx[nmatch++] = wi * 2;
-        wprev = wcur;
+        SAFE_READ64(bw, (unsigned long)&p[i + 1], bok);
+        if (!bok)
+            continue;
+        a = (u32)aw; b = (u32)bw;
+        if (a == b && a > 0 && a < 4194304 && nmatch < 16)
+            match_idx[nmatch++] = i;
     }
-    /* Pass 2: isolated-pair rule on matches only. pid/tgid is exactly
-     * 2-wide; runs of 3+ (prio/static_prio/normal_prio, all 120) are
-     * skipped. Userspace knows its own pid and picks the true slot. */
+    /* Post-pass: isolated-pair rule. pid/tgid is exactly 2-wide; runs of
+     * 3+ (prio/static_prio/normal_prio, all 120) are skipped. Userspace
+     * knows its own pid and picks the true slot from the printed list. */
     for (mi = 0; mi < nmatch && pid_ncands < 8; mi++) {
-        int i = match_idx[mi];
-        u32 a = 0, nb = 0, pf = 0;
+        int j = match_idx[mi];
+        u32 v = 0, nb = 0, pf = 0;
         int nbok = 0, pfok = 0;
-        if (read_u32_at(cur + i * 4, &a))
+        if (read_u32_at(cur + j * 4, &v))
             continue;
-        if (i + 2 < SCAN_RANGE / 4)
-            nbok = !read_u32_at(cur + (i + 2) * 4, &nb);
-        if (i > 0)
-            pfok = !read_u32_at(cur + (i - 1) * 4, &pf);
-        if ((nbok && nb == a) || (pfok && pf == a))
+        if (j + 2 < SCAN_RANGE / 4)
+            nbok = !read_u32_at(cur + (j + 2) * 4, &nb);
+        if (j > 0)
+            pfok = !read_u32_at(cur + (j - 1) * 4, &pf);
+        if ((nbok && nb == v) || (pfok && pf == v))
             continue;
-        pid_cand_off[pid_ncands] = i * 4;
-        pid_cand_val[pid_ncands] = a;
+        pid_cand_off[pid_ncands] = j * 4;
+        pid_cand_val[pid_ncands] = v;
         pid_ncands++;
     }
     if (pid_ncands > 0)
