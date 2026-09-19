@@ -90,14 +90,14 @@ static void rb_put_hex(unsigned long v)
 #define RW_MAX_SIZE      256UL
 #define SCAN_RANGE       8192        /* bytes of task_struct to scan (mm can
                                        sit past 4K on big android configs) */
-/* pid/tgid live in the first 1KB of task_struct on every known 5.15
- * layout (observed at byte 632 here). The pid sweep defaults to this
- * 1KB window: small sweeps are proven instant on-device, while full
- * 8K sweeps intermittently wedge (mechanism under investigation —
- * every scan that ever completed on-device exited early). Discovery
- * is one-time per kernel anyway (pin the validated offset via kopts);
- * an explicit S,1.<cap> still overrides for bring-up bisect. */
-#define PID_SCAN_WORDS 256
+/* pid/tgid live around byte 1496 of task_struct on this 5.15 layout
+ * (observed (pid,tgid) pair at 1496 across independent tasks; prio
+ * triple at 124, exit_signal at 1396, group_leader at 1560, comm at
+ * 1960 — coherent custom layout). The pid sweep defaults to a 2KB
+ * window covering it. Discovery is one-time per kernel anyway (pin the
+ * validated offset via kopts); an explicit S,1.<cap> still overrides
+ * for bring-up bisect. */
+#define PID_SCAN_WORDS 512
 #define MM_SCAN_RANGE    1024        /* bytes of mm_struct to scan */
 #define TASK_WALK_MAX    16384
 #define NAME_LEN         16
