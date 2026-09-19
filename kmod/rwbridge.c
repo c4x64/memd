@@ -1859,22 +1859,19 @@ module_param_cb(log, &rw_log_ops, NULL, 0444);
 MODULE_PARM_DESC(log, "in-module diagnostic ring (zero-import logging)");
 
 /* ── module init/exit ───────────────────────────────────────────────────── */
-
 int rwbridge_init(void)
 {
     /* NOTE: no utsname()/current derefs here — those bake in struct layouts.
-     * The loader (run.sh) already prints uname -r from userspace. */
+     * The loader (run.sh) already prints uname -r from userspace.
+     * NOTE 2: NO derive_all() here — derivation is lazy on first op
+     * (see rw_set). Eager derive at init wedges load on hypervisors
+     * where sweeps hit non-faulting poison (module sticks in Loading
+     * with piled-up refs, killing param I/O until reboot). Kopts pins
+     * are already recorded by .set before init; S-steps validate them
+     * safely on first use (single reads, no sweeps when pinned). */
         { rb_puts("rwbridge: loading (universal single-build, kopts runtime)"); rb_putc('\n'); };
-    kopts_log_state();    {
-        int r = derive_all();
-        /* Always succeed load: with zero log imports there is no reason to
-         * refuse, and the ring + stage stay readable for diagnosis. Ops
-         * refuse work unless derivation completed (derive_ok). */
-        if (r)
-                        { rb_puts("rwbridge: init done with errors (see log; ops inert)"); rb_putc('\n'); }
-        else
-                        { rb_puts("rwbridge: init ok"); rb_putc('\n'); };
-    }
+    kopts_log_state();
+        { rb_puts("rwbridge: init ok (lazy derive)"); rb_putc('\n'); };
     kopts_init_done = 1;
     return 0;
 }
