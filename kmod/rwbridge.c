@@ -1603,7 +1603,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
      * offsets are process-independent and stay cached. */
     asm volatile("mrs %0, sp_el0" : "=r"(cur_task));
 
-    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q' && val[0] != 'D') {
+    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q' && val[0] != 'D' && val[0] != 'W') {
         /* Lazy first-use derivation: some loaders drop init sections
          * (the initcall pointer lives in one, so init never runs, yet
          * state=Live with pristine data). Deriving here makes operation
@@ -1617,7 +1617,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
          * per-op as arguments, no cached pins touched. */
         derive_all();
     }
-    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q' && val[0] != 'D') {
+    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q' && val[0] != 'D' && val[0] != 'W') {
         rw_status = -EPERM;
         STAGE("no_derive");
         return 0;
@@ -2069,6 +2069,90 @@ int rw_set(const char *val, const struct kernel_param *kp)
             rw_status = -ENOENT;
             rw_text_len = 0;
         }
+        rb_spin_unlock();
+        return 0;
+    }
+
+    case 'W': {
+        /* Walk-test: W,<pid>,<pid_off>,<tasks_off>,<mm_off>,<owner_off>
+         * (pid dec, rest hex). Owner-validated walk capped at 200 steps,
+         * NO translation. Reports the found task base as hex in out
+         * with status 0; -ESRCH for clean miss, -EAGAIN for fault-break.
+         * Decomposes reachability from translation: short cap keeps
+         * wild-list exposure small while fresh targets (siblings in
+         * fork order) sit within dozens of steps. */
+        u64 w_mm = 0, w_own = 0;
+        unsigned long w_pid_off = 0, w_tasks_off = 0;
+        unsigned long wp = 0;
+        int wi;
+        {
+            char *c2;
+            parse_dec(p, &pid_s64);
+            pid = (u32)pid_s64;
+            c2 = strchr(p, ',');
+            if (!c2) goto bad;
+            p = c2 + 1;
+            parse_hex(p, &exv); w_pid_off = (unsigned long)exv;
+            c2 = strchr(p, ',');
+            if (!c2) goto bad;
+            p = c2 + 1;
+            parse_hex(p, &exv); w_tasks_off = (unsigned long)exv;
+            c2 = strchr(p, ',');
+            if (!c2) goto bad;
+            p = c2 + 1;
+            parse_hex(p, &w_mm);
+            c2 = strchr(p, ',');
+            if (!c2) goto bad;
+            p = c2 + 1;
+            parse_hex(p, &w_own);
+        }
+        if (pid == 0) goto bad;
+        if (w_pid_off >= SCAN_RANGE || w_tasks_off >= SCAN_RANGE ||
+            (unsigned long)w_mm >= SCAN_RANGE || (unsigned long)w_own >= SCAN_RANGE)
+            goto bad;
+        wp = cur_task;
+        for (wi = 0; wi < 200; wi++) {
+            unsigned long tpw = 0;
+            int tpok = 0;
+            unsigned long nxt = 0;
+            int nok = 0;
+            SAFE_READ64(tpw, wp + w_pid_off, tpok);
+            if (!tpok) {
+                rw_status = -EAGAIN;
+                rw_text_len = 0;
+                rb_spin_unlock();
+                return 0;
+            }
+            if ((u32)tpw == pid) {
+                if (w_own != 0) {
+                    unsigned long vm = 0, ow = 0;
+                    int vok = 0, ook = 0;
+                    SAFE_READ64(vm, wp + (unsigned long)w_mm, vok);
+                    if (vok && vm)
+                        SAFE_READ64(ow, vm + (unsigned long)w_own, ook);
+                    if (!vok || !vm || !ook ||
+                        (ow != wp && ow != wp + 1))
+                        goto wnext;
+                }
+                put_hex_bytes(0, (const u8 *)&wp, 8);
+                rw_status = 0;
+                rb_spin_unlock();
+                return 0;
+            }
+wnext:
+            SAFE_READ64(nxt, wp + w_tasks_off, nok);
+            if (!nok || !nxt) {
+                rw_status = -EAGAIN;
+                rw_text_len = 0;
+                rb_spin_unlock();
+                return 0;
+            }
+            wp = nxt - w_tasks_off;
+            if (wp == cur_task)
+                break;
+        }
+        rw_status = -ESRCH;
+        rw_text_len = 0;
         rb_spin_unlock();
         return 0;
     }
