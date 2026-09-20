@@ -1117,6 +1117,143 @@ static long linear_write_range(unsigned long pgd_va, unsigned long addr,
     return 0;
 }
 
+/* ── explicit-offset (stateless) translation ─────────────────────────────
+ * Same machinery as the linear-map path, but every layout input arrives
+ * per-op as arguments (userspace offset table) instead of cached globals.
+ * Writes NOTHING but a stack temp, rw_buf/status/stage/ring (V-class) —
+ * no pin globals, no sweeps, no derive. Rationale: cached-pin writes
+ * intermittently seize this hypervisor while V/F-class ops stay clean,
+ * so the R/W path takes its map per-op. Universality unchanged: the .ko
+ * still carries zero layout data; all of it arrives at runtime. */
+static inline unsigned long pa_to_kva_ex(unsigned long po, unsigned long ph,
+                                          unsigned long pa)
+{
+    return po + (pa - ph);
+}
+
+static int walk_pt_ex(unsigned long pgd_va, unsigned long user_va,
+                       unsigned long *pa_out, unsigned long po, unsigned long ph)
+{
+    unsigned long desc, table_kva;
+    int ok;
+
+    table_kva = pgd_va + PT_INDEX(user_va, PGD_SHIFT) * 8UL;
+    SAFE_READ64(desc, table_kva, ok);
+    if (!ok || !(desc & PTE_VALID) || !(desc & PTE_TABLE))
+        return -EFAULT;
+
+    table_kva = pa_to_kva_ex(po, ph, PA_FROM_PTE(desc)) +
+                PT_INDEX(user_va, PUD_SHIFT) * 8UL;
+    SAFE_READ64(desc, table_kva, ok);
+    if (!ok || !(desc & PTE_VALID))
+        return -EFAULT;
+
+    if (!(desc & PTE_TABLE)) {
+        *pa_out = (PA_FROM_PTE(desc) & ~((1UL << PUD_SHIFT) - 1)) |
+                  (user_va & ((1UL << PUD_SHIFT) - 1));
+        return 0;
+    }
+
+    table_kva = pa_to_kva_ex(po, ph, PA_FROM_PTE(desc)) +
+                PT_INDEX(user_va, PMD_SHIFT) * 8UL;
+    SAFE_READ64(desc, table_kva, ok);
+    if (!ok || !(desc & PTE_VALID))
+        return -EFAULT;
+
+    if (!(desc & PTE_TABLE)) {
+        *pa_out = (PA_FROM_PTE(desc) & ~((1UL << PMD_SHIFT) - 1)) |
+                  (user_va & ((1UL << PMD_SHIFT) - 1));
+        return 0;
+    }
+
+    table_kva = pa_to_kva_ex(po, ph, PA_FROM_PTE(desc)) +
+                PT_INDEX(user_va, PTE_SHIFT) * 8UL;
+    SAFE_READ64(desc, table_kva, ok);
+    if (!ok || !(desc & PTE_VALID))
+        return -EFAULT;
+
+    *pa_out = PA_FROM_PTE(desc) | (user_va & ((1UL << PTE_SHIFT) - 1));
+    return 0;
+}
+
+static unsigned long find_task_ex(unsigned long start, u32 target_pid,
+                                  unsigned long pid_off, unsigned long tasks_off)
+{
+    unsigned long p = start;
+    int i;
+
+    for (i = 0; i < TASK_WALK_MAX; i++) {
+        unsigned long tpw = 0;
+        int tpok = 0;
+        unsigned long nxt = 0;
+        int nok = 0;
+        SAFE_READ64(tpw, p + pid_off, tpok);
+        if (!tpok)
+            break;
+        if ((u32)tpw == target_pid)
+            return p;
+
+        SAFE_READ64(nxt, p + tasks_off, nok);
+        if (!nok || !nxt)
+            break;
+        p = nxt - tasks_off;
+        if (p == start)
+            break;
+    }
+    return 0;
+}
+
+/* Stateless translate + move: task→mm→pgd→walk each page. write=0 reads
+ * via copy_from_kernel_nofault, write=1 writes via plain memcpy (caller
+ * enforces the readonly gate). Returns 0 or negative errno. */
+static long ex_access(u32 pid, unsigned long addr, void *buf,
+                      unsigned long size, int write,
+                      unsigned long pid_off, unsigned long tasks_off,
+                      unsigned long mm_off, unsigned long pgd_off,
+                      unsigned long po, unsigned long ph)
+{
+    unsigned long task, mm, pgd_va;
+    unsigned long done = 0;
+    int mok = 0, pok = 0;
+
+    task = find_task_ex(cur_task, pid, pid_off, tasks_off);
+    if (!task)
+        return -ESRCH;
+    SAFE_READ64(mm, task + mm_off, mok);
+    if (!mok || !mm)
+        return -ESRCH;
+    SAFE_READ64(pgd_va, mm + pgd_off, pok);
+    if (!pok || !pgd_va || (pgd_va & (PAGE_SIZE_4K - 1)))
+        return -EFAULT;
+    if (pgd_va <= po || pgd_va - po > 0x40000000UL)
+        return -EFAULT;
+
+    while (done < size) {
+        unsigned long va = addr + done;
+        unsigned long pa = 0;
+        unsigned long kva, slice, page_rem;
+        int r;
+
+        r = walk_pt_ex(pgd_va, va, &pa, po, ph);
+        if (r)
+            return r;
+        kva = pa_to_kva_ex(po, ph, pa);
+        page_rem = PAGE_SIZE_4K - (pa & (PAGE_SIZE_4K - 1));
+        slice = size - done;
+        if (slice > page_rem)
+            slice = page_rem;
+        if (write)
+            rw_memcpy((void *)kva, (const u8 *)buf + done, slice);
+        else {
+            r = copy_from_kernel_nofault((u8 *)buf + done, (void *)kva, slice);
+            if (r)
+                return r;
+        }
+        done += slice;
+    }
+    return 0;
+}
+
 /*
  * rw_switch_access — entry point, linear-map variant.
  *
@@ -1424,6 +1561,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
     s64 pid_s64 = 0, size_s64 = 0;
     u32 pid;
     u64 addr = 0, wvalue = 0;
+    u64 exv = 0;
     long r;
 
     /* Fresh current-task every op: each sysfs write runs in a DIFFERENT
@@ -1433,7 +1571,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
      * offsets are process-independent and stay cached. */
     asm volatile("mrs %0, sp_el0" : "=r"(cur_task));
 
-    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V') {
+    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y') {
         /* Lazy first-use derivation: some loaders drop init sections
          * (the initcall pointer lives in one, so init never runs, yet
          * state=Live with pristine data). Deriving here makes operation
@@ -1442,10 +1580,12 @@ int rw_set(const char *val, const struct kernel_param *kp)
          * while one derives just recomputes the same values.
          * 'F' (fault probe) bypasses derive: it tests the fixup armor
          * itself and must run even when derive is broken/unknown.
-         * 'V' (verify-u32) also bypasses: single guarded read, no walk. */
+         * 'V' (verify-u32) also bypasses: single guarded read, no walk.
+         * 'E'/'Y' (explicit-offset R/W) bypass: stateless, map arrives
+         * per-op as arguments, no cached pins touched. */
         derive_all();
     }
-    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V') {
+    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y') {
         rw_status = -EPERM;
         STAGE("no_derive");
         return 0;
@@ -1545,6 +1685,106 @@ int rw_set(const char *val, const struct kernel_param *kp)
         } else {
             r = rw_switch_access(pid, addr, &wvalue,
                                   (unsigned long)size_s64, 1);
+            rw_status = r;
+            rw_text_len = 0;
+            if (r == 0) STAGE("ok");
+        }
+        rb_spin_unlock();
+        return 0;
+    }
+
+    case 'E': case 'Y': {
+        /* Explicit-offset R/W — stateless, V-class. Format:
+         *   E,<pid>,<addr>,<size>,<pid_off>,<tasks_off>,<mm_off>,
+         *     <pgd_off>,<page_off>,<phys_off>
+         *   Y,<same 9 fields>,<value-hex>
+         * pid/size dec; addr, offsets, value hex. NOTE: offsets are HEX
+         * (5d8 = 1496). Output goes through a stack temp because
+         * put_hex_bytes cannot dump rw_buf into itself (overlap).
+         * (Same overlap bug exists latent in the R-case; untouched.) */
+        char f[9][64];
+        int fi;
+        unsigned long ex_pid_off = 0, ex_tasks_off = 0, ex_mm_off = 0,
+                      ex_pgd_off = 0;
+        unsigned long ex_po = 0, ex_ph = 0;
+        u8 ex_tmp[128];
+
+        for (fi = 0; fi < 9; fi++) {
+            char *comma = strchr(p, ',');
+            size_t len = comma ? (size_t)(comma - p) : strlen(p);
+            if (len >= sizeof(f[0])) goto bad;
+            rw_memcpy(f[fi], p, len); f[fi][len] = '\0';
+            if (comma) p = comma + 1;
+            else if (fi < 8) goto bad;
+            else break;
+        }
+
+        parse_dec(f[0], &pid_s64);
+        parse_hex(f[1], &addr);
+        parse_dec(f[2], &size_s64);
+        pid = (u32)pid_s64;
+        parse_hex(f[3], &exv); ex_pid_off = (unsigned long)exv;
+        parse_hex(f[4], &exv); ex_tasks_off = (unsigned long)exv;
+        parse_hex(f[5], &exv); ex_mm_off = (unsigned long)exv;
+        parse_hex(f[6], &exv); ex_pgd_off = (unsigned long)exv;
+        parse_hex(f[7], &exv); ex_po = (unsigned long)exv;
+        parse_hex(f[8], &exv); ex_ph = (unsigned long)exv;
+
+        if (op == 'Y') {
+            if (*p == ',') p++;
+            parse_hex(p, &wvalue);
+            if (size_s64 < 1 || size_s64 > 8) goto bad;
+        } else {
+            if (size_s64 < 1 || size_s64 > 128) goto bad;
+        }
+
+        if (pid == 0 || addr == 0) goto bad;
+        if (ex_pid_off >= SCAN_RANGE || ex_tasks_off >= SCAN_RANGE ||
+            ex_mm_off >= SCAN_RANGE || ex_pgd_off >= SCAN_RANGE) goto bad;
+        if (ex_po == 0 || ex_ph == 0) goto bad;
+
+        if (op == 'Y' && kopt_readonly) {
+            rw_status = -EROFS;
+            rw_text_len = 0;
+            STAGE("readonly");
+            rb_spin_unlock();
+            return 0;
+        }
+
+        /* App-VA gate against the explicit page_off (mirrors in_app_va;
+         * Y additionally mirrors the W-side system guard: user range
+         * writes are hardware-isolated per process). */
+        if (addr >= ex_po || addr + (unsigned long)size_s64 < addr ||
+            addr + (unsigned long)size_s64 > ex_po) {
+            rw_status = -EFAULT;
+            rw_text_len = 0;
+            STAGE("not_app_va");
+            rb_spin_unlock();
+            return 0;
+        }
+
+        STAGE(op == 'E' ? "eread" : "ewrite");
+
+        if (op == 'E') {
+            memset(ex_tmp, 0, sizeof(ex_tmp));
+            r = ex_access(pid, addr, ex_tmp, (unsigned long)size_s64, 0,
+                          ex_pid_off, ex_tasks_off, ex_mm_off, ex_pgd_off,
+                          ex_po, ex_ph);
+            if (r == 0) {
+                rw_status = 0;
+                rw_text_len = (long)size_s64 * 2;
+                if (rw_text_len > (long)RW_MAX_SIZE - 1)
+                    rw_text_len = (long)RW_MAX_SIZE - 1;
+                put_hex_bytes(0, ex_tmp, size_s64);
+                STAGE("ok");
+            } else {
+                rw_status = r;
+                rw_text_len = 0;
+            }
+        } else {
+            r = ex_access(pid, addr, &wvalue, (unsigned long)size_s64, 1,
+                          ex_pid_off, ex_tasks_off, ex_mm_off, ex_pgd_off,
+                          ex_po, ex_ph);
             rw_status = r;
             rw_text_len = 0;
             if (r == 0) STAGE("ok");
