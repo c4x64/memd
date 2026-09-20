@@ -402,12 +402,17 @@ static unsigned long find_page_offset(unsigned long cur)
         SAFE_READ64(v, (unsigned long)&p[i], vok);
         if (!vok)
             continue;
-        if ((v & 0xffff800000000000UL) == 0xffff800000000000UL &&
-            (v & 0x00007f0000000000UL) != 0)
-            return 0xffff800000000000UL;  /* 48-bit VA */
+        /* Most-specific first: a wider mask also matches narrower VAs
+         * (39-bit matches the 48-bit pattern), so 39 goes before 48 or
+         * narrower kernels misdetect. Only the two 4K bases are
+         * claimed here (both verified); 16K/64K kernels travel the
+         * explicit-geometry E/Y path, never S2 auto-detect. */
         if ((v & 0xffffff8000000000UL) == 0xffffff8000000000UL &&
             (v & 0x00007fff00000000UL) != 0)
             return 0xffffff8000000000UL;  /* 39-bit VA */
+        if ((v & 0xffff800000000000UL) == 0xffff800000000000UL &&
+            (v & 0x00007f0000000000UL) != 0)
+            return 0xffff800000000000UL;  /* 48-bit VA */
     }
     return 0xffffff8000000000UL;  /* default */
 }
@@ -1154,6 +1159,7 @@ static int walk_pt_ex(unsigned long root_va, unsigned long user_va,
     static const int sh16_48[] = { 42, 29, 16 };
     const int *sh = NULL;
     int nlv = 0, idxb = 0, li;
+    int idx0b;
     unsigned long table_kva = root_va;
     unsigned long desc = 0;
     unsigned long oamask;
@@ -1166,11 +1172,15 @@ static int walk_pt_ex(unsigned long root_va, unsigned long user_va,
     else if (pshift == 16 && vabits == 42) { sh = sh16_42; nlv = 2; idxb = 13; }
     else if (pshift == 16 && vabits == 48) { sh = sh16_48; nlv = 3; idxb = 13; }
     else return -EINVAL;
+    /* 64K/48-bit L0 covers 6 bits only (47..42); every other level
+     * uses the full granule width. */
+    idx0b = (pshift == 16 && vabits == 48) ? 6 : idxb;
     oamask = (~0UL << pshift) & 0x0000FFFFFFFFFFFFUL;
 
     for (li = 0; li < nlv; li++) {
+        int wb = (li == 0) ? idx0b : idxb;
         unsigned long ent = table_kva +
-            (((user_va >> sh[li]) & ((1UL << idxb) - 1)) * 8UL);
+            (((user_va >> sh[li]) & ((1UL << wb) - 1)) * 8UL);
         SAFE_READ64(desc, ent, ok);
         if (!ok || !(desc & PTE_VALID))
             return -EFAULT;
@@ -1271,8 +1281,6 @@ static long ex_access(u32 pid, unsigned long addr, void *buf,
     pgmask = (~0UL << pshift);
     SAFE_READ64(pgd_va, mm + pgd_off, pok);
     if (!pok || !pgd_va || (pgd_va & (pgmask - 1)))
-        return -EFAULT;
-    if (pgd_va <= po || pgd_va - po > 0x10000000000UL)
         return -EFAULT;
     STAGE("ex-pgd");
     /* pgd must sit inside the linear map (sanity window 1TB — the old
@@ -1721,14 +1729,18 @@ int rw_set(const char *val, const struct kernel_param *kp)
         STAGE(op == 'R' ? "read" : "write");
 
         if (op == 'R') {
-            memset(rw_buf, 0, RW_MAX_SIZE);
-            r = rw_switch_access(pid, addr, rw_buf, (unsigned long)size_s64, 0);
+            /* Dump through a stack temp: put_hex_bytes cannot dump
+             * rw_buf into itself (read/write overlap corrupts past
+             * byte 0). Same fix as the E-case. */
+            u8 rtmp[256];
+            memset(rtmp, 0, sizeof(rtmp));
+            r = rw_switch_access(pid, addr, rtmp, (unsigned long)size_s64, 0);
             if (r == 0) {
                 rw_status = 0;
                 rw_text_len = (long)size_s64 * 2;
                 if (rw_text_len > (long)RW_MAX_SIZE - 1)
                     rw_text_len = (long)RW_MAX_SIZE - 1;
-                put_hex_bytes(0, rw_buf, size_s64);
+                put_hex_bytes(0, rtmp, size_s64);
                 STAGE("ok");
             } else {
                 rw_status = r;
@@ -1850,25 +1862,25 @@ int rw_set(const char *val, const struct kernel_param *kp)
             }
         }
         if (ex_vabits == 0) {
-            /* Derive VA size from the canonical page_off base. */
-            if (ex_po == 0xffff8000000000UL) ex_vabits = 48;
+            /* Derive VA size from known 4K page_off bases only.
+             * 16K/64K callers must pass geometry explicitly (their
+             * bases are not claimed here). */
+            if (ex_po == 0xFFFF800000000000UL) ex_vabits = 48;
             else if (ex_po == 0xffffff8000000000UL) ex_vabits = 39;
-            else if (ex_po == 0xffffc00000000000UL) ex_vabits = 47;
             else goto bad;
         }
         if (!((ex_pshift == 12 && (ex_vabits == 39 || ex_vabits == 48)) ||
               (ex_pshift == 14 && (ex_vabits == 36 || ex_vabits == 47)) ||
               (ex_pshift == 16 && (ex_vabits == 42 || ex_vabits == 48))))
             goto bad;
-        /* page_off is a compile-time constant (never KASLR-slid), so it
-         * must name the canonical base for the claimed VA size —
-         * otherwise the caller mixed kernels and any walk would
-         * mis-translate. Refuse, never mis-walk. */
-        if (!((ex_vabits == 36 && ex_po == 0xFFFFFFF000000000UL) ||
-              (ex_vabits == 39 && ex_po == 0xffffff8000000000UL) ||
-              (ex_vabits == 42 && ex_po == 0xFFFFFC0000000000UL) ||
-              (ex_vabits == 47 && ex_po == 0xFFFFC00000000000UL) ||
-              (ex_vabits == 48 && ex_po == 0xffff8000000000UL)))
+        /* page_off is a compile-time constant (never KASLR-slid): on the
+         * two known 4K bases the claimed VA size must match it, or the
+         * caller mixed kernels and any walk would mis-translate.
+         * Unknown bases (16K/64K) are trusted explicit (same trust as
+         * every other explicit arg) — refused nowhere, mis-walked
+         * nowhere: the level table below only contains real combos. */
+        if ((ex_po == 0xffffff8000000000UL && ex_vabits != 39) ||
+            (ex_po == 0xFFFF800000000000UL && ex_vabits != 48))
             goto bad;
 
         if (op == 'Y') {
