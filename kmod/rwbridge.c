@@ -1214,12 +1214,17 @@ static long ex_access(u32 pid, unsigned long addr, void *buf,
     task = find_task_ex(cur_task, pid, pid_off, tasks_off);
     if (!task)
         return -ESRCH;
+    STAGE("ex-task");
     SAFE_READ64(mm, task + mm_off, mok);
     if (!mok || !mm)
         return -ESRCH;
+    STAGE("ex-mm");
     SAFE_READ64(pgd_va, mm + pgd_off, pok);
     if (!pok || !pgd_va || (pgd_va & (PAGE_SIZE_4K - 1)))
         return -EFAULT;
+    if (pgd_va <= po || pgd_va - po > 0x10000000000UL)
+        return -EFAULT;
+    STAGE("ex-pgd");
     /* pgd must sit inside the linear map (sanity window 1TB — the old
      * 1GB window wrongly rejected real pgds, e.g. +0x65d29000 here). */
     if (pgd_va <= po || pgd_va - po > 0x10000000000UL)
