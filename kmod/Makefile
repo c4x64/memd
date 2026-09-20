@@ -45,25 +45,13 @@ clean:
 # Allowlist besides module_layout/mem*: copy_from_kernel_nofault (stable
 # since forever, linear-map reads) and param_ops_int (stability/readonly
 # flags use the kernel's own int handlers — zero custom parse code, ABI
-# frozen for 15+ years).
+# frozen for 15+ years). Versions/imports are checked by
+# check_universal.py (exact ELF parsing — readelf column-guessing caused
+# a false failure once); BTI/pads/vermagic stay inline below.
 check-universal: all
-	@echo "== __versions absent or empty (no CRC pinning) =="
-	@VSEC=$$($(CROSS_COMPILE)readelf -S rwbridge.ko | awk '/__versions/ {print $$6}'); \
-	echo "vvsec=[$$VSEC]"; \
-	$(CROSS_COMPILE)readelf -S rwbridge.ko | grep __versions; \
-	$(CROSS_COMPILE)readelf -x __versions rwbridge.ko 2>&1 | head -4; \
-	if [ -n "$$VSEC" ]; then \
-		python3 -c "import sys; sys.exit(0 if int('$$VSEC',16)==0 else 1)" || \
-		{ echo "FAIL: __versions has CRCs (pins build to one KMI)"; exit 1; }; \
-		echo "note: empty __versions present (modversions-loader bypass, no CRCs)"; \
-	fi
-	@echo "== undefined symbols allowlist (no printk family) =="
+	@echo "== versions/imports via check_universal.py =="
 	@$(CROSS_COMPILE)nm -u rwbridge.ko | awk '{print $$2}' | sort -u | tee /tmp/rwbridge.undef
-	@if grep -vE '^(module_layout|memset|memcpy|memmove|memcmp|strlen|copy_from_kernel_nofault|param_ops_int)$$' /tmp/rwbridge.undef | grep -q .; then \
-		echo "FAIL: unexpected imports:"; \
-		grep -vE '^(module_layout|memset|memcpy|memmove|memcmp|strlen|copy_from_kernel_nofault|param_ops_int)$$' /tmp/rwbridge.undef; \
-		exit 1; \
-	fi
+	@python3 check_universal.py rwbridge.ko /tmp/rwbridge.undef
 	@echo "== BTI landing pads present =="
 	@$(CROSS_COMPILE)objdump -d rwbridge.ko | grep -qiE 'bti([[:space:]]|$$)|hint[[:space:]]' || \
 		{ echo "FAIL: no BTI pads (BTI kernels fault on entry -> reboot)"; exit 1; }
