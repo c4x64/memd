@@ -1280,7 +1280,7 @@ static long ex_access(u32 pid, unsigned long addr, void *buf,
     STAGE("ex-mm");
     pgmask = (~0UL << pshift);
     SAFE_READ64(pgd_va, mm + pgd_off, pok);
-    if (!pok || !pgd_va || (pgd_va & (pgmask - 1)))
+    if (!pok || !pgd_va || (pgd_va & ~pgmask))
         return -EFAULT;
     STAGE("ex-pgd");
     /* pgd must sit inside the linear map (sanity window 1TB — the old
