@@ -83,6 +83,83 @@ log "target: $TARGET_VM"
 cp -f "$KO" "$TMPKO" || die "cannot stage temp copy"
 chmod 600 "$TMPKO"
 
+# u64 LE field IO with builtins + one dd per op. Values must stay
+# under 2^31 (true for every .ko offset/size here — files are < 1MB).
+# r64le FILE OFFSET -> prints decimal. w64le FILE SEEK VALUE.
+# Octal escapes are composed arithmetically ($(( )) is fork-free);
+# a single builtin printf emits all 8 bytes (NULs included), one dd
+# places them. No awk binary output, no $()-forks per byte.
+r64le() {
+    dd if="$1" bs=1 skip="$2" count=8 2>/dev/null | od -A n -t u1 -v 2>/dev/null | awk '{ v=0; m=1; for(i=1;i<=NF && i<=8;i++){ v+=$i*m; m*=256 } print v }'
+}
+w64le() {
+    _wf="$1"; _ws="$2"; _wv=$3; _f=""; _k=0
+    while [ $_k -lt 8 ]; do
+        _b=$((_wv % 256)); _wv=$((_wv / 256))
+        _f="$_f\\$((_b / 64))$(((_b / 8) % 8))$(($_b % 8))"
+        _k=$((_k + 1))
+    done
+    printf "$_f" | dd of="$_wf" bs=1 seek="$_ws" conv=notrunc 2>/dev/null
+}
+# extend_vermagic KO V J WANT — splice a longer vermagic in by shifting
+# the file tail and patching the section table + e_shoff. File offsets
+# all stay under 2^31. Mirrors patchvm.py (byte-identical results).
+extend_vermagic() {
+    _eko="$1"; _ev="$2"; _ej="$3"; _ewant="$4"
+    _ewant_len=$(printf '%s' "$_ewant" | wc -c)
+    _delta=$((_ewant_len + 1 - (_ej - _ev + 1)))
+    [ "$_delta" -gt 0 ] || { echo "extend called with no growth"; return 1; }
+    _esh=$(r64le "$_eko" 40)
+    _e2=$(dd if="$_eko" bs=1 skip=58 count=4 2>/dev/null | od -A n -t u1 -v 2>/dev/null | awk '{ print $1+$2*256+$3*65536+$4*16777216 }')
+    _eentsz=$((_e2 % 65536)); _enum=$((_e2 / 65536))
+    [ "$_eentsz" = "64" ] || { echo "bad shentsize $_eentsz"; return 1; }
+    [ "$_enum" -gt 0 ] && [ "$_enum" -lt 100 ] || { echo "bad shnum $_enum"; return 1; }
+    [ "$_esh" -gt "$_ev" ] || { echo "weird layout (shdr table before vermagic)"; return 1; }
+    # Dump the whole table once: "idx off size" per section.
+    _tbl=$(dd if="$_eko" bs=1 skip="$_esh" count=$((_enum * 64)) 2>/dev/null | od -A d -t u1 -v 2>/dev/null | awk -v n="$_enum" '
+        { for (i=2; i<=NF; i++) b[m++]=$i }
+        END {
+            for (s=0; s<n; s++) {
+                o=0; z=0
+                for (k=0; k<8; k++) { o+=b[s*64+24+k]*pwr(k); z+=b[s*64+32+k]*pwr(k) }
+                print s, o, z
+            }
+        }
+        function pwr(k,  r,i) { r=1; for (i=0;i<k;i++) r*=256; return r }')
+    [ -n "$_tbl" ] || { echo "cannot read section table"; return 1; }
+    # Splice: head + want + NUL + tail.
+    _tmpnew="$_eko.new"
+    head -c "$_ev" "$_eko" > "$_tmpnew" 2>/dev/null || return 1
+    printf '%s' "$_ewant" >> "$_tmpnew" 2>/dev/null || return 1
+    printf '\000' >> "$_tmpnew" 2>/dev/null || return 1
+    tail -c +$((_ej + 2)) "$_eko" >> "$_tmpnew" 2>/dev/null || return 1
+    _nesh=$((_esh + _delta))
+    # Patch e_shoff in ehdr + shifted sections. Containing section grows.
+    # (Heredoc loop: stays in this shell so counters survive.)
+    w64le "$_tmpnew" 40 "$_nesh" || return 1
+    _ncontain=0; _wfail=0
+    while read -r _si _off _sz; do
+        if [ "$_off" -gt "$_ev" ]; then
+            w64le "$_tmpnew" $((_nesh + _si * 64 + 24)) $(($_off + _delta)) || _wfail=1
+        fi
+        if [ "$_off" -le "$_ev" ] && [ "$_ev" -lt "$((_off + _sz))" ]; then
+            _ncontain=$((_ncontain + 1)); _csi=$_si; _csz=$_sz
+        fi
+    done <<EOF_TBL
+$_tbl
+EOF_TBL
+    [ "$_wfail" = "0" ] || { echo "section table patch failed"; return 1; }
+    [ "$_ncontain" = "1" ] || { echo "containing-section ambiguity $_ncontain"; return 1; }
+    w64le "$_tmpnew" $((_nesh + _csi * 64 + 32)) $(($_csz + _delta)) || return 1
+    # Validate exactly like python: want appears exactly once.
+    if [ "$(strings "$_tmpnew" 2>/dev/null | grep -xc "$_ewant")" != "1" ]; then
+        echo "extend validation failed"; return 1
+    fi
+    mv -f "$_tmpnew" "$_eko" 2>/dev/null || return 1
+    echo "extended .modinfo by $_delta (signed-off-bytes match patchvm)"
+    return 0
+}
+
 patch_vermagic() {
     _ko="$1"; _want="$2"
     if command -v python3 >/dev/null 2>&1; then
@@ -125,10 +202,15 @@ PYEOF
     }')
     [ -n "$_loc" ] || { echo "cannot locate vermagic"; return 1; }
     _off=${_loc%% *}; _end=${_loc##* }
-    _have=$((_end + 1))
+    # _end is absolute (od -A d); field length excludING the NUL is
+    # (_end - _off), +1 counting it. (A relative-offset bug here once
+    # zeroed kilobytes past the field — this arithmetic is load-bearing.)
+    _have=$((_end - _off + 1))
     _want_len=$(printf '%s' "$_want" | wc -c)
     if [ "$_want_len" -gt "$_have" ]; then
-        echo "target vermagic longer than baked ($_want_len > $_have)"; return 1
+        # Baked field too short (UTS cap): ELF-extend .modinfo.
+        extend_vermagic "$_ko" "$_off" "$_end" "$_want" || return 1
+        return 0
     fi
     printf '%s' "$_want" | dd of="$_ko" bs=1 seek="$_off" conv=notrunc 2>/dev/null || return 1
     _pad=$((_have - _want_len))

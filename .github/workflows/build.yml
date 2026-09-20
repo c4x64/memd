@@ -51,18 +51,13 @@ jobs:
       - name: Prepare tree (max-length UTS_RELEASE placeholder)
         run: |
           cd linux-$KVER
-          # Bake a roomy vermagic placeholder (~117-char field) so long
-          # real targets (6.1-GKI 100-char vermagic) fit the in-place
-          # runtime patch. __NEW_UTS_LEN caps the release length; raise
-          # it (this tree is scaffolding only — never booted — so
-          # widening its uts struct is safe). "5.10.209" is 8 chars,
-          # EXTRAVERSION supplies the rest.
-          grep -rn "define __NEW_UTS_LEN" include/linux/uts*.h include/uapi/linux/uts*.h 2>/dev/null | head -3 || true
-          sed -i -E 's/#[[:space:]]*define[[:space:]]+__NEW_UTS_LEN[[:space:]]+64/#define __NEW_UTS_LEN 128/' \
-            include/linux/uts.h include/uapi/linux/uts.h include/uapi/linux/utsname.h 2>/dev/null || true
-          grep -rn "__NEW_UTS_LEN 128" include/linux/uts.h include/uapi/linux/uts.h include/uapi/linux/utsname.h 2>/dev/null | head -2 \
-            || { echo "uts.h cap raise FAILED (see discover output above)"; exit 1; }
-          PAD=$(python3 -c "print('x'*91)")
+          # UTS_RELEASE is capped at 63 chars by kbuild itself
+          # (utsrelease.h generation fails beyond 64), so the baked
+          # vermagic field tops out ~80 chars. Longer real targets
+          # (6.1-GKI: 100) are handled by run.sh via ELF section
+          # surgery (extend .modinfo), verified byte-identical live.
+          # "5.10.209" is 8 chars -> EXTRAVERSION supplies the other 55.
+          PAD=$(python3 -c "print('x'*54)")
           make ARCH=$ARCH defconfig
           ./scripts/config --disable LOCALVERSION_AUTO
           ./scripts/config --disable MODVERSIONS
@@ -88,6 +83,19 @@ jobs:
           cd kmod
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
             KDIR="$GITHUB_WORKSPACE/linux-$KVER"
+
+      - name: Add empty __versions (modversions-kernel loads, no CRCs)
+        run: |
+          cd kmod
+          # MODVERSIONS kernels refuse CRC-less modules SILENTLY
+          # (try_to_force_load path, no log). An EMPTY __versions
+          # section skips that trap (missing entries warn-and-pass);
+          # with zero CRCs nothing pins the build to a KMI.
+          # Verified live on 6.1 GKI: loads (OE taint), exact dmesg path.
+          : > /tmp/empty_vers
+          ${CROSS_COMPILE}objcopy --add-section __versions=/tmp/empty_vers \
+            --set-section-flags __versions=alloc rwbridge.ko
+          ${CROSS_COMPILE}readelf -S rwbridge.ko | grep __versions
 
       - name: Add empty __versions (modversions-kernel loads, no CRCs)
         run: |
@@ -126,24 +134,9 @@ jobs:
           strings /tmp/patchtest.ko | grep -x "$TARGET" \
             || { echo "patch self-test FAILED"; exit 1; }
           echo "patch self-test passed"
-          # 6.1-GKI-length target (100 chars; exercises the roomy field).
-          TARGET2="vermagic=6.1.23-android14-4-00257-g7e35917775b8-ab9964412 SMP preempt mod_unload modversions aarch64"
-          cp rwbridge.ko /tmp/patchtest2.ko
-          python3 - /tmp/patchtest2.ko "$TARGET2" <<'PYEOF'
-          import sys
-          ko, want = sys.argv[1], sys.argv[2].encode()
-          b = bytearray(open(ko, 'rb').read())
-          i = b.find(b'vermagic=')
-          assert i >= 0
-          j = b.find(b'\x00', i)
-          assert len(want) <= j - i, "placeholder too short for 6.1-length target"
-          b[i:i+len(want)] = want
-          for k in range(i+len(want), j): b[k] = 0
-          open(ko, 'wb').write(b)
-          PYEOF
-          strings /tmp/patchtest2.ko | grep -x "$TARGET2" \
-            || { echo "long patch self-test FAILED"; exit 1; }
-          echo "long patch self-test passed"
+          # NOTE: 6.1-GKI-length targets (100 chars) exceed the baked
+          # field and go through run.sh's ELF-extend path, which is
+          # tested live on-device (byte-identical to patchvm), not here.
 
       - name: Upload artifact (single universal build + installer)
         uses: actions/upload-artifact@v4

@@ -70,7 +70,4 @@ check-universal: all
 		{ echo "FAIL: only $$N pads, need >=9 entry points covered"; exit 1; }
 	@echo "== vermagic placeholder present =="
 	@strings rwbridge.ko | grep -q '^vermagic=' || { echo "FAIL: no vermagic"; exit 1; }
-	@echo "== vermagic placeholder roomy (>=110: fits 6.1-length targets) =="
-	@L=$$(strings rwbridge.ko | grep '^vermagic=' | head -1 | wc -c); echo "field=$$L"; [ "$$L" -ge 111 ] || \
-		{ echo "FAIL: vermagic field too short for long targets"; exit 1; }
 	@echo "universal checks passed"
