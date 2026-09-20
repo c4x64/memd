@@ -103,14 +103,28 @@ print("patched %d bytes (field %d)" % (len(want_b), have_len))
 PYEOF
         return $?
     fi
-    # dd fallback (busybox/toybox-safe): locate offset, find the NUL
-    # terminator with od (tr cannot handle NUL bytes portably), overwrite +
-    # NUL-pad. All lengths include the "vermagic=" prefix on both sides.
-    _off=$(grep -abo 'vermagic=' "$_ko" 2>/dev/null | head -1 | cut -d: -f1)
-    [ -n "$_off" ] || { echo "cannot locate vermagic"; return 1; }
-    _end=$(dd if="$_ko" bs=1 skip="$_off" count=200 2>/dev/null | od -A d -t x1 -v | awk '{for(i=2;i<=NF;i++) if($i=="00"){print $1+i-2; exit}}')
-    [ -n "$_end" ] || { echo "cannot find vermagic terminator"; return 1; }
-    # (od offsets are relative to the dd skip point, i.e. to _off.)
+    # dd fallback (busybox/toybox-safe): locate offset + NUL terminator
+    # with od (grep -abo is unreliable on binary files in toybox; tr
+    # cannot handle NUL bytes portably). Streaming 9-byte window so
+    # matches spanning od lines still hit. All arithmetic stays under
+    # 2^31 (.ko files are < 1MB). All lengths include the "vermagic="
+    # prefix on both sides.
+    _loc=$(od -A d -t u1 -v "$_ko" 2>/dev/null | awk '
+    BEGIN { split("118 101 114 109 97 103 105 99 61", t, " "); found=0; pos=0 }
+    {
+        for (i = 2; i <= NF; i++) {
+            a = $1 + i - 2; v = $i + 0
+            w[pos % 9] = v; wa[pos % 9] = a; pos++
+            if (!found && pos >= 9) {
+                ok = 1
+                for (k = 0; k < 9; k++)
+                    if (w[(pos - 9 + k) % 9] != t[k+1]) { ok = 0; break }
+                if (ok) { V = wa[(pos - 9) % 9]; found = 1 }
+            } else if (found && v == 0) { print V, a; exit }
+        }
+    }')
+    [ -n "$_loc" ] || { echo "cannot locate vermagic"; return 1; }
+    _off=${_loc%% *}; _end=${_loc##* }
     _have=$((_end + 1))
     _want_len=$(printf '%s' "$_want" | wc -c)
     if [ "$_want_len" -gt "$_have" ]; then

@@ -47,9 +47,13 @@ clean:
 # flags use the kernel's own int handlers — zero custom parse code, ABI
 # frozen for 15+ years).
 check-universal: all
-	@echo "== no __versions section =="
-	@if $(CROSS_COMPILE)readelf -S rwbridge.ko | grep -q __versions; then \
-		echo "FAIL: __versions present (symbol CRCs pin the build to one KMI)"; exit 1; fi
+	@echo "== __versions absent or empty (no CRC pinning) =="
+	@VSEC=$$($(CROSS_COMPILE)readelf -S rwbridge.ko | awk '/__versions/ {print $$6}'); \
+	if [ -n "$$VSEC" ]; then \
+		python3 -c "import sys; sys.exit(0 if int('$$VSEC',16)==0 else 1)" || \
+		{ echo "FAIL: __versions has CRCs (pins build to one KMI)"; exit 1; }; \
+		echo "note: empty __versions present (modversions-loader bypass, no CRCs)"; \
+	fi
 	@echo "== undefined symbols allowlist (no printk family) =="
 	@$(CROSS_COMPILE)nm -u rwbridge.ko | awk '{print $$2}' | sort -u | tee /tmp/rwbridge.undef
 	@if grep -vE '^(module_layout|memset|memcpy|memmove|memcmp|strlen|copy_from_kernel_nofault|param_ops_int)$$' /tmp/rwbridge.undef | grep -q .; then \
@@ -66,4 +70,7 @@ check-universal: all
 		{ echo "FAIL: only $$N pads, need >=9 entry points covered"; exit 1; }
 	@echo "== vermagic placeholder present =="
 	@strings rwbridge.ko | grep -q '^vermagic=' || { echo "FAIL: no vermagic"; exit 1; }
+	@echo "== vermagic placeholder roomy (>=110: fits 6.1-length targets) =="
+	@L=$$(strings rwbridge.ko | grep '^vermagic=' | head -1 | wc -c); echo "field=$$L"; [ "$$L" -ge 111 ] || \
+		{ echo "FAIL: vermagic field too short for long targets"; exit 1; }
 	@echo "universal checks passed"
