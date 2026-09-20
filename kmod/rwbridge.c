@@ -2029,10 +2029,12 @@ int rw_set(const char *val, const struct kernel_param *kp)
                 continue;
             if (nxt == cur_task + toff || prv == cur_task + toff)
                 continue;
-            SAFE_READ64(nb, nxt + toff + 8UL, nbok);
+            /* nxt already includes T (it IS taskB+T); its prev slot is
+             * +8. prv likewise IS taskC+T; its next slot is +0. */
+            SAFE_READ64(nb, nxt + 8UL, nbok);
             if (!nbok || nb != cur_task + toff)
                 continue;
-            SAFE_READ64(fw, prv + toff, fwok);
+            SAFE_READ64(fw, prv, fwok);
             if (!fwok || fw != cur_task + toff)
                 continue;
             {
