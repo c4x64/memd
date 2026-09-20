@@ -1860,6 +1860,16 @@ int rw_set(const char *val, const struct kernel_param *kp)
               (ex_pshift == 14 && (ex_vabits == 36 || ex_vabits == 47)) ||
               (ex_pshift == 16 && (ex_vabits == 42 || ex_vabits == 48))))
             goto bad;
+        /* page_off is a compile-time constant (never KASLR-slid), so it
+         * must name the canonical base for the claimed VA size —
+         * otherwise the caller mixed kernels and any walk would
+         * mis-translate. Refuse, never mis-walk. */
+        if (!((ex_vabits == 36 && ex_po == 0xFFFFFFF000000000UL) ||
+              (ex_vabits == 39 && ex_po == 0xffffff8000000000UL) ||
+              (ex_vabits == 42 && ex_po == 0xFFFFFC0000000000UL) ||
+              (ex_vabits == 47 && ex_po == 0xFFFFC00000000000UL) ||
+              (ex_vabits == 48 && ex_po == 0xffff8000000000UL)))
+            goto bad;
 
         if (op == 'Y') {
             if (*p == '\0') goto bad;
