@@ -46,6 +46,15 @@
 static char rb_logb[RB_LOG_MAX];
 static unsigned long rb_loglen;
 
+/* Empty __versions section, emitted directly: MODVERSIONS kernels refuse
+ * CRC-less modules SILENTLY (try_to_force_load path, no log) unless a
+ * __versions section exists — with zero entries every lookup takes the
+ * warn-and-pass branch, so nothing pins the build to a KMI. Same asm
+ * idiom as the fixup table below; modpost leaves unknown sections alone.
+ * Verified live on 6.1 GKI (loads; dmesg shows the exact warn+pass). */
+__asm__(".section __versions,\"a\",@progbits\n"
+        ".previous\n");
+
 static void rb_putc(char c)
 {
     if (rb_loglen + 1 < RB_LOG_MAX)

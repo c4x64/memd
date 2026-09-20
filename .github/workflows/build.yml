@@ -97,17 +97,6 @@ jobs:
             --set-section-flags __versions=alloc rwbridge.ko
           ${CROSS_COMPILE}readelf -S rwbridge.ko | grep __versions
 
-      - name: Add empty __versions (modversions-kernel loads, no CRCs)
-        run: |
-          cd kmod
-          # MODVERSIONS kernels refuse CRC-less modules SILENTLY
-          # (try_to_force_load path, no log). An EMPTY __versions
-          # section skips that trap (missing entries warn-and-pass);
-          # with zero CRCs nothing pins the build to a KMI.
-          : > /tmp/empty_vers
-          ${CROSS_COMPILE}objcopy --add-section __versions=/tmp/empty_vers \
-            --set-section-flags __versions=alloc rwbridge.ko
-
       - name: Universality gate (imports, versions, placeholder)
         run: |
           cd kmod
