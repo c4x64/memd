@@ -59,8 +59,8 @@ jobs:
           # EXTRAVERSION supplies the rest.
           grep -rn "define __NEW_UTS_LEN" include/linux/uts*.h include/uapi/linux/uts*.h 2>/dev/null | head -3 || true
           sed -i -E 's/#[[:space:]]*define[[:space:]]+__NEW_UTS_LEN[[:space:]]+64/#define __NEW_UTS_LEN 128/' \
-            include/linux/uts.h include/linux/utsname.h include/uapi/linux/uts.h 2>/dev/null || true
-          grep -rn "__NEW_UTS_LEN 128" include/linux/uts*.h include/uapi/linux/uts*.h 2>/dev/null | head -2 \
+            include/linux/uts.h include/uapi/linux/uts.h include/uapi/linux/utsname.h 2>/dev/null || true
+          grep -rn "__NEW_UTS_LEN 128" include/linux/uts.h include/uapi/linux/uts.h include/uapi/linux/utsname.h 2>/dev/null | head -2 \
             || { echo "uts.h cap raise FAILED (see discover output above)"; exit 1; }
           PAD=$(python3 -c "print('x'*91)")
           make ARCH=$ARCH defconfig
