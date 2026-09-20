@@ -1603,7 +1603,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
      * offsets are process-independent and stay cached. */
     asm volatile("mrs %0, sp_el0" : "=r"(cur_task));
 
-    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q' && val[0] != 'D' && val[0] != 'W') {
+    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q' && val[0] != 'D' && val[0] != 'C') {
         /* Lazy first-use derivation: some loaders drop init sections
          * (the initcall pointer lives in one, so init never runs, yet
          * state=Live with pristine data). Deriving here makes operation
@@ -1617,7 +1617,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
          * per-op as arguments, no cached pins touched. */
         derive_all();
     }
-    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q' && val[0] != 'D' && val[0] != 'W') {
+    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q' && val[0] != 'D' && val[0] != 'C') {
         rw_status = -EPERM;
         STAGE("no_derive");
         return 0;
@@ -2073,8 +2073,8 @@ int rw_set(const char *val, const struct kernel_param *kp)
         return 0;
     }
 
-    case 'W': {
-        /* Walk-test: W,<pid>,<pid_off>,<tasks_off>,<mm_off>,<owner_off>
+    case 'C': {
+        /* Walk-test (census): C,<pid>,<pid_off>,<tasks_off>,<mm_off>,<owner_off>
          * (pid dec, rest hex). Owner-validated walk capped at 200 steps,
          * NO translation. Reports the found task base as hex in out
          * with status 0; -ESRCH for clean miss, -EAGAIN for fault-break.
