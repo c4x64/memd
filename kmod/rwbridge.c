@@ -1668,6 +1668,40 @@ int rw_set(const char *val, const struct kernel_param *kp)
         return 0;
     }
 
+    case 'K': {
+        /* Pin pid offset: K,<byteoff> records pid_offset + K_TASK_PID
+         * from the proven-safe `rw` channel (kopts/insmod-arg channels
+         * are retired — both wedge the loader/writer on this
+         * hypervisor). Pure assignment + one guarded validation read;
+         * S,1 afterwards takes the pinned single-read branch, never a
+         * sweep. status 0 = pinned (validation read ok),
+         * -EFAULT = unreadable at that off, -EINVAL = out of range. */
+        u64 koff = 0;
+        unsigned long kw = 0;
+        int kok = 0;
+        parse_hex(p, &koff);
+        if (koff >= SCAN_RANGE) {
+            rw_status = -EINVAL;
+            rw_text_len = 0;
+            rb_spin_unlock();
+            return 0;
+        }
+        SAFE_READ64(kw, cur_task + (unsigned long)koff, kok);
+        if (!kok) {
+            rw_status = -EFAULT;
+            rw_text_len = 0;
+            rb_spin_unlock();
+            return 0;
+        }
+        pid_offset = (unsigned long)koff;
+        kopt_mask |= K_TASK_PID;
+        { rb_puts("rwbridge: pid pinned off="); rb_put_dec((unsigned long)(koff)); rb_puts(" (K op)"); rb_putc('\n'); };
+        rw_status = 0;
+        rw_text_len = 0;
+        rb_spin_unlock();
+        return 0;
+    }
+
     case 'S': {
         /* Single derive step: S,<0..7> runs exactly one step
          * (regs/pid/po/mm/tasks/comm/arg/fin). Steps must run in order
@@ -1750,27 +1784,15 @@ bad:
  * are parsed before init, so derive_all() already honors them. */
 int kopts_param_set(const char *val, const struct kernel_param *kp)
 {
-    /* Two-phase kopts: LOAD-TIME args parse normally (kernel arg memory
-     * is NUL-terminated, proven safe); RUNTIME sysfs writes return
-     * -EPERM without touching anything. Reason: sysfs writes to this
-     * attribute intermittently wedge the writer unkillably on this
-     * hypervisor (R-spin, param_lock held, all param I/O dead until
-     * reboot), while identical parsing at load is clean — fault lies
-     * below our code (kernfs/sysfs path). Offsets travel via
-     * insmod kopts="..." only. .get stays for inspection. */
-    unsigned long n = 0;
-    (void)kp;
-    if (kopts_init_done)
-        return -EPERM;
-    while (val[n] && n < sizeof(kopts_buf) - 1) {
-        kopts_buf[n] = val[n];
-        n++;
-    }
-    kopts_buf[n] = '\0';
-    while (n > 0 && (kopts_buf[n-1] == '\n' || kopts_buf[n-1] == '\r'))
-        kopts_buf[--n] = '\0';
-    kopts_parse_apply(kopts_buf);
-    return 0;
+    /* ALWAYS -EPERM (load-time AND runtime). Reason: READING val in
+     * .set wedges the loader on this hypervisor (two pinned loads
+     * stuck in Loading with 53 refs; the EPERM-only build returned
+     * instantly). The val pointer at load-time is not safely
+     * dereferenceable here, and sysfs writes wedge intermittently —
+     * so this channel is retired entirely. Pin offsets via the K op
+     * on the `rw` channel (proven-safe bounded path) instead. */
+    (void)val; (void)kp;
+    return -EPERM;
 }
 
 int kopts_param_get(char *buf, const struct kernel_param *kp)
