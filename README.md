@@ -3,10 +3,9 @@
 One `.ko`, compiled **once**, loads on **any 5.10+ kernel**. Nothing
 kernel-specific is baked in:
 
-- **Kernel layout data ("offsets") arrives at runtime** via the `kopts`
-  module param (`key=val,...`) at runtime: whatever the
-  init-time scanner can't derive, the loader supplies. Absent keys
-  self-derive on-device.
+- **Kernel layout data ("offsets") arrives per-op as arguments** to the
+  `E`/`Y` ops (explicit, stateless — see "Bring-up on a new kernel").
+  No per-KMI tables, no blind discovery sweeps in the hot path.
 - **vermagic is resolved at runtime**: `run.sh` patches the baked
   placeholder to the running kernel in a temp copy, then `insmod`s it.
   If the kernel rejects the extras guess, dmesg names the exact string
@@ -15,46 +14,74 @@ kernel-specific is baked in:
 - **Zero log imports**: the module imports no printk-family symbol at
   all (diagnostics live in an in-module ring, readable via the `log`
   sysfs param). A kernel exporting no printk still loads fine.
-- The hot path (TTBR0 switch + raw derefs) calls **no** version-drifted
-  kernel helpers. Link-time imports: `module_layout` only
-  (+ compiler mem* if emitted).
+- Link-time imports: `module_layout` + compiler `mem*` if emitted,
+  `copy_from_kernel_nofault` (linear-map reads, stable forever),
+  `param_ops_int` (stability/readonly flags use the kernel's own int
+  handlers — zero custom parse code, ABI frozen 15+ years).
+- Page-table geometry (4K/16K/64K pages; 36/39/42/47/48-bit VA) is
+  explicit per-op too, with refuse-on-mismatch semantics (never
+  mis-walks).
 
 ## Operations
 
-Via the `rw` sysfs param (comma-separated; `addr` is a virtual address of
-the target process), plus `status`/`out`/`stage`/`log` diagnostic params.
-`kopts` carries runtime kernel data (writable live, honored at init):
+Via the `rw` sysfs param, plus `status`/`out`/`stage`/`log` diagnostic
+params and `stability`/`readonly` session flags (plain kernel int
+params, set at insmod or live via sysfs):
 
 ```
-R,pid,addr,size          read user VA; result as hex bytes in `out` (byte0 first)
-W,pid,addr,size,value    write value to user VA (native-LE bytes)
-P,cmdline-substr         find PID by process name substring
-B,pid,libname            module base (use /proc/<pid>/maps as root instead)
+E,pid,addr,size,pid_off,tasks_off,mm_off,pgd_off,page_off,phys_off[,owner[,pshift,vabits]]
+                                  stateless read; hex bytes in `out`
+Y,<same>[,owner[,pshift,vabits]],value
+                                  stateless write (1..8 bytes, native-LE hex)
+V,byteoff,hexval                  verify one u32 at cur_task+off (sync validation)
+F,hexaddr                         single guarded read at absolute kernel VA
+Q,hihex,lohex,offhex              absolute read via hi/lo halves (32-bit shells)
+C,pid,pid_off,tasks_off,mm_off,owner
+                                  owner-validated pid→task census (reports base)
+D                                 stateless tasks-list proof sweep (report-only)
+S,0..7                            single derive steps (legacy path)
+R,pid,addr,size / W,...           legacy cached derive path (4K-only)
+T                                 bare TTBR0-read probe (hypervisor-trap check)
+N / G / K                         retired bisect ops (kept, inert)
+P,cmdline-substr                  find PID by process name substring
+B,pid,libname                     module base (use /proc/<pid>/maps as root instead)
 ```
 
-`kopts` keys (dec or `0x`-hex; invalid values ignored, never fatal):
-
-```
-page_offset, phys_offset, va_bits (39|48), page_shift (12 only),
-task_pid_off, task_mm_off, mm_pgd_off, task_tasks_off, task_comm_off,
-mm_arg_start_off, mm_arg_end_off,
-stability (1 = soak: load + idle, no scans),
-readonly (1 = refuse all writes with -EROFS; reads fully work)
-```
-
-Bring-up order on a new kernel: `stability=1` soak (prove load + idle
-safety) → `readonly=1` session (validate PA translation via reads
-against ground truth) → full session (writes). `run.sh` takes them as
-`RWBRIDGE_STABILITY=1` / `RWBRIDGE_READONLY=1` env passthrough.
+Conventions: `pid`/`size`/shifts dec; addresses and offsets hex
+(`5d8` = 1496). Every op reports in `status` (`0` = ok, negative errno
+otherwise) with stage breadcrumbs in `stage` and hex/text in `out`.
+`Y` (and legacy `W`) in a `readonly=1` session refuse with `-EROFS`.
 
 Strict validation everywhere: `pid>0`, IN-APP-VA gate (target fully
-inside user address space — NULL/wrap/kernel-spill refused), PTR-
-PROTECTED-SYS gate (writes never touch kernel/system addresses; app VAs
-are hardware-isolated and can at worst crash their own app, never the
-system), `size` 1..256 (R) / 1,2,4,8 (W). Invalid input returns `-EINVAL`,
-never oopses.
-`page_shift != 12` refuses init cleanly (the walker is 4K-hardcoded) —
-16K-page kernels are an explicit NO-GO, no panic.
+inside user address space — NULL/wrap/kernel-spill refused),
+`size` bounds, offset range checks, page-table geometry combo check,
+page_off↔VA-size consistency check. Invalid input returns `-EINVAL`
+(or the specific errno), never oopses.
+
+## Bring-up on a new kernel
+
+Offsets are per-kernel constants, derived once with safe single reads
+(`F`/`V`/`Q` — no sweeps, no walks) plus offline analysis, then passed
+explicitly forever after. Proven recipe (see project history):
+
+1. `S,0` → `cur_task` + `ttbr0` for a live writer.
+2. `V,<off>,<own-pid-hex>` across `task_struct` to confirm `pid_off`
+   (match = offset proven for that writer).
+3. Adjacent-equal-pair + pointer-shape analysis (offline) for
+   `tasks`/`mm` candidates; `V`-verify each.
+4. Walk one `mm_struct` with `F` (batched, single reads): `task_size`,
+   `pgd`, `owner` coherence identifies `mm` and `pgd_off`.
+5. `phys_off = (ttbr0 & PA-mask) − (pgd_va − page_off)` (offline math).
+6. `page_off` from VA high bits (39/48-bit bases; 16K kernels: pass
+   explicit geometry).
+7. Prove end-to-end: `E` read of a known mapping (ELF magic) +
+   `Y` write with `E` readback, both against ground truth.
+
+Bring-up order: plain session (prove load + idle safety) →
+`readonly=1` session (validate translation via reads against ground
+truth) → full session (writes). `run.sh` takes them as
+`RWBRIDGE_STABILITY=1` / `RWBRIDGE_READONLY=1` env passthrough
+(translated to `stability=`/`readonly=` insmod args).
 
 ## Install
 
@@ -73,10 +100,12 @@ the highest existing number: `0.log`, then `1.log`, ...) containing the
 module `log` ring, stage/status, candidates, and dmesg lines. If the
 kernel exports no printk at all, this file — not dmesg — is the log.
 
-Per-kernel kopts without editing the script:
+Per-kernel tables live wherever *you* keep them (a shell associative
+array, a JSON file, the backend) — the module takes them per-op, so no
+file in this repo pins a kernel. Example session:
 
 ```sh
-su -c 'RWBRIDGE_KOPTS="task_pid_off=1400,task_mm_off=1416" sh ./run.sh'
+su -c "echo 'E,4123,7f3a9000,16,5d8,4d0,520,40,ffffff8000000000,500000000,70' > /sys/module/rwbridge/parameters/rw"
 ```
 
 ## Build (once)
@@ -102,7 +131,11 @@ vermagic fits the in-place runtime patch.
   key): load refused by the kernel. Unsigned single build by design.
 - Kernels **with** MODVERSIONS enabled: our CRC-less imports are refused.
   (Effectively no Android GKI/vendor kernel — noted for completeness.)
-- 16K-page kernels: init refuses cleanly (`page_shift` gate).
+- 16K/64K kernels: supported *only* via explicit E/Y geometry
+  (`page_shift` 14/16 + matching `va_bits`); the legacy derive path
+  stays 4K-only and refuses anything else cleanly. No 16K runtime
+  verification exists yet in this project — the contract is
+  build-verified (CI) and refuse-on-mismatch by construction.
 - CFI-enforcing kernels (`CONFIG_CFI_CLANG=y` in `/proc/config.gz`):
   kernel→module sysfs callbacks *may* trap on first access (single reboot
   worst case — nothing persists, no boot scripts). `run.sh` warns and
@@ -111,9 +144,12 @@ vermagic fits the in-place runtime patch.
 
 ## Diagnosis
 
-- `cat /sys/module/rwbridge/parameters/status` — `ok` / `read err N` /
-  `param err N`
-- `cat .../parameters/out` — last read result
-- `cat .../parameters/stage` — parse → pid_lookup → read/write → done
-- `dmesg | grep rwbridge` — derivation log (`... (kopt)` marks
-  runtime-supplied values), kopts state at load
+- `cat /sys/module/rwbridge/parameters/status` — `0` / negative errno
+- `cat .../parameters/out` — last result (hex)
+- `cat .../parameters/stage` — breadcrumb of the last op's failing
+  phase (`parse`, `eread`/`ewrite`, `ex-task`, `ex-mm`, `ex-pgd`, `ok`)
+- `dmesg | grep rwbridge` — boot lines (empty: zero-import logging;
+  use the `log` param instead)
+- `cat .../parameters/log` — the in-module ring (primary channel)
+- The `kopts` param is retired (always `-EPERM`, get shows last
+  rejected string); it is not a diagnostic surface anymore.

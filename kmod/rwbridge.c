@@ -587,8 +587,10 @@ static int st_regs(void)
 {
 STAGE("init");
 
-    /* Geometry gate: the walker is 4K-hardcoded. A 16K kernel must fail
-     * here with a message, never by mis-walking page tables. */
+    /* Geometry gate: the LEGACY derive path (S-steps into R/W) is
+     * 4K-hardcoded. Explicit E/Y ops carry per-op geometry and cover
+     * 4K/16K/64K (see walk_pt_ex); a 16K kernel must use those, never
+     * derive. Refuse here with a message, never by mis-walking. */
     if (kopt_page_shift != 12) {
                 { rb_puts("rwbridge: page_shift="); rb_put_dec((unsigned long)(kopt_page_shift)); rb_puts(" unsupported (4K-only walker)"); rb_putc('\n'); };
         return -ENODEV;
@@ -2440,6 +2442,15 @@ static const struct kernel_param_ops kopts_param_ops = {
 };
 module_param_cb(kopts, &kopts_param_ops, NULL, 0600);
 MODULE_PARM_DESC(kopts, "runtime kernel data: key=val,... (see source)");
+
+/* Staged-trust flags as plain kernel int params: no custom parse code
+ * (the kopts string channel is retired — reading module-arg memory
+ * wedges some loaders, and sysfs writes to it wedged writers).
+ * Kernel int handlers are exercised by every module in existence. */
+module_param_named(stability, kopt_stability, int, 0600);
+MODULE_PARM_DESC(stability, "1 = soak: load + idle, no scans (default 0)");
+module_param_named(readonly, kopt_readonly, int, 0600);
+MODULE_PARM_DESC(readonly, "1 = refuse all writes with -EROFS (default 0)");
 
 static const struct kernel_param_ops rw_param_ops = {
     .set = rw_set,

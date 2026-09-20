@@ -6,9 +6,10 @@
 #   1. vermagic — the baked placeholder is patched in a temp copy to match
 #      the running kernel (dmesg-feedback retry if extras differ), then
 #      insmod runs clean (no --force, ever).
-#   2. kernel layout data — kopts="..." carries per-kernel offsets for
-#      kernels whose structs the init-time scanner can't derive (table below
-#      + RWBRIDGE_KOPTS env override). Absent keys self-derive on-device.
+#   2. kernel layout data — per-kernel offsets (task_struct, mm_struct,
+#      page-table geometry) travel in each E/Y op's arguments (explicit,
+#      stateless; see README "Bring-up on a new kernel"). Nothing is
+#      baked per-KMI and nothing is derived by blind sweeps.
 #   3. diagnostics — printk candidates are surveyed (informational; the
 #      module imports none) and the session log is saved to
 #      /sdcard/MemoryD/N.log (next free number).
@@ -127,29 +128,29 @@ PYEOF
 patch_vermagic "$TMPKO" "$TARGET_VM" || die "vermagic patch failed"
 log "vermagic patched"
 
-# 5. kopts: built-in per-kernel table + env override.
-# Format per entry: "prefix|key=val,key=val". Prefix matches uname -r start.
-KOPTS=""
-case " $KVER " in
-    # examples (extend as real devices report derive gaps):
-    # *"5.10."*) KOPTS="task_pid_off=..." ;;
-    *) KOPTS="" ;;
-esac
-if [ -n "$RWBRIDGE_KOPTS" ]; then KOPTS="$RWBRIDGE_KOPTS"; fi
+# 5. Staged-trust flags (see README): stability soak first (load +
+# idle, no scans), then read-only sessions, writes last. Plain kernel
+# int params (no custom parse code on either side).
+# NOTE: the kopts string channel is RETIRED (reads of module-arg memory
+# wedge some loaders; the module answers -EPERM). RWBRIDGE_KOPTS is
+# ignored with a warning; per-kernel layout data travels via E/Y op
+# arguments (explicit, stateless), never via insmod.
+INSMOD_OPTS=""
+if [ -n "$RWBRIDGE_KOPTS" ]; then
+    log "WARN: RWBRIDGE_KOPTS retired — layout data goes in E/Y op args now"
+fi
 # Bring-up modes (staged trust — see README): stability soak first
 # (load + idle, no scans), then read-only sessions, writes last.
 if [ -n "$RWBRIDGE_STABILITY" ]; then
-    KOPTS="${KOPTS:+$KOPTS,}stability=1"
+    INSMOD_OPTS="${INSMOD_OPTS:+$INSMOD_OPTS }stability=1"
+    log "stability soak requested"
 fi
 if [ -n "$RWBRIDGE_READONLY" ]; then
-    KOPTS="${KOPTS:+$KOPTS,}readonly=1"
+    INSMOD_OPTS="${INSMOD_OPTS:+$INSMOD_OPTS }readonly=1"
+    log "read-only session requested"
 fi
-if [ -n "$KOPTS" ]; then
-    log "kopts: $KOPTS"
-    INSMOD_OPTS="kopts=\"$KOPTS\""
-else
-    log "kopts: none (full self-derive)"
-    INSMOD_OPTS=""
+if [ -z "$INSMOD_OPTS" ]; then
+    log "flags: none (full session)"
 fi
 
 # 6. Printk-family candidate search (informational).
@@ -251,7 +252,7 @@ STAGE=$(cat /sys/module/rwbridge/parameters/stage 2>/dev/null)
 log "loaded; stage=$STAGE"
 if [ "$STAGE" != "ok" ]; then
     log "note: derivation did not complete"
-    log "  fix: pass RWBRIDGE_KOPTS=\"task_pid_off=..,task_mm_off=..,...\" and retry"
+    log "  fix: use explicit E/Y ops with this kernel's offset table (see README)"
 fi
 
 dump_log "install"

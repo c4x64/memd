@@ -42,15 +42,19 @@ clean:
 # stable import surface or grew version bindings. NOTE: printk/_printk are
 # deliberately ABSENT — logging is zero-import (in-module ring); if code
 # ever emits a printk-family import again, this gate must fail.
+# Allowlist besides module_layout/mem*: copy_from_kernel_nofault (stable
+# since forever, linear-map reads) and param_ops_int (stability/readonly
+# flags use the kernel's own int handlers — zero custom parse code, ABI
+# frozen for 15+ years).
 check-universal: all
 	@echo "== no __versions section =="
 	@if $(CROSS_COMPILE)readelf -S rwbridge.ko | grep -q __versions; then \
 		echo "FAIL: __versions present (symbol CRCs pin the build to one KMI)"; exit 1; fi
 	@echo "== undefined symbols allowlist (no printk family) =="
 	@$(CROSS_COMPILE)nm -u rwbridge.ko | awk '{print $$2}' | sort -u | tee /tmp/rwbridge.undef
-	@if grep -vE '^(module_layout|memset|memcpy|memmove|memcmp|strlen|copy_from_kernel_nofault)$$' /tmp/rwbridge.undef | grep -q .; then \
+	@if grep -vE '^(module_layout|memset|memcpy|memmove|memcmp|strlen|copy_from_kernel_nofault|param_ops_int)$$' /tmp/rwbridge.undef | grep -q .; then \
 		echo "FAIL: unexpected imports:"; \
-		grep -vE '^(module_layout|memset|memcpy|memmove|memcmp|strlen|copy_from_kernel_nofault)$$' /tmp/rwbridge.undef; \
+		grep -vE '^(module_layout|memset|memcpy|memmove|memcmp|strlen|copy_from_kernel_nofault|param_ops_int)$$' /tmp/rwbridge.undef; \
 		exit 1; \
 	fi
 	@echo "== BTI landing pads present =="
