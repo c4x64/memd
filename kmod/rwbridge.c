@@ -1735,10 +1735,15 @@ int rw_set(const char *val, const struct kernel_param *kp)
             size_t len = comma ? (size_t)(comma - p) : strlen(p);
             if (len >= sizeof(f[0])) goto bad;
             rw_memcpy(f[fi], p, len); f[fi][len] = '\0';
-            if (comma) p = comma + 1;
+            p += len;
+            if (*p == ',') p++;
             else if (fi < 8) goto bad;
             else break;
         }
+        /* Cursor contract (the old loop left p ambiguous: 9th-field
+         * start vs 10th-field start, which silently disabled the
+         * owner/value parsing below on every build). Now: p is at
+         * NUL (exactly 9 fields) or at the 10th field start. */
 
         parse_dec(f[0], &pid_s64);
         parse_hex(f[1], &addr);
@@ -1750,22 +1755,22 @@ int rw_set(const char *val, const struct kernel_param *kp)
         parse_hex(f[6], &exv); ex_pgd_off = (unsigned long)exv;
         parse_hex(f[7], &exv); ex_po = (unsigned long)exv;
         parse_hex(f[8], &exv); ex_ph = (unsigned long)exv;
-        /* Optional 10th field: owner offset for walk validation
-         * (mm+owner == task or task+1 required on pid match).
-         * Absent (legacy 9-field form) skips validation. */
-        if (*p == ',') {
-            char *c2;
-            p++;
-            parse_hex(p, &exv); ex_owner = (unsigned long)exv;
-            if (ex_owner >= SCAN_RANGE) goto bad;
-            /* Advance past the owner field so a following value (Y)
-             * parses from the right cursor. */
-            c2 = strchr(p, ',');
-            p = c2 ? c2 + 1 : p + strlen(p);
+        /* Optional trailing fields: [owner,] (value for Y).
+         * Y legacy 10-field form (value, no owner) still works: with a
+         * single trailing field, Y treats it as the value. */
+        if (*p != '\0') {
+            char *c2 = strchr(p, ',');
+            if (op == 'Y' && c2 == NULL) {
+                /* value-only: owner stays 0, p already at value */
+            } else {
+                parse_hex(p, &exv); ex_owner = (unsigned long)exv;
+                if (ex_owner >= SCAN_RANGE) goto bad;
+                p = c2 ? c2 + 1 : p + strlen(p);
+            }
         }
 
         if (op == 'Y') {
-            if (*p == ',') p++;
+            if (*p == '\0') goto bad;
             parse_hex(p, &wvalue);
             if (size_s64 < 1 || size_s64 > 8) goto bad;
         } else {
