@@ -1131,47 +1131,42 @@ static inline unsigned long pa_to_kva_ex(unsigned long po, unsigned long ph,
     return po + (pa - ph);
 }
 
-static int walk_pt_ex(unsigned long pgd_va, unsigned long user_va,
+static int walk_pt_ex(unsigned long root_va, unsigned long user_va,
                        unsigned long *pa_out, unsigned long po, unsigned long ph)
 {
-    unsigned long desc, table_kva;
-    int ok;
+    /* Level-agnostic walker: 48-bit VA roots at L0 (shifts 39/30/21/12),
+     * 39-bit VA roots at L1 (shifts 30/21/12) — mm->pgd points at the
+     * root table in both cases. Selected by page_off (the canonical
+     * 48/39-bit bases); anything else is rejected, never mis-walked.
+     * (The legacy 4-level-only walk_pt shares this file but is unused
+     * by the explicit path.) */
+    static const int sh4[] = { 39, 30, 21, 12 };
+    static const int sh3[] = { 30, 21, 12 };
+    const int *sh;
+    int nlv, li;
+    unsigned long table_kva = root_va;
+    unsigned long desc = 0;
+    int ok = 0;
 
-    table_kva = pgd_va + PT_INDEX(user_va, PGD_SHIFT) * 8UL;
-    SAFE_READ64(desc, table_kva, ok);
-    if (!ok || !(desc & PTE_VALID) || !(desc & PTE_TABLE))
-        return -EFAULT;
+    if (po == 0xffff8000000000UL) { sh = sh4; nlv = 4; }
+    else if (po == 0xffffff8000000000UL) { sh = sh3; nlv = 3; }
+    else return -EINVAL;
 
-    table_kva = pa_to_kva_ex(po, ph, PA_FROM_PTE(desc)) +
-                PT_INDEX(user_va, PUD_SHIFT) * 8UL;
-    SAFE_READ64(desc, table_kva, ok);
-    if (!ok || !(desc & PTE_VALID))
-        return -EFAULT;
-
-    if (!(desc & PTE_TABLE)) {
-        *pa_out = (PA_FROM_PTE(desc) & ~((1UL << PUD_SHIFT) - 1)) |
-                  (user_va & ((1UL << PUD_SHIFT) - 1));
-        return 0;
+    for (li = 0; li < nlv; li++) {
+        unsigned long ent = table_kva + PT_INDEX(user_va, sh[li]) * 8UL;
+        SAFE_READ64(desc, ent, ok);
+        if (!ok || !(desc & PTE_VALID))
+            return -EFAULT;
+        if (li == nlv - 1)
+            break;
+        if (!(desc & PTE_TABLE)) {
+            /* Block descriptor: covers 2^sh[li] bytes. */
+            *pa_out = (PA_FROM_PTE(desc) & ~((1UL << sh[li]) - 1)) |
+                      (user_va & ((1UL << sh[li]) - 1));
+            return 0;
+        }
+        table_kva = pa_to_kva_ex(po, ph, PA_FROM_PTE(desc));
     }
-
-    table_kva = pa_to_kva_ex(po, ph, PA_FROM_PTE(desc)) +
-                PT_INDEX(user_va, PMD_SHIFT) * 8UL;
-    SAFE_READ64(desc, table_kva, ok);
-    if (!ok || !(desc & PTE_VALID))
-        return -EFAULT;
-
-    if (!(desc & PTE_TABLE)) {
-        *pa_out = (PA_FROM_PTE(desc) & ~((1UL << PMD_SHIFT) - 1)) |
-                  (user_va & ((1UL << PMD_SHIFT) - 1));
-        return 0;
-    }
-
-    table_kva = pa_to_kva_ex(po, ph, PA_FROM_PTE(desc)) +
-                PT_INDEX(user_va, PTE_SHIFT) * 8UL;
-    SAFE_READ64(desc, table_kva, ok);
-    if (!ok || !(desc & PTE_VALID))
-        return -EFAULT;
-
     *pa_out = PA_FROM_PTE(desc) | (user_va & ((1UL << PTE_SHIFT) - 1));
     return 0;
 }
