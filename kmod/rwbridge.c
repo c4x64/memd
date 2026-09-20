@@ -2021,7 +2021,9 @@ int rw_set(const char *val, const struct kernel_param *kp)
         int dt;
         u32 dhits[4];
         int nhits = 0;
-        for (dt = 0; dt < SCAN_RANGE / 8 - 1; dt++) {
+        /* 0..16K: task_struct on Android can extend past 8K. Aligned
+         * guarded reads only (F-walk class). */
+        for (dt = 0; dt < 16384 / 8 - 1; dt++) {
             unsigned long toff = (unsigned long)dt * 8UL;
             unsigned long nxt = 0, prv = 0;
             int nok = 0, pok = 0;
