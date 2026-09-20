@@ -2075,12 +2075,11 @@ int rw_set(const char *val, const struct kernel_param *kp)
 
     case 'C': {
         /* Walk-test (census): C,<pid>,<pid_off>,<tasks_off>,<mm_off>,<owner_off>
-         * (pid dec, rest hex). Owner-validated walk capped at 200 steps,
-         * NO translation. Reports the found task base as hex in out
-         * with status 0; -ESRCH for clean miss, -EAGAIN for fault-break.
-         * Decomposes reachability from translation: short cap keeps
-         * wild-list exposure small while fresh targets (siblings in
-         * fork order) sit within dozens of steps. */
+         * (pid dec, rest hex). Owner-validated walk capped at 2000 steps
+         * (covers full circles on bloated Androids), NO translation.
+         * Reports found task base + step count as hex in out with
+         * status 0; -ESRCH for clean miss, -EAGAIN for fault-break.
+         * Step counts classify lists (small cycle vs full circle). */
         u64 w_mm = 0, w_own = 0;
         unsigned long w_pid_off = 0, w_tasks_off = 0;
         unsigned long wp = 0;
@@ -2105,13 +2104,13 @@ int rw_set(const char *val, const struct kernel_param *kp)
             if (!c2) goto bad;
             p = c2 + 1;
             parse_hex(p, &w_own);
+            if (pid == 0) goto bad;
+            if (w_pid_off >= SCAN_RANGE || w_tasks_off >= SCAN_RANGE ||
+                (unsigned long)w_mm >= SCAN_RANGE || (unsigned long)w_own >= SCAN_RANGE)
+                goto bad;
         }
-        if (pid == 0) goto bad;
-        if (w_pid_off >= SCAN_RANGE || w_tasks_off >= SCAN_RANGE ||
-            (unsigned long)w_mm >= SCAN_RANGE || (unsigned long)w_own >= SCAN_RANGE)
-            goto bad;
         wp = cur_task;
-        for (wi = 0; wi < 200; wi++) {
+        for (wi = 0; wi < 2000; wi++) {
             unsigned long tpw = 0;
             int tpok = 0;
             unsigned long nxt = 0;
@@ -2135,6 +2134,10 @@ int rw_set(const char *val, const struct kernel_param *kp)
                         goto wnext;
                 }
                 put_hex_bytes(0, (const u8 *)&wp, 8);
+                {
+                    u64 wsteps = (u64)wi;
+                    put_hex_bytes(16, (const u8 *)&wsteps, 8);
+                }
                 rw_status = 0;
                 rb_spin_unlock();
                 return 0;
