@@ -61,15 +61,33 @@ else
 fi
 
 # 3. Resolve the TARGET vermagic value.
-# Priority: full vermagic from any on-device .ko (exact, incl. extras) ...
+# Priority: full vermagic from any on-device .ko (exact, incl. extras —
+# read via locator+read_cstr since toybox `strings` misses some files).
 TARGET_VM=""
 for d in /vendor/lib/modules /vendor_dlkm/lib/modules /system/lib/modules \
          /vendor/lib/modules/*/extra; do
     [ -d "$d" ] || continue
     for k in "$d"/*.ko; do
         [ -f "$k" ] || continue
-        V=$(strings "$k" 2>/dev/null | grep '^vermagic=' | head -1)
-        if [ -n "$V" ]; then TARGET_VM="$V"; break 2; fi
+        _vo=$(od -A d -t u1 -v "$k" 2>/dev/null | awk '
+        BEGIN { split("118 101 114 109 97 103 105 99 61", t, " "); found=0; pos=0 }
+        {
+            for (i = 2; i <= NF; i++) {
+                a = $1 + i - 2; v = $i + 0
+                w[pos % 9] = v; wa[pos % 9] = a; pos++
+                if (!found && pos >= 9) {
+                    ok = 1
+                    for (k2 = 0; k2 < 9; k2++)
+                        if (w[(pos - 9 + k2) % 9] != t[k2+1]) { ok = 0; break }
+                    if (ok) { print wa[(pos - 9) % 9]; exit }
+                }
+            }
+        }')
+        [ -n "$_vo" ] || continue
+        V=$(read_cstr "$k" "$_vo" 2>/dev/null)
+        case "$V" in
+            vermagic=*) TARGET_VM="$V"; break 2;;
+        esac
     done
 done
 # ... fallback: uname -r + GKI-standard extras.
@@ -151,8 +169,9 @@ EOF_TBL
     [ "$_wfail" = "0" ] || { echo "section table patch failed"; return 1; }
     [ "$_ncontain" = "1" ] || { echo "containing-section ambiguity $_ncontain"; return 1; }
     w64le "$_tmpnew" $((_nesh + _csi * 64 + 32)) $(($_csz + _delta)) || return 1
-    # Validate exactly like python: want appears exactly once.
-    if [ "$(strings "$_tmpnew" 2>/dev/null | grep -xc "$_ewant")" != "1" ]; then
+    # Validate exactly like python: the want string appears exactly
+    # once at V (read back through read_cstr, no `strings` involved).
+    if [ "$(read_cstr "$_tmpnew" "$_ev" 2>/dev/null)" != "$_ewant" ]; then
         echo "extend validation failed"; return 1
     fi
     mv -f "$_tmpnew" "$_eko" 2>/dev/null || return 1
@@ -160,6 +179,20 @@ EOF_TBL
     return 0
 }
 
+# read_cstr FILE OFFSET — print the NUL-terminated ASCII string there.
+# (toybox `strings` is unreliable on some .ko files, so od/awk it:
+# bytes -> octal escapes -> one builtin printf realizes them. No
+# $()-forks per byte; NUL terminates by construction, never captured.)
+read_cstr() {
+    _esc=$(dd if="$1" bs=1 skip="$2" count=160 2>/dev/null | od -A n -t u1 -v 2>/dev/null | awk '
+        { for (i=1; i<=NF; i++) {
+              if ($i == 0) exit
+              v=$i+0; d2=int(v/64); r=v-d2*64; d1=int(r/8); d0=r-d1*8
+              printf "\\%d%d%d", d2, d1, d0
+          } }')
+    [ -n "$_esc" ] || return 1
+    printf "$_esc"
+}
 patch_vermagic() {
     _ko="$1"; _want="$2"
     if command -v python3 >/dev/null 2>&1; then
