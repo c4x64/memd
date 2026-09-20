@@ -1573,7 +1573,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
      * offsets are process-independent and stay cached. */
     asm volatile("mrs %0, sp_el0" : "=r"(cur_task));
 
-    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y') {
+    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q') {
         /* Lazy first-use derivation: some loaders drop init sections
          * (the initcall pointer lives in one, so init never runs, yet
          * state=Live with pristine data). Deriving here makes operation
@@ -1587,7 +1587,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
          * per-op as arguments, no cached pins touched. */
         derive_all();
     }
-    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y') {
+    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q') {
         rw_status = -EPERM;
         STAGE("no_derive");
         return 0;
@@ -1957,6 +1957,41 @@ int rw_set(const char *val, const struct kernel_param *kp)
         { rb_puts("rwbridge: G wrote pin (no reads)"); rb_putc('\n'); };
         rw_status = 0;
         rw_text_len = 0;
+        rb_spin_unlock();
+        return 0;
+    }
+
+    case 'Q': {
+        /* Absolute read via hi/lo halves: Q,<hihex>,<lohex>,<offhex>
+         * reads the u64 at ((hi<<32)|lo)+off. Exists because device
+         * shells are 32-bit: 64-bit address arithmetic is impossible
+         * there, so halves travel as strings and the kernel adds.
+         * Single ex-table-guarded read — F-class. Used to verify list
+         * proofs (next->prev == cur+T) without walking: safe singles
+         * instead of poison-roulette sweeps. Reports like F. */
+        u64 qhi = 0, qlo = 0, qoff = 0;
+        unsigned long qaddr, qv = 0xAAAAAAAAAAAAAAAAUL;
+        int qok = 0;
+        parse_hex(p, &qhi);
+        {
+            char *c2 = strchr(p, ',');
+            char *c3 = NULL;
+            if (!c2) goto bad;
+            parse_hex(c2 + 1, &qlo);
+            c3 = strchr(c2 + 1, ',');
+            if (!c3) goto bad;
+            parse_hex(c3 + 1, &qoff);
+        }
+        qaddr = ((qhi << 32) | (qlo & 0xFFFFFFFFUL)) + qoff;
+        if (qaddr == 0) goto bad;
+        SAFE_READ64(qv, qaddr, qok);
+        if (qok) {
+            rw_status = 1;
+            put_hex_bytes(0, (const u8 *)&qv, 8);
+        } else {
+            rw_status = 0;
+            rw_text_len = 0;
+        }
         rb_spin_unlock();
         return 0;
     }
