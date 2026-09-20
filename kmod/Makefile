@@ -49,6 +49,9 @@ clean:
 check-universal: all
 	@echo "== __versions absent or empty (no CRC pinning) =="
 	@VSEC=$$($(CROSS_COMPILE)readelf -S rwbridge.ko | awk '/__versions/ {print $$6}'); \
+	echo "vvsec=[$$VSEC]"; \
+	$(CROSS_COMPILE)readelf -S rwbridge.ko | grep __versions; \
+	$(CROSS_COMPILE)readelf -x __versions rwbridge.ko 2>&1 | head -4; \
 	if [ -n "$$VSEC" ]; then \
 		python3 -c "import sys; sys.exit(0 if int('$$VSEC',16)==0 else 1)" || \
 		{ echo "FAIL: __versions has CRCs (pins build to one KMI)"; exit 1; }; \
