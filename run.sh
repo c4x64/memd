@@ -31,11 +31,15 @@ if grep -q "^${MODNAME} " /proc/modules 2>/dev/null; then
     exit 0
 fi
 
-# 1. Locate the universal .ko.
-for c in "${SCRIPT_DIR}/rwbridge.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge.ko"; do
-    if [ -f "$c" ]; then KO="$c"; break; fi
-done
-[ -n "$KO" ] || die "rwbridge.ko not found next to run.sh"
+# 1. Locate the universal .ko: explicit $1 wins, else side by side.
+if [ -n "$1" ] && [ -f "$1" ]; then
+    KO="$1"
+else
+    for c in "${SCRIPT_DIR}/rwbridge.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge.ko"; do
+        if [ -f "$c" ]; then KO="$c"; break; fi
+    done
+fi
+[ -n "$KO" ] || die "rwbridge.ko not found (pass path as \$1 or place next to run.sh)"
 
 KVER=$(uname -r)
 log "kernel: $KVER"
@@ -69,7 +73,10 @@ for d in /vendor/lib/modules /vendor_dlkm/lib/modules /system/lib/modules \
     [ -d "$d" ] || continue
     for k in "$d"/*.ko; do
         [ -f "$k" ] || continue
-        _vo=$(od -A d -t u1 -v "$k" 2>/dev/null | awk '
+        # Copy first: some tool domains cannot read /vendor directly
+        # (cp works where od/dd/strings get EACCES).
+        cp -f "$k" /data/local/tmp/rwref.ko 2>/dev/null || continue
+        _vo=$(od -A d -t u1 -v /data/local/tmp/rwref.ko 2>/dev/null | awk '
         BEGIN { split("118 101 114 109 97 103 105 99 61", t, " "); found=0; pos=0 }
         {
             for (i = 2; i <= NF; i++) {
@@ -84,12 +91,13 @@ for d in /vendor/lib/modules /vendor_dlkm/lib/modules /system/lib/modules \
             }
         }')
         [ -n "$_vo" ] || continue
-        V=$(read_cstr "$k" "$_vo" 2>/dev/null)
+        V=$(read_cstr /data/local/tmp/rwref.ko "$_vo" 2>/dev/null)
         case "$V" in
             vermagic=*) TARGET_VM="$V"; break 2;;
         esac
     done
 done
+rm -f /data/local/tmp/rwref.ko 2>/dev/null
 # ... fallback: uname -r + GKI-standard extras.
 if [ -z "$TARGET_VM" ]; then
     TARGET_VM="vermagic=${KVER} SMP preempt mod_unload aarch64"
