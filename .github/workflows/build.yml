@@ -53,14 +53,15 @@ jobs:
           cd linux-$KVER
           # Bake a roomy vermagic placeholder (~117-char field) so long
           # real targets (6.1-GKI 100-char vermagic) fit the in-place
-          # runtime patch. __NEW_UTS_LEN is raised first: the stock 64
-          # cap would truncate the release (this tree is scaffolding
-          # only — never booted — so widening its uts struct is safe).
-          # "5.10.209" is 8 chars -> EXTRAVERSION supplies ~91 more.
-          sed -i 's/#define __NEW_UTS_LEN 64/#define __NEW_UTS_LEN 128/' \
-            include/linux/uts.h
-          grep -q '__NEW_UTS_LEN 128' include/linux/uts.h \
-            || { echo "uts.h cap raise FAILED"; exit 1; }
+          # runtime patch. __NEW_UTS_LEN caps the release length; raise
+          # it (this tree is scaffolding only — never booted — so
+          # widening its uts struct is safe). "5.10.209" is 8 chars,
+          # EXTRAVERSION supplies the rest.
+          grep -rn "define __NEW_UTS_LEN" include/linux/uts*.h include/uapi/linux/uts*.h 2>/dev/null | head -3 || true
+          sed -i -E 's/#[[:space:]]*define[[:space:]]+__NEW_UTS_LEN[[:space:]]+64/#define __NEW_UTS_LEN 128/' \
+            include/linux/uts.h include/linux/utsname.h include/uapi/linux/uts.h 2>/dev/null || true
+          grep -rn "__NEW_UTS_LEN 128" include/linux/uts*.h include/uapi/linux/uts*.h 2>/dev/null | head -2 \
+            || { echo "uts.h cap raise FAILED (see discover output above)"; exit 1; }
           PAD=$(python3 -c "print('x'*91)")
           make ARCH=$ARCH defconfig
           ./scripts/config --disable LOCALVERSION_AUTO
