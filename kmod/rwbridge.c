@@ -1754,9 +1754,14 @@ int rw_set(const char *val, const struct kernel_param *kp)
          * (mm+owner == task or task+1 required on pid match).
          * Absent (legacy 9-field form) skips validation. */
         if (*p == ',') {
+            char *c2;
             p++;
             parse_hex(p, &exv); ex_owner = (unsigned long)exv;
             if (ex_owner >= SCAN_RANGE) goto bad;
+            /* Advance past the owner field so a following value (Y)
+             * parses from the right cursor. */
+            c2 = strchr(p, ',');
+            p = c2 ? c2 + 1 : p + strlen(p);
         }
 
         if (op == 'Y') {
