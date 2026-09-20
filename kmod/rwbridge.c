@@ -1132,28 +1132,45 @@ static inline unsigned long pa_to_kva_ex(unsigned long po, unsigned long ph,
 }
 
 static int walk_pt_ex(unsigned long root_va, unsigned long user_va,
-                       unsigned long *pa_out, unsigned long po, unsigned long ph)
+                       unsigned long *pa_out, unsigned long po, unsigned long ph,
+                       unsigned long pshift, unsigned long vabits)
 {
-    /* Level-agnostic walker: 48-bit VA roots at L0 (shifts 39/30/21/12),
-     * 39-bit VA roots at L1 (shifts 30/21/12) — mm->pgd points at the
-     * root table in both cases. Selected by page_off (the canonical
-     * 48/39-bit bases); anything else is rejected, never mis-walked.
+    /* Geometry-parameterized walker for the universal build: page_shift
+     * 12/14/16 (4K/16K/64K) with VA-size-appropriate level tables.
+     * mm->pgd points at the root table in all cases. Index width is
+     * 9/11/13 bits by granule. OA mask covers bits [47:pshift] (48-bit
+     * PA; LPA2 52-bit out of scope — rejected by combo check below).
+     * Combos: (12,39)->{30,21,12}, (12,48)->{39,30,21,12},
+     * (14,36)->{25,14}, (14,47)->{36,25,14},
+     * (16,42)->{29,16}, (16,48)->{42,29,16}.
+     * Anything else returns -EINVAL, never mis-walks.
      * (The legacy 4-level-only walk_pt shares this file but is unused
      * by the explicit path.) */
-    static const int sh4[] = { 39, 30, 21, 12 };
-    static const int sh3[] = { 30, 21, 12 };
-    const int *sh;
-    int nlv, li;
+    static const int sh12_39[] = { 30, 21, 12 };
+    static const int sh12_48[] = { 39, 30, 21, 12 };
+    static const int sh14_36[] = { 25, 14 };
+    static const int sh14_47[] = { 36, 25, 14 };
+    static const int sh16_42[] = { 29, 16 };
+    static const int sh16_48[] = { 42, 29, 16 };
+    const int *sh = NULL;
+    int nlv = 0, idxb = 0, li;
     unsigned long table_kva = root_va;
     unsigned long desc = 0;
+    unsigned long oamask;
     int ok = 0;
 
-    if (po == 0xffff8000000000UL) { sh = sh4; nlv = 4; }
-    else if (po == 0xffffff8000000000UL) { sh = sh3; nlv = 3; }
+    if (pshift == 12 && vabits == 39)      { sh = sh12_39; nlv = 3; idxb = 9; }
+    else if (pshift == 12 && vabits == 48) { sh = sh12_48; nlv = 4; idxb = 9; }
+    else if (pshift == 14 && vabits == 36) { sh = sh14_36; nlv = 2; idxb = 11; }
+    else if (pshift == 14 && vabits == 47) { sh = sh14_47; nlv = 3; idxb = 11; }
+    else if (pshift == 16 && vabits == 42) { sh = sh16_42; nlv = 2; idxb = 13; }
+    else if (pshift == 16 && vabits == 48) { sh = sh16_48; nlv = 3; idxb = 13; }
     else return -EINVAL;
+    oamask = (~0UL << pshift) & 0x0000FFFFFFFFFFFFUL;
 
     for (li = 0; li < nlv; li++) {
-        unsigned long ent = table_kva + PT_INDEX(user_va, sh[li]) * 8UL;
+        unsigned long ent = table_kva +
+            (((user_va >> sh[li]) & ((1UL << idxb) - 1)) * 8UL);
         SAFE_READ64(desc, ent, ok);
         if (!ok || !(desc & PTE_VALID))
             return -EFAULT;
@@ -1161,13 +1178,13 @@ static int walk_pt_ex(unsigned long root_va, unsigned long user_va,
             break;
         if (!(desc & PTE_TABLE)) {
             /* Block descriptor: covers 2^sh[li] bytes. */
-            *pa_out = (PA_FROM_PTE(desc) & ~((1UL << sh[li]) - 1)) |
+            *pa_out = ((desc & oamask) & ~((1UL << sh[li]) - 1)) |
                       (user_va & ((1UL << sh[li]) - 1));
             return 0;
         }
-        table_kva = pa_to_kva_ex(po, ph, PA_FROM_PTE(desc));
+        table_kva = pa_to_kva_ex(po, ph, (desc & oamask));
     }
-    *pa_out = PA_FROM_PTE(desc) | (user_va & ((1UL << PTE_SHIFT) - 1));
+    *pa_out = (desc & oamask) | (user_va & ((1UL << pshift) - 1));
     return 0;
 }
 
@@ -1230,11 +1247,13 @@ static long ex_access(u32 pid, unsigned long addr, void *buf,
                       unsigned long pid_off, unsigned long tasks_off,
                       unsigned long mm_off, unsigned long pgd_off,
                       unsigned long po, unsigned long ph,
-                      unsigned long owner_off)
+                      unsigned long owner_off,
+                      unsigned long pshift, unsigned long vabits)
 {
     unsigned long task;
     unsigned long mm, pgd_va;
     unsigned long done = 0;
+    unsigned long pgmask;
     int mok = 0, pok = 0;
     long found;
 
@@ -1249,8 +1268,9 @@ static long ex_access(u32 pid, unsigned long addr, void *buf,
     if (!mok || !mm)
         return -ESRCH;
     STAGE("ex-mm");
+    pgmask = (~0UL << pshift);
     SAFE_READ64(pgd_va, mm + pgd_off, pok);
-    if (!pok || !pgd_va || (pgd_va & (PAGE_SIZE_4K - 1)))
+    if (!pok || !pgd_va || (pgd_va & (pgmask - 1)))
         return -EFAULT;
     if (pgd_va <= po || pgd_va - po > 0x10000000000UL)
         return -EFAULT;
@@ -1266,11 +1286,11 @@ static long ex_access(u32 pid, unsigned long addr, void *buf,
         unsigned long kva, slice, page_rem;
         int r;
 
-        r = walk_pt_ex(pgd_va, va, &pa, po, ph);
+        r = walk_pt_ex(pgd_va, va, &pa, po, ph, pshift, vabits);
         if (r)
             return r;
         kva = pa_to_kva_ex(po, ph, pa);
-        page_rem = PAGE_SIZE_4K - (pa & (PAGE_SIZE_4K - 1));
+        page_rem = (1UL << pshift) - (pa & ((1UL << pshift) - 1));
         slice = size - done;
         if (slice > page_rem)
             slice = page_rem;
@@ -1728,17 +1748,21 @@ int rw_set(const char *val, const struct kernel_param *kp)
     case 'E': case 'Y': {
         /* Explicit-offset R/W — stateless, V-class. Format:
          *   E,<pid>,<addr>,<size>,<pid_off>,<tasks_off>,<mm_off>,
-         *     <pgd_off>,<page_off>,<phys_off>
-         *   Y,<same 9 fields>,<value-hex>
-         * pid/size dec; addr, offsets, value hex. NOTE: offsets are HEX
-         * (5d8 = 1496). Output goes through a stack temp because
-         * put_hex_bytes cannot dump rw_buf into itself (overlap).
+         *     <pgd_off>,<page_off>,<phys_off>[,owner[,page_shift,va_bits]]
+         *   Y,<same>[,owner[,page_shift,va_bits]],<value-hex>
+         * pid/size/pshift/vabits dec; addr, offsets, value hex. NOTE:
+         * offsets are HEX (5d8 = 1496). Geometry defaults to 4K pages
+         * with va_bits derived from page_off; explicit 12/14/16 +
+         * 36/39/42/47/48 combos enable 16K/64K kernels. Output goes
+         * through a stack temp because put_hex_bytes cannot dump
+         * rw_buf into itself (overlap).
          * (Same overlap bug exists latent in the R-case; untouched.) */
         char f[9][64];
         int fi;
         unsigned long ex_pid_off = 0, ex_tasks_off = 0, ex_mm_off = 0,
                       ex_pgd_off = 0;
         unsigned long ex_po = 0, ex_ph = 0, ex_owner = 0;
+        unsigned long ex_pshift = 12, ex_vabits = 0;
         u8 ex_tmp[128];
 
         for (fi = 0; fi < 9; fi++) {
@@ -1766,19 +1790,76 @@ int rw_set(const char *val, const struct kernel_param *kp)
         parse_hex(f[6], &exv); ex_pgd_off = (unsigned long)exv;
         parse_hex(f[7], &exv); ex_po = (unsigned long)exv;
         parse_hex(f[8], &exv); ex_ph = (unsigned long)exv;
-        /* Optional trailing fields: [owner,] (value for Y).
-         * Y legacy 10-field form (value, no owner) still works: with a
-         * single trailing field, Y treats it as the value. */
+        /* Optional trailing fields after the 9 fixed ones, in order:
+         * [owner,] [page_shift,] [va_bits,] (value for Y, always last).
+         * Backward compatible: E with 9 fields (geometry defaults:
+         * 4K pages, va_bits derived from page_off); E with 10 (owner);
+         * Y with 10 (legacy value-only); Y with 11 (owner+value).
+         * Longer forms carry explicit geometry for 16K/64K kernels.
+         * pshift dec (12/14/16), vabits dec, must form a supported
+         * combo or the op refuses with -EINVAL (never mis-walks). */
         if (*p != '\0') {
-            char *c2 = strchr(p, ',');
-            if (op == 'Y' && c2 == NULL) {
-                /* value-only: owner stays 0, p already at value */
+            /* Count remaining fields to place owner/geometry/value. */
+            int nrest = 1;
+            char *q = p;
+            while (*q) {
+                if (*q == ',')
+                    nrest++;
+                q++;
+                if (nrest > 5)
+                    break;
+            }
+            if (op == 'Y') {
+                if (nrest == 1) {
+                    /* legacy value-only */
+                } else if (nrest == 2) {
+                    parse_hex(p, &exv); ex_owner = (unsigned long)exv;
+                    if (ex_owner >= SCAN_RANGE) goto bad;
+                    p = strchr(p, ',') + 1;
+                } else if (nrest == 4) {
+                    parse_hex(p, &exv); ex_owner = (unsigned long)exv;
+                    if (ex_owner >= SCAN_RANGE) goto bad;
+                    p = strchr(p, ',') + 1;
+                    parse_dec(p, (s64 *)&exv);
+                    ex_pshift = (unsigned long)exv;
+                    p = strchr(p, ',') + 1;
+                    parse_dec(p, (s64 *)&exv);
+                    ex_vabits = (unsigned long)exv;
+                    p = strchr(p, ',') + 1;
+                } else {
+                    goto bad;
+                }
             } else {
-                parse_hex(p, &exv); ex_owner = (unsigned long)exv;
-                if (ex_owner >= SCAN_RANGE) goto bad;
-                p = c2 ? c2 + 1 : p + strlen(p);
+                if (nrest == 1) {
+                    parse_hex(p, &exv); ex_owner = (unsigned long)exv;
+                    if (ex_owner >= SCAN_RANGE) goto bad;
+                    p += strlen(p);
+                } else if (nrest == 3) {
+                    parse_hex(p, &exv); ex_owner = (unsigned long)exv;
+                    if (ex_owner >= SCAN_RANGE) goto bad;
+                    p = strchr(p, ',') + 1;
+                    parse_dec(p, (s64 *)&exv);
+                    ex_pshift = (unsigned long)exv;
+                    p = strchr(p, ',') + 1;
+                    parse_dec(p, (s64 *)&exv);
+                    ex_vabits = (unsigned long)exv;
+                    p += strlen(p);
+                } else {
+                    goto bad;
+                }
             }
         }
+        if (ex_vabits == 0) {
+            /* Derive VA size from the canonical page_off base. */
+            if (ex_po == 0xffff8000000000UL) ex_vabits = 48;
+            else if (ex_po == 0xffffff8000000000UL) ex_vabits = 39;
+            else if (ex_po == 0xffffc00000000000UL) ex_vabits = 47;
+            else goto bad;
+        }
+        if (!((ex_pshift == 12 && (ex_vabits == 39 || ex_vabits == 48)) ||
+              (ex_pshift == 14 && (ex_vabits == 36 || ex_vabits == 47)) ||
+              (ex_pshift == 16 && (ex_vabits == 42 || ex_vabits == 48))))
+            goto bad;
 
         if (op == 'Y') {
             if (*p == '\0') goto bad;
@@ -1819,7 +1900,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
             memset(ex_tmp, 0, sizeof(ex_tmp));
             r = ex_access(pid, addr, ex_tmp, (unsigned long)size_s64, 0,
                           ex_pid_off, ex_tasks_off, ex_mm_off, ex_pgd_off,
-                          ex_po, ex_ph, ex_owner);
+                          ex_po, ex_ph, ex_owner, ex_pshift, ex_vabits);
             if (r == 0) {
                 rw_status = 0;
                 rw_text_len = (long)size_s64 * 2;
@@ -1834,7 +1915,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
         } else {
             r = ex_access(pid, addr, &wvalue, (unsigned long)size_s64, 1,
                           ex_pid_off, ex_tasks_off, ex_mm_off, ex_pgd_off,
-                          ex_po, ex_ph, ex_owner);
+                          ex_po, ex_ph, ex_owner, ex_pshift, ex_vabits);
             rw_status = r;
             rw_text_len = 0;
             if (r == 0) STAGE("ok");
