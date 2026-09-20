@@ -1171,9 +1171,9 @@ static int walk_pt_ex(unsigned long root_va, unsigned long user_va,
     return 0;
 }
 
-static unsigned long find_task_ex(unsigned long start, u32 target_pid,
-                                  unsigned long pid_off, unsigned long tasks_off,
-                                  unsigned long mm_off, unsigned long owner_off)
+static long find_task_ex(unsigned long start, u32 target_pid,
+                          unsigned long pid_off, unsigned long tasks_off,
+                          unsigned long mm_off, unsigned long owner_off)
 {
     unsigned long p = start;
     int i;
@@ -1183,7 +1183,11 @@ static unsigned long find_task_ex(unsigned long start, u32 target_pid,
      * read mm at +mm_off and require mm+owner_off == task or task+1
      * (the +1 tag is observed on this layout; both accepted). A bust
      * keeps walking instead of returning garbage. owner_off==0 skips
-     * validation (legacy behavior). */
+     * validation (legacy behavior).
+     * Returns: task base on hit; -ESRCH for a clean full traversal
+     * (wrapped to start / iteration cap) with no match; -EAGAIN when a
+     * read fault breaks the walk mid-list (exit churn or wild list) —
+     * callers distinguish "absent" from "retry me". */
     for (i = 0; i < TASK_WALK_MAX; i++) {
         unsigned long tpw = 0;
         int tpok = 0;
@@ -1191,7 +1195,7 @@ static unsigned long find_task_ex(unsigned long start, u32 target_pid,
         int nok = 0;
         SAFE_READ64(tpw, p + pid_off, tpok);
         if (!tpok)
-            break;
+            return -EAGAIN;
         if ((u32)tpw == target_pid) {
             if (owner_off != 0) {
                 unsigned long vm = 0, ow = 0;
@@ -1203,17 +1207,17 @@ static unsigned long find_task_ex(unsigned long start, u32 target_pid,
                     (ow != p && ow != p + 1))
                     goto next_task;
             }
-            return p;
+            return (long)p;
         }
 next_task:
         SAFE_READ64(nxt, p + tasks_off, nok);
         if (!nok || !nxt)
-            break;
+            return -EAGAIN;
         p = nxt - tasks_off;
         if (p == start)
             break;
     }
-    return 0;
+    return -ESRCH;
 }
 
 /* Stateless translate + move: task→mm→pgd→walk each page. write=0 reads
@@ -1226,13 +1230,18 @@ static long ex_access(u32 pid, unsigned long addr, void *buf,
                       unsigned long po, unsigned long ph,
                       unsigned long owner_off)
 {
-    unsigned long task, mm, pgd_va;
+    unsigned long task;
+    unsigned long mm, pgd_va;
     unsigned long done = 0;
     int mok = 0, pok = 0;
+    long found;
 
-    task = find_task_ex(cur_task, pid, pid_off, tasks_off, mm_off, owner_off);
-    if (!task)
+    found = find_task_ex(cur_task, pid, pid_off, tasks_off, mm_off, owner_off);
+    if (found == -EAGAIN)
+        return -EAGAIN;
+    if (found == -ESRCH || found == 0)
         return -ESRCH;
+    task = (unsigned long)found;
     STAGE("ex-task");
     SAFE_READ64(mm, task + mm_off, mok);
     if (!mok || !mm)
@@ -2010,6 +2019,8 @@ int rw_set(const char *val, const struct kernel_param *kp)
          * only (F-walk class); every read ex-table-guarded; no pin
          * globals touched (V-class). */
         int dt;
+        u32 dhits[4];
+        int nhits = 0;
         for (dt = 0; dt < SCAN_RANGE / 8 - 1; dt++) {
             unsigned long toff = (unsigned long)dt * 8UL;
             unsigned long nxt = 0, prv = 0;
@@ -2037,18 +2048,23 @@ int rw_set(const char *val, const struct kernel_param *kp)
             SAFE_READ64(fw, prv, fwok);
             if (!fwok || fw != cur_task + toff)
                 continue;
-            {
-                u32 rep = (u32)toff;
-                put_hex_bytes(0, (const u8 *)&rep, 4);
+            if (nhits < 4) {
+                dhits[nhits] = (u32)toff;
+                nhits++;
             }
             { rb_puts("rwbridge: tasks proof hit off="); rb_put_dec(toff); rb_putc('\n'); };
-            rw_status = 0;
-            rb_spin_unlock();
-            return 0;
         }
-        { rb_puts("rwbridge: tasks proof sweep: no hit"); rb_putc('\n'); };
-        rw_status = -ENOENT;
-        rw_text_len = 0;
+        if (nhits > 0) {
+            int hi;
+            for (hi = 0; hi < nhits; hi++)
+                put_hex_bytes((unsigned long)hi * 8UL,
+                              (const u8 *)&dhits[hi], 4);
+            rw_status = 0;
+        } else {
+            { rb_puts("rwbridge: tasks proof sweep: no hit"); rb_putc('\n'); };
+            rw_status = -ENOENT;
+            rw_text_len = 0;
+        }
         rb_spin_unlock();
         return 0;
     }
