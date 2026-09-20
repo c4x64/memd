@@ -1690,8 +1690,36 @@ int rw_set(const char *val, const struct kernel_param *kp)
         return 0;
     }
 
-    case 'K': {
-        /* Pin pid offset: K,<byteoff> records pid_offset + K_TASK_PID
+    case 'N': {
+        /* No-op bisect: lock + one ring line + unlock. No reads, no
+         * global writes. If even this seizes, the rw-write path itself
+         * is fragile on this target; if clean, the trigger is in reads
+         * or pin writes (see G). */
+        { rb_puts("rwbridge: nop"); rb_putc('\n'); };
+        rw_status = 0;
+        rw_text_len = 0;
+        rb_spin_unlock();
+        return 0;
+    }
+
+    case 'G': {
+        /* Write-only bisect: records pid_offset=1496 + mask + cands with
+         * ZERO reads. Convicts or clears the pin-write hypothesis that
+         * K and the S,1 probe share (both seized; V/F/S,0/T never write
+         * these globals and never seize). */
+        pid_offset = 1496;
+        kopt_mask |= K_TASK_PID;
+        pid_ncands = 1;
+        pid_cand_off[0] = 1496;
+        pid_cand_val[0] = 0;
+        { rb_puts("rwbridge: G wrote pin (no reads)"); rb_putc('\n'); };
+        rw_status = 0;
+        rw_text_len = 0;
+        rb_spin_unlock();
+        return 0;
+    }
+
+    case 'K': {        /* Pin pid offset: K,<byteoff> records pid_offset + K_TASK_PID
          * from the proven-safe `rw` channel (kopts/insmod-arg channels
          * are retired — both wedge the loader/writer on this
          * hypervisor). Pure assignment + one guarded validation read;
