@@ -1225,7 +1225,9 @@ static long ex_access(u32 pid, unsigned long addr, void *buf,
     SAFE_READ64(pgd_va, mm + pgd_off, pok);
     if (!pok || !pgd_va || (pgd_va & (PAGE_SIZE_4K - 1)))
         return -EFAULT;
-    if (pgd_va <= po || pgd_va - po > 0x40000000UL)
+    /* pgd must sit inside the linear map (sanity window 1TB — the old
+     * 1GB window wrongly rejected real pgds, e.g. +0x65d29000 here). */
+    if (pgd_va <= po || pgd_va - po > 0x10000000000UL)
         return -EFAULT;
 
     while (done < size) {
