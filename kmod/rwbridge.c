@@ -1172,11 +1172,18 @@ static int walk_pt_ex(unsigned long root_va, unsigned long user_va,
 }
 
 static unsigned long find_task_ex(unsigned long start, u32 target_pid,
-                                  unsigned long pid_off, unsigned long tasks_off)
+                                  unsigned long pid_off, unsigned long tasks_off,
+                                  unsigned long mm_off, unsigned long owner_off)
 {
     unsigned long p = start;
     int i;
 
+    /* Owner-validated walk: a bare pid match is not trusted (stale slabs
+     * and garbage can hold any small int at +pid_off). After a match,
+     * read mm at +mm_off and require mm+owner_off == task or task+1
+     * (the +1 tag is observed on this layout; both accepted). A bust
+     * keeps walking instead of returning garbage. owner_off==0 skips
+     * validation (legacy behavior). */
     for (i = 0; i < TASK_WALK_MAX; i++) {
         unsigned long tpw = 0;
         int tpok = 0;
@@ -1185,9 +1192,20 @@ static unsigned long find_task_ex(unsigned long start, u32 target_pid,
         SAFE_READ64(tpw, p + pid_off, tpok);
         if (!tpok)
             break;
-        if ((u32)tpw == target_pid)
+        if ((u32)tpw == target_pid) {
+            if (owner_off != 0) {
+                unsigned long vm = 0, ow = 0;
+                int vok = 0, ook = 0;
+                SAFE_READ64(vm, p + mm_off, vok);
+                if (vok && vm)
+                    SAFE_READ64(ow, vm + owner_off, ook);
+                if (!vok || !vm || !ook ||
+                    (ow != p && ow != p + 1))
+                    goto next_task;
+            }
             return p;
-
+        }
+next_task:
         SAFE_READ64(nxt, p + tasks_off, nok);
         if (!nok || !nxt)
             break;
@@ -1205,13 +1223,14 @@ static long ex_access(u32 pid, unsigned long addr, void *buf,
                       unsigned long size, int write,
                       unsigned long pid_off, unsigned long tasks_off,
                       unsigned long mm_off, unsigned long pgd_off,
-                      unsigned long po, unsigned long ph)
+                      unsigned long po, unsigned long ph,
+                      unsigned long owner_off)
 {
     unsigned long task, mm, pgd_va;
     unsigned long done = 0;
     int mok = 0, pok = 0;
 
-    task = find_task_ex(cur_task, pid, pid_off, tasks_off);
+    task = find_task_ex(cur_task, pid, pid_off, tasks_off, mm_off, owner_off);
     if (!task)
         return -ESRCH;
     STAGE("ex-task");
@@ -1708,7 +1727,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
         int fi;
         unsigned long ex_pid_off = 0, ex_tasks_off = 0, ex_mm_off = 0,
                       ex_pgd_off = 0;
-        unsigned long ex_po = 0, ex_ph = 0;
+        unsigned long ex_po = 0, ex_ph = 0, ex_owner = 0;
         u8 ex_tmp[128];
 
         for (fi = 0; fi < 9; fi++) {
@@ -1731,6 +1750,14 @@ int rw_set(const char *val, const struct kernel_param *kp)
         parse_hex(f[6], &exv); ex_pgd_off = (unsigned long)exv;
         parse_hex(f[7], &exv); ex_po = (unsigned long)exv;
         parse_hex(f[8], &exv); ex_ph = (unsigned long)exv;
+        /* Optional 10th field: owner offset for walk validation
+         * (mm+owner == task or task+1 required on pid match).
+         * Absent (legacy 9-field form) skips validation. */
+        if (*p == ',') {
+            p++;
+            parse_hex(p, &exv); ex_owner = (unsigned long)exv;
+            if (ex_owner >= SCAN_RANGE) goto bad;
+        }
 
         if (op == 'Y') {
             if (*p == ',') p++;
@@ -1771,7 +1798,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
             memset(ex_tmp, 0, sizeof(ex_tmp));
             r = ex_access(pid, addr, ex_tmp, (unsigned long)size_s64, 0,
                           ex_pid_off, ex_tasks_off, ex_mm_off, ex_pgd_off,
-                          ex_po, ex_ph);
+                          ex_po, ex_ph, ex_owner);
             if (r == 0) {
                 rw_status = 0;
                 rw_text_len = (long)size_s64 * 2;
@@ -1786,7 +1813,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
         } else {
             r = ex_access(pid, addr, &wvalue, (unsigned long)size_s64, 1,
                           ex_pid_off, ex_tasks_off, ex_mm_off, ex_pgd_off,
-                          ex_po, ex_ph);
+                          ex_po, ex_ph, ex_owner);
             rw_status = r;
             rw_text_len = 0;
             if (r == 0) STAGE("ok");
