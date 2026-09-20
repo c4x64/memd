@@ -1592,7 +1592,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
      * offsets are process-independent and stay cached. */
     asm volatile("mrs %0, sp_el0" : "=r"(cur_task));
 
-    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q') {
+    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q' && val[0] != 'D') {
         /* Lazy first-use derivation: some loaders drop init sections
          * (the initcall pointer lives in one, so init never runs, yet
          * state=Live with pristine data). Deriving here makes operation
@@ -1606,7 +1606,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
          * per-op as arguments, no cached pins touched. */
         derive_all();
     }
-    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q') {
+    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q' && val[0] != 'D') {
         rw_status = -EPERM;
         STAGE("no_derive");
         return 0;
@@ -1998,8 +1998,60 @@ int rw_set(const char *val, const struct kernel_param *kp)
         return 0;
     }
 
-    case 'Q': {
-        /* Absolute read via hi/lo halves: Q,<hihex>,<lohex>,<offhex>
+    case 'D': {
+        /* Stateless tasks discovery: aligned sweep over cur_task with
+         * full circular-list proof per candidate, report-only.
+         * Proof for offset T: nxt=cur[T], prv=cur[T+8] both kernel
+         * (>=0xFFFF8000000000 covers 39/48-bit without globals),
+         * nonzero, distinct, neither self-linked; then
+         * *(nxt+T+8)==cur+T (next->prev) AND *(prv+T)==cur+T
+         * (prev->next). First full proof wins: T reported as hex u32
+         * in out, status 0. No proof: -ENOENT. Aligned 8-byte steps
+         * only (F-walk class); every read ex-table-guarded; no pin
+         * globals touched (V-class). */
+        int dt;
+        for (dt = 0; dt < SCAN_RANGE / 8 - 1; dt++) {
+            unsigned long toff = (unsigned long)dt * 8UL;
+            unsigned long nxt = 0, prv = 0;
+            int nok = 0, pok = 0;
+            unsigned long nb = 0, fw = 0;
+            int nbok = 0, fwok = 0;
+
+            SAFE_READ64(nxt, cur_task + toff, nok);
+            if (!nok)
+                continue;
+            SAFE_READ64(prv, cur_task + toff + 8UL, pok);
+            if (!pok)
+                continue;
+            if (!nxt || !prv || nxt == prv)
+                continue;
+            if (nxt < 0xFFFF8000000000UL || prv < 0xFFFF8000000000UL)
+                continue;
+            if (nxt == cur_task + toff || prv == cur_task + toff)
+                continue;
+            SAFE_READ64(nb, nxt + toff + 8UL, nbok);
+            if (!nbok || nb != cur_task + toff)
+                continue;
+            SAFE_READ64(fw, prv + toff, fwok);
+            if (!fwok || fw != cur_task + toff)
+                continue;
+            {
+                u32 rep = (u32)toff;
+                put_hex_bytes(0, (const u8 *)&rep, 4);
+            }
+            { rb_puts("rwbridge: tasks proof hit off="); rb_put_dec(toff); rb_putc('\n'); };
+            rw_status = 0;
+            rb_spin_unlock();
+            return 0;
+        }
+        { rb_puts("rwbridge: tasks proof sweep: no hit"); rb_putc('\n'); };
+        rw_status = -ENOENT;
+        rw_text_len = 0;
+        rb_spin_unlock();
+        return 0;
+    }
+
+    case 'Q': {        /* Absolute read via hi/lo halves: Q,<hihex>,<lohex>,<offhex>
          * reads the u64 at ((hi<<32)|lo)+off. Exists because device
          * shells are 32-bit: 64-bit address arithmetic is impossible
          * there, so halves travel as strings and the kernel adds.
