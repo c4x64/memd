@@ -2259,8 +2259,14 @@ wnext:
             if (wp == cur_task)
                 break;
         }
+        /* Report the step count even on miss: small counts mean an
+         * early wrap (small circle), large counts a full traversal.
+         * Distinguishes "target absent" from "derailed". */
+        {
+            u64 wsteps = (u64)wi;
+            put_hex_bytes(0, (const u8 *)&wsteps, 8);
+        }
         rw_status = -ESRCH;
-        rw_text_len = 0;
         rb_spin_unlock();
         return 0;
     }
