@@ -1187,8 +1187,10 @@ static long find_task_ex(unsigned long start, u32 target_pid,
      * Returns: task base on hit; -ESRCH for a clean full traversal
      * (wrapped to start / iteration cap) with no match; -EAGAIN when a
      * read fault breaks the walk mid-list (exit churn or wild list) —
-     * callers distinguish "absent" from "retry me". */
-    for (i = 0; i < TASK_WALK_MAX; i++) {
+     * callers distinguish "absent" from "retry me".
+     * Bound: 3000 steps covers a full circle on bloated Androids
+     * (~1800 tasks here) while keeping wild-list trap-storms short. */
+    for (i = 0; i < 3000; i++) {
         unsigned long tpw = 0;
         int tpok = 0;
         unsigned long nxt = 0;
