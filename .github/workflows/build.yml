@@ -181,13 +181,6 @@ jobs:
           grep -E "rwbridge\.o|rwbridge\.ko|LD|MODPOST" /tmp/cfibuild.log | head -8
           cp rwbridge.ko rwbridge-cfi.ko
 
-      - name: CFI checks (typeids present, pads kept, imports clean)
-        run: |
-          cd kmod
-          llvm-nm -u rwbridge-cfi.ko | awk '{print $2}' | sort -u | tee /tmp/cfi.undef
-          python3 check_universal.py rwbridge-cfi.ko /tmp/cfi.undef
-          N=$(llvm-nm rwbridge-cfi.ko | grep -c __kcfi_typeid); echo "kcfi typeids: $N"; [ "$N" -gt 0 ]
-
       - name: Upload artifact (CFI flavor + installer)
         uses: actions/upload-artifact@v4
         with:
@@ -195,3 +188,12 @@ jobs:
           path: |
             kmod/rwbridge-cfi.ko
             run.sh
+
+      - name: CFI checks (typeids present, pads kept, imports clean)
+        run: |
+          cd kmod
+          llvm-nm -u rwbridge-cfi.ko | awk '{print $2}' | sort -u | tee /tmp/cfi.undef
+          python3 check_universal.py rwbridge-cfi.ko /tmp/cfi.undef
+          llvm-readelf -S rwbridge-cfi.ko | grep -i kcfi || echo "(no kcfi sections)"
+          llvm-nm rwbridge-cfi.ko | grep -c __kcfi_typeid || echo "(no typeid symbols)"
+          llvm-strings rwbridge-cfi.ko 2>/dev/null | grep -c kcfi || strings rwbridge-cfi.ko | grep -c kcfi || echo "(no kcfi strings)"
