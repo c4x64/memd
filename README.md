@@ -151,7 +151,9 @@ resolved per-file via nm, never hardcoded; no kernel tree, no extra files):
 
 - `init_module` is NEVER called: spin-init loads instantly, nonzero-init
   still goes Live, file-touch init (openat/write/close via SVC, correct
-  bytes verified) goes Live with no file created. Symtab is processed (symbols in kallsyms), params are
+  bytes verified) goes Live with no file, and an in-product int-param
+  witness reads back its initial 0 through safe kernel-side handlers
+  (full CI artifact, probes reverted after). Symtab is processed (symbols in kallsyms), params are
   created, state is Live — everything except init execution. Consequence:
   init is best-effort everywhere; all real work (derivation included) must
   be lazy on first op, never eager at init.
