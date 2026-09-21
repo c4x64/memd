@@ -164,6 +164,31 @@ all of these from any CI-built `.ko`, binutils only, no kernel tree):
   such as `__this_module`); transplant-patching the CI artifact is the
   reliable probe method.
 
+## What is possible / not possible on CFI kernels (research-backed)
+
+Mechanism (LLVM KCFI, arm64: `ldur w16,[xN,#-4]; movz/movk w17,#hash;
+cmp; b.eq ok; brk#0x8228; blr xN` — AOSP/LPC docs): every indirect call
+in kernel code checks the 4 bytes before the target for the expected
+type hash. Uninstrumented callees always mismatch → `brk` → `CFI
+failure` → panic (non-permissive; permissive mode is prod-forbidden per
+AOSP). Consequences, each verified or documented:
+
+- POSSIBLE, standalone: load + Live + params + kernel-only attr reads;
+  vermagic patching (`run.sh`); transplant probes (`tools/`);
+  uname/config.gz/kallsyms/sysfs/cmdline reads.
+- NOT POSSIBLE, standalone: executing any module callback (the check is
+  at the kernel caller — no source change can satisfy it; needs a
+  CFI-instrumented build from CI, flags only, no logic change).
+- NOT POSSIBLE, standalone: reading the panic string (no pstore here;
+  reboot clears dmesg — the config flag is the diagnosis); `initcall_debug`
+  or cmdline changes (no bootloader control); forcing imports/symbols
+  (kernel-owned: `EPERM`/`ENOEXEC`/`Unknown symbol`); printk in the
+  product (import doctrine — test builds excepted).
+- OPEN: why the init call never arrives here (symbol resolves per
+  kallsyms, call missing; cmdline has no blacklist entries). Needs a CFI
+  build to bisect (tolerant-skip vs dropped error) — same build that
+  fixes operations, so one vehicle answers both.
+
 ## Diagnosis
 
 - `cat /sys/module/rwbridge/parameters/status` — `0` / negative errno
