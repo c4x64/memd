@@ -137,10 +137,58 @@ vermagic fits the in-place runtime patch.
   verification exists yet in this project — the contract is
   build-verified (CI) and refuse-on-mismatch by construction.
 - CFI-enforcing kernels (`CONFIG_CFI_CLANG=y` in `/proc/config.gz`):
-  kernel→module sysfs callbacks *may* trap on first access (single reboot
-  worst case — nothing persists, no boot scripts). `run.sh` warns and
-  continues; dmesg signature to confirm: `CFI failure`. The source needs
-  no change for a future CFI flavor build (flags only).
+  every kernel→module sysfs access and `rmmod`/exit trap deterministically
+  (each op reboots, not just the first). `run.sh` warns and continues;
+  without `pstore`/ramoops the panic string is lost on reboot (dmesg does
+  not survive), so the config flag itself is the diagnosis. The source
+  needs no change for a future CFI flavor build (flags only).
+
+## Loader-contract map (proven 2026-09-20, `6.1.23-android14-4-...` AVD)
+
+Same kernel, transplant-patched probes (8-byte entry-head rewrites on a
+CI-built `.ko` with binutils nm/readelf/objdump + python3 — entry offsets
+resolved per-file via nm, never hardcoded; no kernel tree, no extra files):
+
+- `init_module` is NEVER called: spin-init loads instantly, nonzero-init
+  still goes Live. Symtab is processed (symbols in kallsyms), params are
+  created, state is Live — everything except init execution. Consequence:
+  init is best-effort everywhere; all real work (derivation included) must
+  be lazy on first op, never eager at init.
+- `cleanup_module` / `rmmod` path kills even with a trivial body: the exit
+  call path itself is enforced, not the exit code.
+- Param show/store kill even with trivial import-free bodies (`stage`
+  read: pure copy loop); kernel-only paths (`coresize`, write-only `rw`
+  read → `-EACCES`, loaded idle) always survive. Enforcement sits at the
+  sysfs caller, not in our code.
+- Hand-built (non-kbuild) ELFs are NOT a probe vehicle: identical files
+  fail `EPERM` in one boot and `ENOEXEC` in the next (missing kbuild-isms
+  such as `__this_module`); transplant-patching the CI artifact is the
+  reliable probe method.
+
+## What is possible / not possible on CFI kernels (research-backed)
+
+Mechanism (LLVM KCFI, arm64: `ldur w16,[xN,#-4]; movz/movk w17,#hash;
+cmp; b.eq ok; brk#0x8228; blr xN` — AOSP/LPC docs): every indirect call
+in kernel code checks the 4 bytes before the target for the expected
+type hash. Uninstrumented callees always mismatch → `brk` → `CFI
+failure` → panic (non-permissive; permissive mode is prod-forbidden per
+AOSP). Consequences, each verified or documented:
+
+- POSSIBLE, standalone: load + Live + params + kernel-only attr reads;
+  vermagic patching (`run.sh`); transplant probes (`tools/`);
+  uname/config.gz/kallsyms/sysfs/cmdline reads.
+- NOT POSSIBLE, standalone: executing any module callback (the check is
+  at the kernel caller — no source change can satisfy it; needs a
+  CFI-instrumented build from CI, flags only, no logic change).
+- NOT POSSIBLE, standalone: reading the panic string (no pstore here;
+  reboot clears dmesg — the config flag is the diagnosis); `initcall_debug`
+  or cmdline changes (no bootloader control); forcing imports/symbols
+  (kernel-owned: `EPERM`/`ENOEXEC`/`Unknown symbol`); printk in the
+  product (import doctrine — test builds excepted).
+- OPEN: why the init call never arrives here (symbol resolves per
+  kallsyms, call missing; cmdline has no blacklist entries). Needs a CFI
+  build to bisect (tolerant-skip vs dropped error) — same build that
+  fixes operations, so one vehicle answers both.
 
 ## Diagnosis
 

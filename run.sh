@@ -45,8 +45,10 @@ KVER=$(uname -r)
 log "kernel: $KVER"
 
 # 2. CFI safety gate (/proc/config.gz present on GKI).
-# Non-CFI kernels: always fine. CFI kernels: kernel->module callbacks may
-# trap on first sysfs access (single reboot worst case, nothing persists).
+# Non-CFI kernels: always fine. CFI kernels: every kernel->module sysfs
+# access and rmmod trap deterministically (each op reboots, not just the
+# first); init is skipped by the loader. Without pstore the panic string
+# is lost on reboot, so the config flag itself is the diagnosis.
 CFI="unknown"
 if [ -f /proc/config.gz ]; then
     if gzip -dc /proc/config.gz 2>/dev/null | grep -q "^CONFIG_CFI_CLANG=y"; then
@@ -56,9 +58,9 @@ if [ -f /proc/config.gz ]; then
     fi
 fi
 if [ "$CFI" = "yes" ]; then
-    log "WARNING: CFI-enforcing kernel — if the first sysfs access reboots,"
+    log "WARNING: CFI-enforcing kernel — every sysfs access reboots;"
     log "  this kernel needs a CFI build (source needs no change, flags only)."
-    log "  dmesg signature to confirm: 'CFI failure'. Continuing in 3s..."
+    log "  Confirm via /proc/config.gz (dmesg does not survive reboot). Continuing in 3s..."
     sleep 3
 else
     log "CFI: $CFI (proceeding)"
