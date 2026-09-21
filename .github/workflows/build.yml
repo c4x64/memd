@@ -126,16 +126,18 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ARCH: arm64
+      CROSS_COMPILE: aarch64-linux-gnu-
       KVER: 5.10.209
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install clang toolchain
+      - name: Install cross toolchain + clang
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            clang lld llvm dwarves \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            clang lld llvm \
             libssl-dev libelf-dev bison flex bc
 
       - name: Fetch kernel source (headers donor only)
@@ -153,24 +155,27 @@ jobs:
           [ -f linux-$KVER.tar.xz ] || { echo "no source for $KVER"; exit 1; }
           tar xf linux-$KVER.tar.xz
 
-      - name: Prepare tree (same donor neutralization as universal)
+      - name: Prepare tree (identical to universal job — gcc path)
         run: |
           cd linux-$KVER
           PAD=$(python3 -c "print('x'*54)")
-          make ARCH=$ARCH LLVM=1 defconfig
+          make ARCH=$ARCH defconfig
           ./scripts/config --disable LOCALVERSION_AUTO
           ./scripts/config --disable MODVERSIONS
           ./scripts/config --enable MODULES
           ./scripts/config --enable MODULE_UNLOAD
-          make ARCH=$ARCH LLVM=1 olddefconfig
-          make ARCH=$ARCH LLVM=1 EXTRAVERSION="-${PAD}" modules_prepare scripts
+          make ARCH=$ARCH olddefconfig
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
+            EXTRAVERSION="-${PAD}" modules_prepare scripts
           grep -rn "mbranch-protection" arch/arm64/Makefile Makefile 2>/dev/null | head -3 || true
           sed -i "s/-mbranch-protection=[^ ']*/ /g" arch/arm64/Makefile Makefile 2>/dev/null || true
 
-      - name: Build CFI module
+      - name: Build CFI module (clang for the module only)
         run: |
           cd kmod
-          make ARCH=$ARCH LLVM=1 CFI=1 KDIR="$GITHUB_WORKSPACE/linux-$KVER"
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
+            CC="clang --target=aarch64-linux-gnu -fintegrated-as" \
+            CFI=1 KDIR="$GITHUB_WORKSPACE/linux-$KVER"
           cp rwbridge.ko rwbridge-cfi.ko
 
       - name: CFI checks (typeids present, pads kept, imports clean)
