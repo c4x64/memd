@@ -137,10 +137,32 @@ vermagic fits the in-place runtime patch.
   verification exists yet in this project — the contract is
   build-verified (CI) and refuse-on-mismatch by construction.
 - CFI-enforcing kernels (`CONFIG_CFI_CLANG=y` in `/proc/config.gz`):
-  kernel→module sysfs callbacks *may* trap on first access (single reboot
-  worst case — nothing persists, no boot scripts). `run.sh` warns and
-  continues; dmesg signature to confirm: `CFI failure`. The source needs
-  no change for a future CFI flavor build (flags only).
+  every kernel→module sysfs access and `rmmod`/exit trap deterministically
+  (each op reboots, not just the first). `run.sh` warns and continues;
+  without `pstore`/ramoops the panic string is lost on reboot (dmesg does
+  not survive), so the config flag itself is the diagnosis. The source
+  needs no change for a future CFI flavor build (flags only).
+
+## Loader-contract map (proven 2026-09-20, `6.1.23-android14-4-...` AVD)
+
+Same kernel, transplant-patched probes (`tools/probe-patch.sh` regenerates
+all of these from any CI-built `.ko`, binutils only, no kernel tree):
+
+- `init_module` is NEVER called: spin-init loads instantly, nonzero-init
+  still goes Live. Symtab is processed (symbols in kallsyms), params are
+  created, state is Live — everything except init execution. Consequence:
+  init is best-effort everywhere; all real work (derivation included) must
+  be lazy on first op, never eager at init.
+- `cleanup_module` / `rmmod` path kills even with a trivial body: the exit
+  call path itself is enforced, not the exit code.
+- Param show/store kill even with trivial import-free bodies (`stage`
+  read: pure copy loop); kernel-only paths (`coresize`, write-only `rw`
+  read → `-EACCES`, loaded idle) always survive. Enforcement sits at the
+  sysfs caller, not in our code.
+- Hand-built (non-kbuild) ELFs are NOT a probe vehicle: identical files
+  fail `EPERM` in one boot and `ENOEXEC` in the next (missing kbuild-isms
+  such as `__this_module`); transplant-patching the CI artifact is the
+  reliable probe method.
 
 ## Diagnosis
 
