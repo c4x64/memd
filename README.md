@@ -195,6 +195,30 @@ AOSP). Consequences, each verified or documented:
   build to bisect (tolerant-skip vs dropped error) — same build that
   fixes operations, so one vehicle answers both.
 
+## Zero-import resolution (technique note, reviewed, open)
+
+Problem split: (1) does init run? (2) can you resolve symbols? They
+compose only when (1) is solved — on this kernel it is not, so the
+design below is recorded, not shipped. Core insight (sound): indirect
+calls from *uninstrumented* code emit no CFI checks (checks live at
+instrumented callsites only), and kernel targets carry BTI pads — so
+calls through resolved pointers dodge both enforcements without importing
+anything. Reviewed resolver shape (fixes verified):
+
+- Scan loop bound computed once (`scan_end = addr - range` before the
+  loop; recomputing against a shrinking `addr` runs to zero).
+- `IS_ERR` as unsigned compare against `-4096UL` (valid kernel pointers
+  are negative signed — signed `> 0` rejects them).
+- PC-relative anchor (`adr %0,.`) instead of TTBR1 (table physical base,
+  not a VA — useless without translation).
+- Fault armor via `__ex_table` with **`.long` relative pairs only**:
+  entries are `{insn, fixup}` relative to their own field address;
+  absolute `.quad` pairs assemble but are silently ignored (fixups never
+  fire — same idiom as `SAFE_READ64` in `rwbridge.c`).
+- Needs a kernel where init runs (unidentified — candidates: non-CFI
+  GKI, older trees; identify with the transplant spin test or
+  `initcall_debug` where cmdline control exists).
+
 ## Diagnosis
 
 - `cat /sys/module/rwbridge/parameters/status` — `0` / negative errno
