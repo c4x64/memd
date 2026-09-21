@@ -161,8 +161,10 @@ resolved per-file via nm, never hardcoded; no kernel tree, no extra files):
   call path itself is enforced, not the exit code.
 - Param show/store kill even with trivial import-free bodies (`stage`
   read: pure copy loop); kernel-only paths (`coresize`, write-only `rw`
-  read → `-EACCES`, loaded idle) always survive. Enforcement sits at the
-  sysfs caller, not in our code.
+  read → `-EACCES`, loaded idle) always survive. Plain kernel int params
+  work BOTH directions with zero module-code execution (`stability`
+  write 1 → read back 1, guest alive) — the load-only dataplane.
+  Enforcement sits at the sysfs caller, not in our code.
 - Hand-built (non-kbuild) ELFs are NOT a probe vehicle: identical files
   fail `EPERM` in one boot and `ENOEXEC` in the next. Proven cause of
   the `ENOEXEC`: the missing `.gnu.linkonce.this_module` section
