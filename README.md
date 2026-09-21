@@ -162,18 +162,22 @@ resolved per-file via nm, never hardcoded; no kernel tree, no extra files):
   broken for struct-coupled fields — execution needs generation-matched
   headers; 5.10-built artifacts are load+dataplane-only on 6.x (params,
   kallsyms, state all pre-init paths, unaffected).
-- Single artifact SURVIVES via install-time slot surgery (proven 2/2):
-  rewriting the two `.rela.gnu.linkonce.this_module` offsets
-  (0x150→0x140, 0x300→0x3D8, symbols/addends untouched) restores
-  dispatch — the surgered load traps at init entry (reboot) where the
-  identical unsurgered artifact goes Live silent. So one shipped file +
-  per-generation rela patch = fat behavior, no CI matrix. HARD GATE:
-  surgery only where CFI is OFF (on CFI kernels dispatch → load-panic,
-  strictly worse than silent-Live; `run.sh` already detects CFI).
-  Residual: other skewed struct fields stay as-is (load/state/params/
-  kallsyms all empirically fine); any field-level source surgery stays
-  forbidden — this is loader-facing rela adaptation, verifiable by
-  dispatch test, not struct redesign.
+- Single artifact SURVIVES via install-time slot surgery (proven 3/3):
+  grow `.gnu.linkonce.this_module` by 0x100 (append zeros, fix
+  `e_shoff`/shifted `sh_offset`s — same extend pattern as vermagic),
+  then rewrite the two rela offsets (0x150→0x140, 0x300→0x3D8,
+  symbols/addends untouched; the growth is MANDATORY — the 6.1 slot
+  0x3D8 lies past the 5.10 section end, and relocation writes there
+  would corrupt the neighbor). The surgered load traps at init entry
+  (reboot) where the identical unsurgered artifact goes Live silent —
+  dispatch restored. So one shipped file + per-generation rela patch =
+  fat behavior, no CI matrix. HARD GATE: surgery only where CFI is OFF
+  (on CFI kernels dispatch → load-panic, strictly worse than
+  silent-Live; `run.sh` already detects CFI). Residual: other skewed
+  struct fields stay as-is (load/state/params/kallsyms all empirically
+  fine); any field-level source surgery stays forbidden — this is
+  loader-facing rela adaptation, verifiable by dispatch test, not
+  struct redesign.
 - `cleanup_module` / `rmmod` path kills even with a trivial body: the exit
   call path itself is enforced, not the exit code.
 - Param show/store kill even with trivial import-free bodies (`stage`
