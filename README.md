@@ -149,14 +149,19 @@ Same kernel, transplant-patched probes (8-byte entry-head rewrites on a
 CI-built `.ko` with binutils nm/readelf/objdump + python3 — entry offsets
 resolved per-file via nm, never hardcoded; no kernel tree, no extra files):
 
-- `init_module` is NEVER called: spin-init loads instantly, nonzero-init
-  still goes Live, file-touch init (openat/write/close via SVC, correct
-  bytes verified) goes Live with no file, and an in-product int-param
-  witness reads back its initial 0 through safe kernel-side handlers
-  (full CI artifact, probes reverted after). Symtab is processed (symbols in kallsyms), params are
-  created, state is Live — everything except init execution. Consequence:
-  init is best-effort everywhere; all real work (derivation included) must
-  be lazy on first op, never eager at init.
+- `init_module` is NEVER called — cause PROVEN (not mysterious): `struct
+  module` ABI skew. CI builds against 5.10 headers, whose `.init`/`.exit`
+  slots sit at `__this_module`+0x150/+0x300; the 6.1 kernel reads them at
+  +0x140/+0x3D8 (rela offsets compared ours-vs-vendor, subagent-sourced
+  loader code confirms the `NULL`-skips-silently path). So 6.1 reads
+  init=NULL (file bytes `0000000000000000`) → skip → Live, and reads exit
+  as wild `0x004d000000361400` → rmmod jumps wild → reboot. Five
+  witnesses agree (spin/nonzero/positional/file-touch/int-param-0).
+  CFI is EXCLUDED as the skip cause (a checked call would trap loudly,
+  never skip silently). Consequence: the single-artifact premise is
+  broken for struct-coupled fields — execution needs generation-matched
+  headers; 5.10-built artifacts are load+dataplane-only on 6.x (params,
+  kallsyms, state all pre-init paths, unaffected).
 - `cleanup_module` / `rmmod` path kills even with a trivial body: the exit
   call path itself is enforced, not the exit code.
 - Param show/store kill even with trivial import-free bodies (`stage`
