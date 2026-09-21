@@ -10,8 +10,6 @@
 # KDIR is only needed to BUILD (any prepared arm64 tree 5.10+).
 # check-universal runs on the already-built rwbridge.ko, no KDIR needed.
 obj-m += rwbridge.o
-# TEMPORARY: init-execution witness (full artifact). Removed after experiment.
-obj-m += probe_touch.o
 
 # Self-contained: no libc imports, no stack protector runtime, no CFI
 # instrumentation (single build must load on CFI and non-CFI kernels alike —

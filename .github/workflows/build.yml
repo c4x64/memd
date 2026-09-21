@@ -120,5 +120,4 @@ jobs:
           name: rwbridge-universal
           path: |
             kmod/rwbridge.ko
-            kmod/probe_touch.ko
             run.sh

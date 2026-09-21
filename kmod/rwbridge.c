@@ -2467,14 +2467,6 @@ MODULE_PARM_DESC(stability, "1 = soak: load + idle, no scans (default 0)");
 module_param_named(readonly, kopt_readonly, int, 0600);
 MODULE_PARM_DESC(readonly, "1 = refuse all writes with -EROFS (default 0)");
 
-/* TEMPORARY PROBE (revert after experiment): init-execution witness via
- * plain kernel int handlers (zero new imports; readable even when custom
- * callbacks trap). 0 = init never ran, 1 = entered, 2 = file touched,
- * negative = openat errno. */
-static int probe_state;
-module_param_named(probe_state, probe_state, int, 0444);
-MODULE_PARM_DESC(probe_state, "TEMPORARY init-execution witness");
-
 static const struct kernel_param_ops rw_param_ops = {
     .set = rw_set,
 };
@@ -2543,58 +2535,8 @@ module_param_cb(log, &rw_log_ops, NULL, 0444);
 MODULE_PARM_DESC(log, "in-module diagnostic ring (zero-import logging)");
 
 /* ── module init/exit ───────────────────────────────────────────────────── */
-/* TEMPORARY PROBE (revert after experiment): raw-SVC file touch, zero
- * imports. creat/write/close /data/local/tmp/RWPROBE, returns openat fd
- * (or negative errno). Direct-called only (direct branches need no BTI
- * pad, uninstrumented caller emits no CFI check). */
-__asm__(
-".text\n"
-".globl probe_touch\n"
-"probe_touch:\n"
-" sub sp, sp, #32\n"
-" movz x9, #0x642f\n"
-" movk x9, #0x7461, lsl #16\n"
-" movk x9, #0x2f61, lsl #32\n"
-" movk x9, #0x6f6c, lsl #48\n"
-" str x9, [sp, #8]\n"
-" movz x10, #0x6163\n"
-" movk x10, #0x2f6c, lsl #16\n"
-" movk x10, #0x6d74, lsl #32\n"
-" movk x10, #0x2f70, lsl #48\n"
-" str x10, [sp, #16]\n"
-" movz x11, #0x5752\n"
-" movk x11, #0x5250, lsl #16\n"
-" movk x11, #0x424f, lsl #32\n"
-" movk x11, #0x0045, lsl #48\n"
-" str x11, [sp, #24]\n"
-" movn w0, #99\n"
-" add x1, sp, #8\n"
-" mov w2, #0x241\n"
-" mov w3, #0x180\n"
-" mov x8, #56\n"
-" svc #0\n"
-" mov x12, x0\n"
-" mov x0, x12\n"
-" add x1, sp, #24\n"
-" mov x2, #1\n"
-" mov x8, #64\n"
-" svc #0\n"
-" mov x0, x12\n"
-" mov x8, #57\n"
-" svc #0\n"
-" mov x0, x12\n"
-" add sp, sp, #32\n"
-" ret\n"
-);
-long probe_touch(void);
 int rwbridge_init(void)
 {
-    /* TEMPORARY PROBE: witness first, everything else unchanged. */
-    probe_state = 1;
-    {
-        long pfd = probe_touch();
-        probe_state = (pfd >= 0) ? 2 : (int)pfd;
-    }
     /* NOTE: no utsname()/current derefs here — those bake in struct layouts.
      * The loader (run.sh) already prints uname -r from userspace.
      * NOTE 2: NO derive_all() here — derivation is lazy on first op
