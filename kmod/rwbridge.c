@@ -894,7 +894,7 @@ derive_ok = 1;
     return 0;
 }
 
-static int (*const st_fns[8])(void) = {
+static int (*st_fns[8])(void) = {
     st_regs, st_pid, st_po, st_mm, st_tasks, st_comm, st_arg, st_fin
 };
 
