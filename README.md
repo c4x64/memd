@@ -223,7 +223,13 @@ anything. Reviewed resolver shape (fixes verified):
 
 ## Diagnosis
 
-- `cat /sys/module/rwbridge/parameters/status` — `0` / negative errno
+- On CFI kernels: use the op journal (`/sdcard/MemoryD/J*.log`) +
+  kernel-side surfaces (`coresize`, `initstate`, int params, dmesg,
+  uptime). NEVER `cat` custom params (`log`/`stage`/`status`/`out`)
+  or write `rw` there — each access reboots. `run.sh` already gates
+  all of this by the CFI flag.
+- Elsewhere: `cat /sys/module/rwbridge/parameters/status` — `0` /
+  negative errno
 - `cat .../parameters/out` — last result (hex)
 - `cat .../parameters/stage` — breadcrumb of the last op's failing
   phase (`parse`, `eread`/`ewrite`, `ex-task`, `ex-mm`, `ex-pgd`, `ok`)

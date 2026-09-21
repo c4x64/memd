@@ -11,8 +11,12 @@
 #      stateless; see README "Bring-up on a new kernel"). Nothing is
 #      baked per-KMI and nothing is derived by blind sweeps.
 #   3. diagnostics — printk candidates are surveyed (informational; the
-#      module imports none) and the session log is saved to
-#      /sdcard/MemoryD/N.log (next free number).
+#      module imports none), every risky action is journaled with
+#      expectation + outcome to /sdcard/MemoryD/J*.log (sync-before-risk,
+#      post-reboot forensics), and the session log is saved to
+#      /sdcard/MemoryD/N.log (next free number). On CFI kernels the
+#      journal + kernel-side surfaces ARE the log: custom params trap,
+#      so they are never touched there.
 #
 # Requires root. Nothing persists (no boot scripts); worst case is one reboot.
 # Layout: this script + rwbridge.ko side by side (CI artifact, /data/local/tmp).
@@ -24,6 +28,43 @@ TMPKO="/data/local/tmp/rwbridge-run.ko"
 
 log() { echo "[rwbridge] $1"; }
 die() { echo "[rwbridge] ERROR: $1"; exit 1; }
+
+# 0b. Op journal — the logging system that survives hostile kernels.
+# Every risky action is recorded with timestamp + expectation + outcome,
+# persisted incrementally (sync before anything that can reboot). On CFI
+# kernels custom-param reads trap, so this journal plus kernel-side
+# surfaces (coresize/initstate/int params/dmesg/uptime) ARE the log.
+JDIR="/sdcard/MemoryD"
+JFILE=""
+jinit() {
+    mkdir -p "$JDIR" 2>/dev/null
+    _jn=0
+    if [ -d "$JDIR" ]; then
+        for _f in "$JDIR"/J*.log; do
+            [ -f "$_f" ] || continue
+            _b=$(basename "$_f" .log); _b=${_b#J}
+            case "$_b" in ''|*[!0-9]*) continue ;; esac
+            if [ "$_b" -ge "$_jn" ] 2>/dev/null; then _jn=$((_b + 1)); fi
+        done
+        JFILE="$JDIR/J$_jn.log"
+    fi
+}
+jlog() {
+    # $1=op $2=expect $3=outcome
+    _line="$(date '+%T' 2>/dev/null) | $1 | expect: $2 | got: $3"
+    echo "[rwbridge] $_line"
+    if [ -n "$JFILE" ]; then
+        echo "$_line" >> "$JFILE" 2>/dev/null
+    fi
+}
+# jop records intent + syncs BEFORE the risky action (panic = no sync,
+# so post-reboot forensics shows exactly what was attempted).
+jop() { jlog "$1" "$2" "attempting"; sync 2>/dev/null; }
+saferead() {
+    # kernel-side or CFI-safe read only; never custom callbacks here
+    cat "$1" 2>/dev/null || echo "(unreadable: $1)"
+}
+jinit
 
 # 0. Already loaded — leave it alone.
 if grep -q "^${MODNAME} " /proc/modules 2>/dev/null; then
@@ -330,12 +371,24 @@ dump_log() {
         echo "=== rwbridge session log ($_why) ==="
         echo "date: $(date 2>/dev/null)"
         echo "kernel: $(uname -r)"
+        echo "journal: $JFILE"
         echo "printk candidates: $CANDS"
-        echo "--- module log param ---"
-        cat /sys/module/rwbridge/parameters/log 2>/dev/null || echo "(module not loaded)"
-        echo "--- stage/status ---"
-        echo "stage=$(cat /sys/module/rwbridge/parameters/stage 2>/dev/null)"
-        echo "status=$(cat /sys/module/rwbridge/parameters/status 2>/dev/null)"
+        if [ "$CFI" = "yes" ]; then
+            echo "--- CFI kernel: custom params (log/stage/status/out) SKIPPED (trap) ---"
+            echo "--- safe surface ---"
+            echo "coresize=$(saferead /sys/module/rwbridge/coresize)"
+            echo "initstate=$(saferead /sys/module/rwbridge/initstate)"
+            echo "stability=$(saferead /sys/module/rwbridge/parameters/stability)"
+            echo "readonly=$(saferead /sys/module/rwbridge/parameters/readonly)"
+            echo "uptime=$(cat /proc/uptime 2>/dev/null)"
+            echo "kallsyms_syms=$(grep -c rwbridge /proc/kallsyms 2>/dev/null)"
+        else
+            echo "--- module log param ---"
+            cat /sys/module/rwbridge/parameters/log 2>/dev/null || echo "(module not loaded)"
+            echo "--- stage/status ---"
+            echo "stage=$(cat /sys/module/rwbridge/parameters/stage 2>/dev/null)"
+            echo "status=$(cat /sys/module/rwbridge/parameters/status 2>/dev/null)"
+        fi
         echo "--- dmesg (rwbridge) ---"
         dmesg 2>/dev/null | grep -i rwbridge | tail -30
     } > "$LASTLOG" 2>/dev/null
@@ -361,7 +414,9 @@ try_insmod() {
     return $?
 }
 
+jop "insmod" "rc=0, Live"
 if ! try_insmod; then
+    jlog "insmod" "rc=0, Live" "FAILED, entering dmesg-feedback retry"
     WANT=$(dmesg 2>/dev/null | grep -o "should be '[^']*'" | tail -1 | sed "s/^should be '//;s/'\$//")
     # dmesg prints the expected string WITHOUT the "vermagic=" tag, but the
     # patch offset points AT the tag — restore the prefix or the tag is
@@ -387,11 +442,21 @@ if ! try_insmod; then
 fi
 rm -f "$TMPKO"
 sleep 1
-STAGE=$(cat /sys/module/rwbridge/parameters/stage 2>/dev/null)
-log "loaded; stage=$STAGE"
-if [ "$STAGE" != "ok" ]; then
-    log "note: derivation did not complete"
-    log "  fix: use explicit E/Y ops with this kernel's offset table (see README)"
+if [ "$CFI" = "yes" ]; then
+    # Custom stage/status getters trap on CFI kernels — verify via the
+    # kernel-side int param instead (proven readable+writable, zero
+    # module-code execution).
+    STAB=$(saferead /sys/module/rwbridge/parameters/stability)
+    jlog "verify" "Live + readable int params" "initstate=$(saferead /sys/module/rwbridge/initstate) stability=$STAB"
+    log "loaded (CFI: verified via kernel-side surface; custom params untouched)"
+else
+    STAGE=$(cat /sys/module/rwbridge/parameters/stage 2>/dev/null)
+    jlog "verify" "stage readable" "stage=$STAGE"
+    log "loaded; stage=$STAGE"
+    if [ "$STAGE" != "ok" ]; then
+        log "note: derivation did not complete"
+        log "  fix: use explicit E/Y ops with this kernel's offset table (see README)"
+    fi
 fi
 
 dump_log "install"
