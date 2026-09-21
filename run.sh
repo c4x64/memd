@@ -400,6 +400,129 @@ dump_log() {
     fi
 }
 
+# 7b. Dispatch-slot surgery (single-artifact fat behavior).
+# A 5.10-built __this_module carries .init/.exit at +0x150/+0x300; 6.x
+# kernels read them elsewhere (6.1: +0x140/+0x3D8) — without adaptation
+# init is skipped (NULL) and rmmod jumps wild. Derive the target slots
+# per-device from an on-device reference .ko (symbol-name matching, never
+# hardcoded offsets): grow this_module if needed + rewrite the two relas.
+# HARD GATES: CFI=yes → skip (dispatch would load-panic, worse than
+# silent-Live); major!=6 → skip (5.x needs nothing); no python3/no
+# reference → skip (silent-Live as today). Idempotent (no-op when matching).
+maybe_surgery() {
+    _ko="$1"
+    _kmajor=$(uname -r 2>/dev/null | cut -d. -f1)
+    if [ "$CFI" = "yes" ]; then
+        jlog "surgery" "dispatch slots" "SKIPPED (CFI: dispatch would load-panic)"
+        return 0
+    fi
+    if [ "$_kmajor" != "6" ]; then
+        jlog "surgery" "dispatch slots" "SKIPPED (major $_kmajor needs nothing)"
+        return 0
+    fi
+    command -v python3 >/dev/null 2>&1 || {
+        jlog "surgery" "dispatch slots" "SKIPPED (no python3)"
+        return 0
+    }
+    for _d in /vendor/lib/modules /vendor_dlkm/lib/modules /system/lib/modules; do
+        [ -d "$_d" ] || continue
+        for _k in "$_d"/*.ko; do
+            [ -f "$_k" ] || continue
+            cp -f "$_k" /data/local/tmp/rwref.ko 2>/dev/null || continue
+            _out=$(python3 - /data/local/tmp/rwref.ko "$_ko" <<'PYEOF' 2>&1
+import struct, sys
+ref, tgt = sys.argv[1], sys.argv[2]
+def parse(fname):
+    try: d = bytearray(open(fname, 'rb').read())
+    except Exception: return None
+    if d[:4] != b'\x7fELF': return None
+    e_shoff, = struct.unpack_from('<Q', d, 0x28)
+    e_shentsize, e_shnum = struct.unpack_from('<HH', d, 0x3A)
+    shstr_idx, = struct.unpack_from('<H', d, 0x3E)
+    ss_foff, = struct.unpack_from('<Q', d, e_shoff + shstr_idx*e_shentsize + 24)
+    def secname(off): return d[ss_foff+off:].split(b'\x00')[0].decode()
+    secs = {}
+    for n in range(e_shnum):
+        o = e_shoff + n*e_shentsize
+        nm = secname(struct.unpack_from('<I', d, o)[0])
+        _, st, _, _, so, ss = struct.unpack_from('<IIQQQQ', d, o)
+        secs[nm] = (n, o, st, so, ss)
+    sym = strt = None
+    for nm, (n, o, st, so, ss) in secs.items():
+        if st == 2: sym = (so, ss)
+        if nm == '.strtab': strt = (so, ss)
+    return {'d': d, 'e_shoff': e_shoff, 'e_shentsize': e_shentsize,
+            'e_shnum': e_shnum, 'secs': secs, 'sym': sym, 'strt': strt}
+def symname(p, idx):
+    so, ss = p['sym']; sto, sts = p['strt']
+    sn, = struct.unpack_from('<I', p['d'], so + idx*24)
+    return p['d'][sto+sn:].split(b'\x00')[0].decode()
+def slots(p):
+    if '.rela.gnu.linkonce.this_module' not in p['secs']: return None
+    n, o, st, so, ss = p['secs']['.rela.gnu.linkonce.this_module']
+    out = {}
+    for i in range(ss // 24):
+        eo = so + i*24
+        r_off, r_info = struct.unpack_from('<QQ', p['d'], eo)
+        nm = symname(p, r_info >> 32)
+        if nm in ('init_module', 'cleanup_module'): out[nm] = r_off
+    return out if len(out) == 2 else None
+rp = parse(ref)
+sl = slots(rp) if rp else None
+if sl is None:
+    print('SKIP: no slot relas in reference')
+    sys.exit(1)
+p = parse(tgt)
+cur = slots(p)
+if cur is None:
+    print('SKIP: target slots unreadable')
+    sys.exit(1)
+if cur == sl:
+    print('SKIP: already matching (no-op)')
+    sys.exit(1)
+d = p['d']
+n, o, st, so, ss = p['secs']['.gnu.linkonce.this_module']
+GROW = 0x100
+need = max(sl.values()) + 8
+if need > ss:
+    ins_at = so + ss
+    d[ins_at:ins_at] = b'\x00' * GROW
+    newoff = p['e_shoff'] + GROW
+    struct.pack_into('<Q', d, 0x28, newoff)
+    for m in range(p['e_shnum']):
+        oo = newoff + m*p['e_shentsize']
+        sso, sss = struct.unpack_from('<QQ', d, oo + 24)
+        if sso >= ins_at and sss: struct.pack_into('<Q', d, oo + 24, sso + GROW)
+        if m == n: struct.pack_into('<Q', d, oo + 32, sss + GROW)
+    for nm2 in list(p['secs'].keys()):
+        n2, _, st2, _, _ = p['secs'][nm2]
+        oo2 = newoff + n2*p['e_shentsize']
+        so2, ss2 = struct.unpack_from('<QQ', d, oo2 + 24)
+        p['secs'][nm2] = (n2, oo2, st2, so2, ss2)
+        if st2 == 2: p['sym'] = (so2, ss2)
+        if nm2 == '.strtab': p['strt'] = (so2, ss2)
+rn, ro, rst, rso, rss = p['secs']['.rela.gnu.linkonce.this_module']
+for i in range(rss // 24):
+    eo = rso + i*24
+    r_off, r_info = struct.unpack_from('<QQ', d, eo)
+    nm = symname(p, r_info >> 32)
+    if nm in sl and r_off != sl[nm]: struct.pack_into('<Q', d, eo, sl[nm])
+open(tgt, 'wb').write(bytes(d))
+print('APPLIED init=%#x exit=%#x' % (sl['init_module'], sl['cleanup_module']))
+PYEOF
+)
+            rm -f /data/local/tmp/rwref.ko 2>/dev/null
+            case "$_out" in
+                APPLIED*) jlog "surgery" "dispatch slots" "$_out"; return 0 ;;
+                SKIP*) continue ;;
+                *) continue ;;
+            esac
+        done
+    done
+    jlog "surgery" "dispatch slots" "SKIPPED (no usable reference .ko)"
+    return 0
+}
+
 # 8. Load (never --force) + verify, with dmesg-feedback vermagic retry.
 # If the kernel rejects our extras guess (e.g. it expects a `modversions`
 # token we didn't bake), dmesg names the exact string it wants
@@ -409,6 +532,8 @@ try_insmod() {
     # sync first: if insmod panics the device, everything echoed so far
     # must already be on disk for post-reboot forensics (panic = no sync).
     sync 2>/dev/null
+    # Dispatch-slot surgery (6.x, CFI-off only; no-op otherwise).
+    maybe_surgery "$TMPKO"
     # shellcheck disable=SC2086
     eval insmod '"$TMPKO"' $INSMOD_OPTS 2>/dev/null
     return $?
