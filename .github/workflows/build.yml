@@ -173,9 +173,12 @@ jobs:
       - name: Build CFI module (clang for the module only)
         run: |
           cd kmod
+          clang --version | head -2
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
             CC="clang --target=aarch64-linux-gnu -fintegrated-as" \
-            CFI=1 KDIR="$GITHUB_WORKSPACE/linux-$KVER"
+            CFI=1 KDIR="$GITHUB_WORKSPACE/linux-$KVER" V=1 > /tmp/cfibuild.log 2>&1 || { tail -25 /tmp/cfibuild.log; exit 1; }
+          grep -oE "\-fsanitize=kcfi" /tmp/cfibuild.log | head -2
+          grep -E "rwbridge\.o|rwbridge\.ko|LD|MODPOST" /tmp/cfibuild.log | head -8
           cp rwbridge.ko rwbridge-cfi.ko
 
       - name: CFI checks (typeids present, pads kept, imports clean)
