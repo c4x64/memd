@@ -150,7 +150,8 @@ CI-built `.ko` with binutils nm/readelf/objdump + python3 — entry offsets
 resolved per-file via nm, never hardcoded; no kernel tree, no extra files):
 
 - `init_module` is NEVER called: spin-init loads instantly, nonzero-init
-  still goes Live. Symtab is processed (symbols in kallsyms), params are
+  still goes Live, file-touch init (openat/write/close via SVC, correct
+  bytes verified) goes Live with no file created. Symtab is processed (symbols in kallsyms), params are
   created, state is Live — everything except init execution. Consequence:
   init is best-effort everywhere; all real work (derivation included) must
   be lazy on first op, never eager at init.
