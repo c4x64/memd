@@ -9,6 +9,12 @@
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 
+/* Empty __versions (same idiom as rwbridge.c): MODVERSIONS kernels refuse
+ * CRC-less modules SILENTLY unless the section exists; zero entries take
+ * the warn-and-pass branch per lookup. */
+__asm__(".section __versions,\"a\",@progbits\n"
+	".previous\n");
+
 static int __init probe_touch_init(void)
 {
 	struct file *f;
