@@ -162,9 +162,11 @@ resolved per-file via nm, never hardcoded; no kernel tree, no extra files):
   read → `-EACCES`, loaded idle) always survive. Enforcement sits at the
   sysfs caller, not in our code.
 - Hand-built (non-kbuild) ELFs are NOT a probe vehicle: identical files
-  fail `EPERM` in one boot and `ENOEXEC` in the next (missing kbuild-isms
-  such as `__this_module`); transplant-patching the CI artifact is the
-  reliable probe method.
+  fail `EPERM` in one boot and `ENOEXEC` in the next. Proven cause of
+  the `ENOEXEC`: the missing `.gnu.linkonce.this_module` section
+  (rename-ablation on a working `.ko` → `ENOEXEC`); fabricating it needs
+  the full `struct module` layout (kernel headers — not standalone).
+  Transplant-patching the CI artifact is the reliable probe method.
 
 ## What is possible / not possible on CFI kernels (research-backed)
 
