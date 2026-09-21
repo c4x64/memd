@@ -121,3 +121,69 @@ jobs:
           path: |
             kmod/rwbridge.ko
             run.sh
+
+  cfi:
+    runs-on: ubuntu-latest
+    env:
+      ARCH: arm64
+      KVER: 5.10.209
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang lld llvm dwarves \
+            libssl-dev libelf-dev bison flex bc
+
+      - name: Fetch kernel source (headers donor only)
+        run: |
+          for try in 1 2 3; do
+            for base in \
+              "https://cdn.kernel.org/pub/linux/kernel/v5.x" \
+              "https://mirrors.edge.kernel.org/pub/linux/kernel/v5.x" \
+              "https://mirrors.tuna.tsinghua.edu.cn/kernel/v5.x"; do
+              wget -q --timeout=90 "$base/linux-$KVER.tar.xz" && break 2
+              rm -f linux-$KVER.tar.xz
+            done
+            echo "mirror pass $try failed; retrying"; sleep 10
+          done
+          [ -f linux-$KVER.tar.xz ] || { echo "no source for $KVER"; exit 1; }
+          tar xf linux-$KVER.tar.xz
+
+      - name: Prepare tree (same donor neutralization as universal)
+        run: |
+          cd linux-$KVER
+          PAD=$(python3 -c "print('x'*54)")
+          make ARCH=$ARCH LLVM=1 defconfig
+          ./scripts/config --disable LOCALVERSION_AUTO
+          ./scripts/config --disable MODVERSIONS
+          ./scripts/config --enable MODULES
+          ./scripts/config --enable MODULE_UNLOAD
+          make ARCH=$ARCH LLVM=1 olddefconfig
+          make ARCH=$ARCH LLVM=1 EXTRAVERSION="-${PAD}" modules_prepare scripts
+          grep -rn "mbranch-protection" arch/arm64/Makefile Makefile 2>/dev/null | head -3 || true
+          sed -i "s/-mbranch-protection=[^ ']*/ /g" arch/arm64/Makefile Makefile 2>/dev/null || true
+
+      - name: Build CFI module
+        run: |
+          cd kmod
+          make ARCH=$ARCH LLVM=1 CFI=1 KDIR="$GITHUB_WORKSPACE/linux-$KVER"
+          cp rwbridge.ko rwbridge-cfi.ko
+
+      - name: CFI checks (typeids present, pads kept, imports clean)
+        run: |
+          cd kmod
+          llvm-nm -u rwbridge-cfi.ko | awk '{print $2}' | sort -u | tee /tmp/cfi.undef
+          python3 check_universal.py rwbridge-cfi.ko /tmp/cfi.undef
+          N=$(llvm-nm rwbridge-cfi.ko | grep -c __kcfi_typeid); echo "kcfi typeids: $N"; [ "$N" -gt 0 ]
+
+      - name: Upload artifact (CFI flavor + installer)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rwbridge-cfi
+          path: |
+            kmod/rwbridge-cfi.ko
+            run.sh

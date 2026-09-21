@@ -81,6 +81,9 @@ else
     done
 fi
 [ -n "$KO" ] || die "rwbridge.ko not found (pass path as \$1 or place next to run.sh)"
+# Flavor: filename decides (CFI instrumented or plain universal).
+CFIFLAVOR="no"
+case "$KO" in *cfi*) CFIFLAVOR="yes";; esac
 
 KVER=$(uname -r)
 log "kernel: $KVER"
@@ -102,6 +105,16 @@ if [ "$CFI" = "yes" ]; then
     log "WARNING: CFI-enforcing kernel — every sysfs access reboots;"
     log "  this kernel needs a CFI build (source needs no change, flags only)."
     log "  Confirm via /proc/config.gz (dmesg does not survive reboot). Continuing in 3s..."
+    # Prefer the CFI flavor artifact when present (explicit $1 still wins).
+    if [ -z "$1" ]; then
+        for _c in "${SCRIPT_DIR}/rwbridge-cfi.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge-cfi.ko"; do
+            if [ -f "$_c" ]; then
+                KO="$_c"; CFIFLAVOR="yes"
+                log "CFI flavor selected: $KO"
+                break
+            fi
+        done
+    fi
     sleep 3
 else
     log "CFI: $CFI (proceeding)"
@@ -412,8 +425,11 @@ dump_log() {
 maybe_surgery() {
     _ko="$1"
     _kmajor=$(uname -r 2>/dev/null | cut -d. -f1)
-    if [ "$CFI" = "yes" ]; then
-        jlog "surgery" "dispatch slots" "SKIPPED (CFI: dispatch would load-panic)"
+    # Uninstrumented artifact on CFI kernel: dispatch would load-panic,
+    # strictly worse than silent-Live. The CFI FLAVOR is instrumented,
+    # so dispatch is safe there — surgery applies to it normally.
+    if [ "$CFI" = "yes" ] && [ "$CFIFLAVOR" != "yes" ]; then
+        jlog "surgery" "dispatch slots" "SKIPPED (CFI + plain artifact: dispatch would load-panic)"
         return 0
     fi
     if [ "$_kmajor" != "6" ]; then

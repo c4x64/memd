@@ -27,6 +27,15 @@ ccflags-y += -fno-builtin-memcpy -fno-stack-protector -fno-stack-check -fno-buil
 # this source emits no other 8.5+ instructions (no atomics — spinlock is
 # inline-asm LDXR/STXR; mem* are library calls).
 CFLAGS_rwbridge.o := -mbranch-protection=bti -march=armv8.5-a
+# CFI flavor (CFI=1): kcfi typeids so kernel->module indirect calls pass
+# the type check on enforcing kernels. Append-only (BTI pads above stay).
+# kcfi is clang-only: CI cfi job builds with LLVM=1. Typeids are
+# canonical prototype hashes (compiler-version independent in theory —
+# verified live on the CFI test kernel, never assumed). No new imports
+# (typeids are local labels), so the allowlist below still holds.
+ifdef CFI
+CFLAGS_rwbridge.o += -fsanitize=kcfi
+endif
 
 all:
 	@if [ -z "$(KDIR)" ]; then \
