@@ -271,9 +271,19 @@ static void put_dec_u32(unsigned long off, u32 v)
 {
     char tmp[12];
     int i = 0;
+    /* Bound to rw_buf (future callers must not assume the single off=0
+     * call site stays the only one). */
+    if (off >= RW_MAX_SIZE) {
+        rw_text_len = RW_MAX_SIZE;
+        return;
+    }
     if (!v) { rw_buf[off++] = '0'; rw_text_len = off; return; }
     while (v) { tmp[i++] = '0' + v % 10; v /= 10; }
-    while (i) rw_buf[off++] = tmp[--i];
+    while (i) {
+        if (off >= RW_MAX_SIZE)
+            break;
+        rw_buf[off++] = tmp[--i];
+    }
     rw_text_len = off;
 }
 
@@ -306,10 +316,41 @@ static void put_dec_u32(unsigned long off, u32 v)
     "   .popsection\n" \
     "   b 4%=f\n" \
     "3%=:\n" \
+    "   mov %0, xzr\n" \
     "4%=:\n" \
     : "=&r"(__v), "=&r"(__ok) : "r"(_addr) : "memory"); \
     (_dst) = __v; (_ok) = __ok; \
 } while (0)
+
+/* Guarded store (write-side mirror of SAFE_READ64): faults route to the
+ * fixup reporting short count instead of oopsing. Used by both kva write
+ * paths (stale munmap/exit races, non-RAM linear aliases). */
+static unsigned long safe_write_range(void *dst, const u8 *src,
+                                      unsigned long n)
+{
+    unsigned char *d = dst;
+    unsigned long i;
+    for (i = 0; i < n; i++) {
+        int ok = 0;
+        asm volatile(
+        "   mov %w0, wzr\n" \
+        "1%=: strb %w2, [%1]\n" \
+        "   mov %w0, #1\n" \
+        "2%=:\n" \
+        "   .pushsection __ex_table,\"a\"\n" \
+        "   .align 2\n" \
+        "   .long (1%=b - .)\n" \
+        "   .long (3%=f - .)\n" \
+        "   .popsection\n" \
+        "   b 4%=f\n" \
+        "3%=:\n" \
+        "4%=:\n" \
+        : "=&r"(ok) : "r"(d + i), "r"(src[i]) : "memory");
+        if (!ok)
+            break;
+    }
+    return i;
+}
 
 /* ── init-time derivation ────────────────────────────────────────────────*/
 
@@ -323,18 +364,38 @@ static void put_dec_u32(unsigned long off, u32 v)
  * small number (< 4194304). On arm64 Linux, task_struct has pid and
  * tgid adjacent with pid == tgid for thread group leaders.
  */
+/* Read one u32 with its own fixup (no containing-qword over-read: a u32
+ * in the last 4 bytes of a mapped page with unmapped next must not fault
+ * the whole 8B load). Callers pin aligned offsets (see K/V/E gates). */
+#define SAFE_READ32(_dst, _addr, _ok) do { \
+    u32 __v = 0; int __ok = 0; \
+    asm volatile( \
+    "   mov %w1, wzr\n" \
+    "1%=: ldr %w0, [%2]\n" \
+    "   mov %w1, #1\n" \
+    "2%=:\n" \
+    "   .pushsection __ex_table,\"a\"\n" \
+    "   .align 2\n" \
+    "   .long (1%=b - .)\n" \
+    "   .long (3%=f - .)\n" \
+    "   .popsection\n" \
+    "   b 4%=f\n" \
+    "3%=:\n" \
+    "   mov %w0, wzr\n" \
+    "4%=:\n" \
+    : "=&r"(__v), "=&r"(__ok) : "r"(_addr) : "memory"); \
+    (_dst) = __v; (_ok) = __ok; \
+} while (0)
+
 /* Read one u32 at any alignment via its containing aligned u64. */
 static int read_u32_at(unsigned long addr, u32 *out)
 {
-    unsigned long base = addr & ~7UL;
-    unsigned long w = 0;
+    u32 v = 0;
     int ok = 0;
-    SAFE_READ64(w, base, ok);
+    SAFE_READ32(v, addr, ok);
     if (!ok)
         return -1;
-    if (addr & 4)
-        w >>= 32;
-    *out = (u32)w;
+    *out = v;
     return 0;
 }
 
@@ -456,6 +517,10 @@ static int find_mm_candidates(unsigned long cur, unsigned long po)
             continue;
         if (candidate <= po)
             continue;
+        /* Wrap guard: poison candidate near ~0UL would wrap candidate+j*8
+         * into low VA (still guarded, but could alias mapped low pages). */
+        if (candidate > ~0UL - MM_SCAN_RANGE)
+            continue;
 
         for (j = 0; j < MM_SCAN_RANGE / 8; j++) {
             unsigned long q = 0;
@@ -561,9 +626,11 @@ static int find_tasks_offset(unsigned long cur, unsigned long pid_off)
         if (prv - page_off > 0x40000000UL)
             continue;
 
-        /* Compute task bases */
-        nbase = nxt - t;
-        pbase = prv - t;
+        /* Compute task bases: t is a u64 SLOT index, offsets are bytes.
+         * (Legacy unit bug fixed: nxt-t mixed bytes with slot index and
+         * never proved T>0; D-op uses the correct byte form.) */
+        nbase = nxt - (unsigned long)t * 8UL;
+        pbase = prv - (unsigned long)t * 8UL;
 
         if (nbase <= page_off || pbase <= page_off)
             continue;
@@ -573,12 +640,12 @@ static int find_tasks_offset(unsigned long cur, unsigned long pid_off)
         pp = (unsigned long *)pbase;
         back = 0; fwd = 0; backok = 0; fwdok = 0;
         SAFE_READ64(back, (unsigned long)&np[t + 1], backok);
-        if (!backok || back != cur + t)
+        if (!backok || back != cur + (unsigned long)t * 8UL)
             continue;
 
         /* Verify forward: pbase->next should point to cur+t */
         SAFE_READ64(fwd, (unsigned long)&pp[t], fwdok);
-        if (!fwdok || fwd != cur + t)
+        if (!fwdok || fwd != cur + (unsigned long)t * 8UL)
             continue;
 
         return t * 8;
@@ -1127,7 +1194,10 @@ static long linear_write_range(unsigned long pgd_va, unsigned long addr,
         if (slice > page_rem)
             slice = page_rem;
 
-        rw_memcpy((void *)kva, (const u8 *)src + done, slice);
+        /* Guarded store: stale munmap/exit races or non-RAM aliases fault
+         * under fixup cover (-EFAULT) instead of oopsing. */
+        if (safe_write_range((void *)kva, (const u8 *)src + done, slice) != slice)
+            return -EFAULT;
         done += slice;
     }
     return 0;
@@ -1313,9 +1383,10 @@ static long ex_access(u32 pid, unsigned long addr, void *buf,
         slice = size - done;
         if (slice > page_rem)
             slice = page_rem;
-        if (write)
-            rw_memcpy((void *)kva, (const u8 *)buf + done, slice);
-        else {
+        if (write) {
+            if (safe_write_range((void *)kva, (const u8 *)buf + done, slice) != slice)
+                return -EFAULT;
+        } else {
             r = copy_from_kernel_nofault((u8 *)buf + done, (void *)kva, slice);
             if (r)
                 return r;
@@ -1385,26 +1456,46 @@ static long rw_switch_access(u32 pid, unsigned long addr, void *buf,
 
 static inline int parse_dec(const char *s, s64 *out)
 {
-    s64 val = 0;
+    u64 val = 0;
     int neg = 0;
     if (*s == '-') { neg = 1; s++; }
-    while (*s >= '0' && *s <= '9')
-        val = val * 10 + (*s++ - '0');
-    if (neg) val = -val;
-    *out = val;
+    /* Saturating (never UB, never wraps): hostile 25-digit sizes fail the
+     * callers' bound checks instead of aliasing into 1..256. Trailing
+     * garbage (incl. echo's newline) keeps prefix semantics — callers
+     * ignore the return for that reason; only overflow is normalized. */
+    while (*s >= '0' && *s <= '9') {
+        unsigned d = (unsigned)(*s - '0');
+        if (val > ((u64)0x7FFFFFFFFFFFFFFFULL - d) / 10)
+            val = (u64)0x7FFFFFFFFFFFFFFFULL;
+        else
+            val = val * 10 + d;
+        s++;
+    }
+    *out = neg ? -(s64)val : (s64)val;
     return *s ? -1 : 0;
+}
+
+static inline int is_hex_digit(char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+           (c >= 'A' && c <= 'F');
 }
 
 static inline int parse_hex(const char *s, u64 *out)
 {
     u64 val = 0;
-    while (*s) {
+    int nd = 0;
+    /* 16-digit cap (addresses are 64-bit; longer input truncates by
+     * wraparound into a DIFFERENT valid address — fail-closed instead).
+     * Prefix semantics preserved (newline-tolerant like parse_dec). */
+    while (is_hex_digit(*s)) {
         int d;
+        if (++nd > 16)
+            break;
         if (*s >= '0' && *s <= '9') d = *s - '0';
         else if (*s >= 'a' && *s <= 'f') d = *s - 'a' + 10;
-        else if (*s >= 'A' && *s <= 'F') d = *s - 'A' + 10;
-        else break;
-        val = (val << 4) | d;
+        else d = *s - 'A' + 10;
+        val = (val << 4) | (u64)d;
         s++;
     }
     *out = val;
@@ -1582,6 +1673,15 @@ static void *rw_memcpy(void *dst, const void *src, unsigned long n)
     return dst;
 }
 
+/* Own memset: two call sites need zeroing, and a bare memset() is a
+ * kernel import (load-bearing surface). Same byte-loop idiom. */
+static void *rw_memset(void *dst, int c, unsigned long n)
+{
+    unsigned char *d = dst;
+    while (n--) *d++ = (unsigned char)c;
+    return dst;
+}
+
 /* Use these instead of kernel strlen/strchr/memcpy */
 #define strlen rw_strlen
 #define strchr rw_strchr
@@ -1634,6 +1734,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
     u64 addr = 0, wvalue = 0;
     u64 exv = 0;
     long r;
+    long dr = 0;
 
     /* Fresh current-task every op: each sysfs write runs in a DIFFERENT
      * writer process, so a cur_task captured by an earlier op (or an
@@ -1654,16 +1755,37 @@ int rw_set(const char *val, const struct kernel_param *kp)
          * 'V' (verify-u32) also bypasses: single guarded read, no walk.
          * 'E'/'Y' (explicit-offset R/W) bypass: stateless, map arrives
          * per-op as arguments, no cached pins touched. */
-        derive_all();
+    if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q' && val[0] != 'D' && val[0] != 'C') {
+        /* Lazy first-use derivation: some loaders drop init sections
+         * (the initcall pointer lives in one, so init never runs, yet
+         * state=Live with pristine data). Deriving here makes operation
+         * independent of init execution; module_init stays as the eager
+         * fast-path where loaders are sane. Idempotent: a second caller
+         * while one derives just recomputes the same values.
+         * 'F' (fault probe) bypasses derive: it tests the fixup armor
+         * itself and must run even when derive is broken/unknown.
+         * 'V' (verify-u32) also bypasses: single guarded read, no walk.
+         * 'E'/'Y' (explicit-offset R/W) bypass: stateless, map arrives
+         * per-op as arguments, no cached pins touched. */
+        dr = derive_all();
     }
     if (!derive_ok && val[0] != 'F' && val[0] != 'T' && val[0] != 'S' && val[0] != 'V' && val[0] != 'E' && val[0] != 'Y' && val[0] != 'Q' && val[0] != 'D' && val[0] != 'C') {
-        rw_status = -EPERM;
+        /* Propagate the real cause (was: always -EPERM, hiding
+         * -ENOENT/-EINVAL/-ENODEV and the failing step's stage). */
+        rw_status = (dr < 0) ? dr : -EPERM;
         STAGE("no_derive");
         return 0;
     }
 
     strncpy_from_kernel(buf, val, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
+    /* Reject oversize input outright: silent truncation could execute a
+     * DIFFERENT command (cut mid-address/value) than the caller sent. */
+    if (rw_strlen(val) >= sizeof(buf)) {
+        rw_status = -E2BIG;
+        STAGE("toolong");
+        return 0;
+    }
     p = buf;
     op = *p++;
     if (*p == ',') p++;
@@ -1694,15 +1816,26 @@ int rw_set(const char *val, const struct kernel_param *kp)
         parse_dec(f[0], &pid_s64);
         parse_hex(f[1], &addr);
         parse_dec(f[2], &size_s64);
+        /* Negative pids cast to huge u32 and pass pid==0 below, walking
+         * the full list to -ESRCH. Cap to the kernel pid range up front
+         * (matches st_pid's own bound). */
+        if (pid_s64 <= 0 || pid_s64 > 4194304)
+            goto bad;
         pid = (u32)pid_s64;
 
         if (op == 'W') {
-            /* parse hex value after size */
-            if (*p == ',') p++;
+            /* Value field is mandatory: without it parse_hex would read
+             * "" (or the newline) as 0 and silently write zeros. Require
+             * the comma plus at least one hex digit (newline-tolerant). */
+            if (*p != ',')
+                goto bad;
+            p++;
+            if (!is_hex_digit(*p))
+                goto bad;
             parse_hex(p, &wvalue);
             if (size_s64 < 1 || size_s64 > 8) goto bad;
         } else {
-            if (size_s64 < 1 || size_s64 > (s64)RW_MAX_SIZE) goto bad;
+            if (size_s64 < 1 || size_s64 > 127) goto bad;
         }
 
         if (pid == 0 || addr == 0) goto bad;
@@ -1744,7 +1877,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
              * rw_buf into itself (read/write overlap corrupts past
              * byte 0). Same fix as the E-case. */
             u8 rtmp[256];
-            memset(rtmp, 0, sizeof(rtmp));
+            rw_memset(rtmp, 0, sizeof(rtmp));
             r = rw_switch_access(pid, addr, rtmp, (unsigned long)size_s64, 0);
             if (r == 0) {
                 rw_status = 0;
@@ -1806,6 +1939,8 @@ int rw_set(const char *val, const struct kernel_param *kp)
         parse_dec(f[0], &pid_s64);
         parse_hex(f[1], &addr);
         parse_dec(f[2], &size_s64);
+        if (pid_s64 <= 0 || pid_s64 > 4194304)
+            goto bad;
         pid = (u32)pid_s64;
         parse_hex(f[3], &exv); ex_pid_off = (unsigned long)exv;
         parse_hex(f[4], &exv); ex_tasks_off = (unsigned long)exv;
@@ -1838,17 +1973,17 @@ int rw_set(const char *val, const struct kernel_param *kp)
                 } else if (nrest == 2) {
                     parse_hex(p, &exv); ex_owner = (unsigned long)exv;
                     if (ex_owner >= SCAN_RANGE) goto bad;
-                    p = strchr(p, ',') + 1;
+                    p = strchr(p, ','); if (!p) goto bad; p++;
                 } else if (nrest == 4) {
                     parse_hex(p, &exv); ex_owner = (unsigned long)exv;
                     if (ex_owner >= SCAN_RANGE) goto bad;
-                    p = strchr(p, ',') + 1;
+                    p = strchr(p, ','); if (!p) goto bad; p++;
                     parse_dec(p, (s64 *)&exv);
                     ex_pshift = (unsigned long)exv;
-                    p = strchr(p, ',') + 1;
+                    p = strchr(p, ','); if (!p) goto bad; p++;
                     parse_dec(p, (s64 *)&exv);
                     ex_vabits = (unsigned long)exv;
-                    p = strchr(p, ',') + 1;
+                    p = strchr(p, ','); if (!p) goto bad; p++;
                 } else {
                     goto bad;
                 }
@@ -1860,10 +1995,10 @@ int rw_set(const char *val, const struct kernel_param *kp)
                 } else if (nrest == 3) {
                     parse_hex(p, &exv); ex_owner = (unsigned long)exv;
                     if (ex_owner >= SCAN_RANGE) goto bad;
-                    p = strchr(p, ',') + 1;
+                    p = strchr(p, ','); if (!p) goto bad; p++;
                     parse_dec(p, (s64 *)&exv);
                     ex_pshift = (unsigned long)exv;
-                    p = strchr(p, ',') + 1;
+                    p = strchr(p, ','); if (!p) goto bad; p++;
                     parse_dec(p, (s64 *)&exv);
                     ex_vabits = (unsigned long)exv;
                     p += strlen(p);
@@ -1893,13 +2028,22 @@ int rw_set(const char *val, const struct kernel_param *kp)
         if ((ex_po == 0xffffff8000000000UL && ex_vabits != 39) ||
             (ex_po == 0xFFFF800000000000UL && ex_vabits != 48))
             goto bad;
+        /* Page bases are always 4G-aligned (all standard page_offsets have
+         * low 32 bits zero); an explicit ex_po that isn't (e.g. all-ones
+         * with explicit vabits) dodges the App-VA gate below, so refuse. */
+        if ((ex_po & 0xFFFFFFFFUL) != 0)
+            goto bad;
 
         if (op == 'Y') {
-            if (*p == '\0') goto bad;
+            /* Value field is mandatory (same missing-value hazard as W):
+             * a bare newline would parse as 0 and silently write zeros.
+             * Require at least one hex digit (newline-tolerant). */
+            if (!is_hex_digit(*p))
+                goto bad;
             parse_hex(p, &wvalue);
             if (size_s64 < 1 || size_s64 > 8) goto bad;
         } else {
-            if (size_s64 < 1 || size_s64 > 128) goto bad;
+            if (size_s64 < 1 || size_s64 > 127) goto bad;
         }
 
         if (pid == 0 || addr == 0) goto bad;
@@ -1930,7 +2074,7 @@ int rw_set(const char *val, const struct kernel_param *kp)
         STAGE(op == 'E' ? "eread" : "ewrite");
 
         if (op == 'E') {
-            memset(ex_tmp, 0, sizeof(ex_tmp));
+            rw_memset(ex_tmp, 0, sizeof(ex_tmp));
             r = ex_access(pid, addr, ex_tmp, (unsigned long)size_s64, 0,
                           ex_pid_off, ex_tasks_off, ex_mm_off, ex_pgd_off,
                           ex_po, ex_ph, ex_owner, ex_pshift, ex_vabits);
@@ -1964,6 +2108,14 @@ int rw_set(const char *val, const struct kernel_param *kp)
         unsigned long t = cur;
         int i, found = 0;
 
+        /* Empty needle matches everything (strstr(x,"")==1) — reject. */
+        if (!*sub) {
+            rw_status = -EINVAL;
+            rw_text_len = 0;
+            STAGE("bad-sub");
+            rb_spin_unlock();
+            return 0;
+        }
         STAGE("findpid");
         for (i = 0; i < TASK_WALK_MAX && !found; i++) {
             /* Snapshot comm locally first: the task may exit mid-walk, so
@@ -2201,6 +2353,8 @@ int rw_set(const char *val, const struct kernel_param *kp)
         {
             char *c2;
             parse_dec(p, &pid_s64);
+            if (pid_s64 <= 0 || pid_s64 > 4194304)
+                goto bad;
             pid = (u32)pid_s64;
             c2 = strchr(p, ',');
             if (!c2) goto bad;
@@ -2301,7 +2455,8 @@ wnext:
             parse_hex(c3 + 1, &qoff);
         }
         qaddr = ((qhi << 32) | (qlo & 0xFFFFFFFFUL)) + qoff;
-        if (qaddr == 0) goto bad;
+        if (qaddr == 0 || qaddr < qoff)
+            goto bad;
         SAFE_READ64(qv, qaddr, qok);
         if (qok) {
             rw_status = 1;
@@ -2324,12 +2479,23 @@ wnext:
         u64 koff = 0;
         unsigned long kw = 0;
         int kok = 0;
-        parse_hex(p, &koff);
-        if (koff >= SCAN_RANGE) {
-            rw_status = -EINVAL;
-            rw_text_len = 0;
-            rb_spin_unlock();
-            return 0;
+        /* Empty ("K,"/"K,0x"), zero, unaligned, and out-of-range pins are
+         * meaningless (task+0 is the head, not pid; odd offsets splice
+         * structs) — reject up front instead of pinning garbage. */
+        {
+            const char *ks = p;
+            int knd = 0;
+            while (is_hex_digit(*ks)) {
+                knd++;
+                ks++;
+            }
+            parse_hex(p, &koff);
+            if (knd == 0 || koff == 0 || (koff & 3) || koff >= SCAN_RANGE) {
+                rw_status = -EINVAL;
+                rw_text_len = 0;
+                rb_spin_unlock();
+                return 0;
+            }
         }
         SAFE_READ64(kw, cur_task + (unsigned long)koff, kok);
         if (!kok) {
@@ -2373,8 +2539,20 @@ wnext:
                     cap = cap * 10 + (*dot - '0');
                     dot++;
                 }
-                if (cap > 0 && cap < SCAN_RANGE / 4)
-                    dbg_scancap = cap;
+                if (cap <= 0 || cap > SCAN_RANGE / 4) {
+                    /* Nonsense/empty/huge caps used to mean full sweep
+                     * (the poison-word wedge the cap exists to avoid).
+                     * Reject empties, clamp huge to the max window. */
+                    if (cap <= 0) {
+                        rw_status = -EINVAL;
+                        rw_text_len = 0;
+                        STAGE("bad-cap");
+                        rb_spin_unlock();
+                        return 0;
+                    }
+                    cap = SCAN_RANGE / 4;
+                }
+                dbg_scancap = cap;
             }
         }
         if (sn > 7 || (sn == 0 && p[0] != '0')) {
@@ -2476,7 +2654,7 @@ int rw_out_get(char *buf, const struct kernel_param *kp)
 {
     long n = rw_text_len;
     if (n < 0) n = 0;
-    if (n > (long)(RW_MAX_SIZE * 2)) n = RW_MAX_SIZE * 2;
+    if (n > (long)RW_MAX_SIZE) n = RW_MAX_SIZE;
     rw_memcpy(buf, rw_buf, n);
     buf[n] = '\0';
     return (int)n;

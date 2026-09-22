@@ -19,6 +19,9 @@ obj-m += rwbridge.o
 # panic_on_oops=1). Pads decode as NOPs where BTI is unsupported, so one
 # build stays universal. PAC deliberately excluded (no key dependency).
 ccflags-y += -fno-builtin-memcpy -fno-stack-protector -fno-stack-check -fno-builtin -mbranch-protection=bti
+# -ffreestanding -fno-builtin: our byte-loop helpers (rw_memcpy/rw_memset)
+# must never be re-emitted as mem* calls (import surface + load refusal
+# on trees without them). Per-object form below is the enforced one.
 # Per-object form: strongest kbuild guarantee (ccflags-y alone was observed
 # to never reach the gcc line on some trees). Duplicate value = harmless.
 # -march=armv8.5-a is REQUIRED for the bti flag to take effect at all: on
@@ -26,7 +29,7 @@ ccflags-y += -fno-builtin-memcpy -fno-stack-protector -fno-stack-check -fno-buil
 # note, no error). Safe on older CPUs: BTI hints decode as NOP pre-8.5, and
 # this source emits no other 8.5+ instructions (no atomics — spinlock is
 # inline-asm LDXR/STXR; mem* are library calls).
-CFLAGS_rwbridge.o := -mbranch-protection=bti -march=armv8.5-a
+CFLAGS_rwbridge.o := -mbranch-protection=bti -march=armv8.5-a -ffreestanding -fno-builtin
 # CFI flavor (CFI=1): kcfi typeids so kernel->module indirect calls pass
 # the type check on enforcing kernels. Append-only (BTI pads above stay).
 # kcfi is clang-only: CI cfi job builds with LLVM=1. Typeids are
