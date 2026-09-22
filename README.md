@@ -140,7 +140,9 @@ vermagic fits the in-place runtime patch.
   CFI starting with 6.1 GKI):
   - KCFI (6.1+, incl. 6.6/6.12): covered by the `rwbridge-cfi` flavor
     (canonical typeids — CI clang-18 build validated live on 6.1;
-    cross-version by construction). `run.sh` selects it automatically.
+    cross-version by construction). Selection contract: CFI + 6.1+ →
+    cfi build; older and non-CFI → normal build (`run.sh` applies it
+    automatically; the packed binary embeds both).
   - Classic CFI, LTO-based (5.10/5.15 GKI and vendor backports):
     explicit NO-GO — classic CFI couples modules to the kernel's exact
     LTO build, infeasible standalone. Nothing to build here.
