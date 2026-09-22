@@ -136,12 +136,17 @@ vermagic fits the in-place runtime patch.
   stays 4K-only and refuses anything else cleanly. No 16K runtime
   verification exists yet in this project — the contract is
   build-verified (CI) and refuse-on-mismatch by construction.
-- CFI-enforcing kernels (`CONFIG_CFI_CLANG=y` in `/proc/config.gz`):
-  every kernel→module sysfs access and `rmmod`/exit trap deterministically
-  (each op reboots, not just the first). `run.sh` warns and continues;
-  without `pstore`/ramoops the panic string is lost on reboot (dmesg does
-  not survive), so the config flag itself is the diagnosis. The source
-  needs no change for a future CFI flavor build (flags only).
+- CFI-enforcing kernels, two generations (AOSP: KCFI replaces classic
+  CFI starting with 6.1 GKI):
+  - KCFI (6.1+, incl. 6.6/6.12): covered by the `rwbridge-cfi` flavor
+    (canonical typeids — CI clang-18 build validated live on 6.1;
+    cross-version by construction). `run.sh` selects it automatically.
+  - Classic CFI, LTO-based (5.10/5.15 GKI and vendor backports):
+    explicit NO-GO — classic CFI couples modules to the kernel's exact
+    LTO build, infeasible standalone. Nothing to build here.
+  On KCFI kernels every uninstrumented callback traps deterministically;
+  without `pstore` the panic string is lost on reboot (dmesg does not
+  survive), so the config flag itself is the diagnosis.
 
 ## Loader-contract map (proven 2026-09-20, `6.1.23-android14-4-...` AVD)
 
