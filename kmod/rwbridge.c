@@ -1623,6 +1623,233 @@ static int ptr_protected_sys(unsigned long addr, unsigned long size)
     return 0;                           /* app VA: isolated, cannot crash system */
 }
 
+/* ── TEMPORARY resolver + X op (revert after experiment) ──────────────
+ * Zero-import kallsyms resolver (reviewed design): exact kernel
+ * prototypes (internal KCFI checks compare canonical hashes — loose
+ * typedefs would trap), .long relative ex_table, ADR anchor, bounded
+ * scan, linux_banner self-check gate. Static ctx cached across ops. */
+typedef unsigned char xu8;
+typedef unsigned short xu16;
+typedef unsigned int xu32;
+typedef unsigned long long xu64;
+typedef unsigned long xulong;
+typedef long xslong;
+struct file;
+typedef unsigned short xumode_t;
+typedef int (*xclose_t)(struct file *, void *);
+typedef xslong (*xwrite_t)(struct file *, const void *, xulong, long long *);
+typedef struct file *(*xopen_t)(const char *, int, xumode_t);
+struct xksym_ctx {
+    xulong num_syms, names, token_table, token_index, addresses;
+    int relative;
+    xulong relative_base;
+};
+static int xsafe_r32(xulong addr, xu32 *out)
+{
+    xu32 val; int ok;
+    __asm__ volatile(
+        "1: ldr  %w[val], [%[a]]\n"
+        "   mov  %w[ok],  #1\n"
+        "   b    3f\n"
+        "2: mov  %w[ok],  #0\n"
+        "3:\n"
+        ".pushsection __ex_table, \"a\"\n"
+        ".align 3\n"
+        ".long (1b - .)\n"
+        ".long (2b - .)\n"
+        ".popsection\n"
+        : [val]"=r"(val), [ok]"=r"(ok) : [a]"r"(addr) : "memory");
+    *out = val;
+    return ok;
+}
+static int xsafe_r16(xulong addr, xu16 *out)
+{
+    xu16 val; int ok;
+    __asm__ volatile(
+        "1: ldrh %w[val], [%[a]]\n"
+        "   mov  %w[ok],  #1\n"
+        "   b    3f\n"
+        "2: mov  %w[ok],  #0\n"
+        "3:\n"
+        ".pushsection __ex_table, \"a\"\n"
+        ".align 3\n"
+        ".long (1b - .)\n"
+        ".long (2b - .)\n"
+        ".popsection\n"
+        : [val]"=r"(val), [ok]"=r"(ok) : [a]"r"(addr) : "memory");
+    *out = val;
+    return ok;
+}
+static int xsafe_r8(xulong addr, xu8 *out)
+{
+    xu8 val; int ok;
+    __asm__ volatile(
+        "1: ldrb %w[val], [%[a]]\n"
+        "   mov  %w[ok],  #1\n"
+        "   b    3f\n"
+        "2: mov  %w[ok],  #0\n"
+        "3:\n"
+        ".pushsection __ex_table, \"a\"\n"
+        ".align 3\n"
+        ".long (1b - .)\n"
+        ".long (2b - .)\n"
+        ".popsection\n"
+        : [val]"=r"(val), [ok]"=r"(ok) : [a]"r"(addr) : "memory");
+    *out = val;
+    return ok;
+}
+static int xsafe_r64(xulong addr, xu64 *out)
+{
+    xu64 val; int ok;
+    __asm__ volatile(
+        "1: ldr  %[val], [%[a]]\n"
+        "   mov  %w[ok],  #1\n"
+        "   b    3f\n"
+        "2: mov  %w[ok],  #0\n"
+        "3:\n"
+        ".pushsection __ex_table, \"a\"\n"
+        ".align 3\n"
+        ".long (1b - .)\n"
+        ".long (2b - .)\n"
+        ".popsection\n"
+        : [val]"=r"(val), [ok]"=r"(ok) : [a]"r"(addr) : "memory");
+    *out = val;
+    return ok;
+}
+static int xstrcmp2(const char *a, const char *b)
+{
+    while (*a && *b && *a == *b) { a++; b++; }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+static struct xksym_ctx xg_ctx;
+static int xg_ok;
+static xulong xfind_anchor(void)
+{
+    xulong here, end, addr;
+    __asm__ volatile("adr %0, ." : "=r"(here));
+    here &= ~(4096UL - 1);
+    end = here - (32UL * 1024 * 1024);
+    if (end > here) end = 0;
+    for (addr = here; addr > end; addr -= 4096UL) {
+        xu32 c; xu8 fb;
+        if (!xsafe_r32(addr, &c)) continue;
+        if (c < 100000 || c > 300000) continue;
+        if (!xsafe_r8(addr + 4, &fb)) continue;
+        if (fb < 2 || fb > 16) continue;
+        return addr;
+    }
+    return 0;
+}
+static int xdecompress(struct xksym_ctx *ctx, xulong noff, char *out, int outsz)
+{
+    xu8 len; int pos = 0; xu32 j;
+    if (!xsafe_r8(ctx->names + noff, &len)) return 0;
+    noff++;
+    for (j = 0; j < len; j++) {
+        xu8 ti; xu16 to; xulong tp; xu8 c;
+        if (!xsafe_r8(ctx->names + noff + j, &ti)) return 0;
+        if (!xsafe_r16(ctx->token_index + ti * 2, &to)) return 0;
+        tp = ctx->token_table + to;
+        while (1) {
+            if (!xsafe_r8(tp++, &c)) return 0;
+            if (!c) break;
+            if (pos < outsz - 1) out[pos++] = c;
+        }
+    }
+    out[pos] = '\0';
+    return 1;
+}
+static int xlocate(struct xksym_ctx *ctx, xulong nb, xu32 n)
+{
+    xulong off = 0; xu32 i; xulong nm; xu64 first; xu64 base;
+    for (i = 0; i < n; i++) {
+        xu8 len;
+        if (!xsafe_r8(nb + off, &len)) return 0;
+        off += 1 + len;
+    }
+    off = (off + 3) & ~3UL;
+    off += ((n + 255) / 256) * 4;
+    off = (off + 3) & ~3UL;
+    ctx->token_table = nb + off;
+    i = 0;
+    while (i < 256) {
+        xu8 c;
+        if (!xsafe_r8(nb + off, &c)) return 0;
+        off++;
+        if (!c) i++;
+    }
+    off = (off + 1) & ~1UL;
+    ctx->token_index = nb + off;
+    off += 512;
+    off = (off + 7) & ~7UL;
+    ctx->addresses = nb + off;
+    if (!xsafe_r64(ctx->addresses, &first)) return 0;
+    if (first < 0x1000000ULL) {
+        ctx->relative = 1;
+        if (!xsafe_r64(ctx->addresses - 8, &base)) return 0;
+        ctx->relative_base = (xulong)base;
+    } else {
+        ctx->relative = 0;
+        ctx->relative_base = 0;
+    }
+    nm = 0; (void)nm;
+    return 1;
+}
+static xulong xaddr_idx(struct xksym_ctx *ctx, xu32 idx)
+{
+    if (ctx->relative) {
+        xu32 o;
+        if (!xsafe_r32(ctx->addresses + idx * 4, &o)) return 0;
+        return ctx->relative_base + (xslong)(int)o;
+    }
+    {
+        xu64 a;
+        if (!xsafe_r64(ctx->addresses + idx * 8, &a)) return 0;
+        return (xulong)a;
+    }
+}
+static xulong xresolve(struct xksym_ctx *ctx, const char *name)
+{
+    xu32 i; xulong noff = 0;
+    for (i = 0; i < (xu32)ctx->num_syms; i++) {
+        char sym[128]; xu8 len;
+        if (!xsafe_r8(ctx->names + noff, &len)) return 0;
+        if (!xdecompress(ctx, noff, sym, sizeof(sym))) return 0;
+        if (xstrcmp2(sym + 1, name) == 0)
+            return xaddr_idx(ctx, i);
+        noff += 1 + len;
+    }
+    return 0;
+}
+static int xselfcheck(struct xksym_ctx *ctx)
+{
+    xulong ba; xu64 ptr; char buf[13]; int i; xu8 c;
+    ba = xresolve(ctx, "linux_banner");
+    if (!ba) return 0;
+    if (!xsafe_r64(ba, &ptr) || !ptr) return 0;
+    for (i = 0; i < 12; i++) {
+        if (!xsafe_r8(ptr + i, &c)) return 0;
+        buf[i] = c;
+    }
+    buf[12] = '\0';
+    for (i = 0; i < 12; i++)
+        if (buf[i] != "Linux versio"[i]) return 0;
+    return 1;
+}
+static int xsetup(void)
+{
+    xulong a; xu32 n;
+    if (xg_ok) return 1;
+    a = xfind_anchor();
+    if (!a) return 0;
+    if (!xsafe_r32(a, &n)) return 0;
+    xg_ctx.num_syms = n;
+    xg_ctx.names = a + 4;
+    if (!xlocate(&xg_ctx, a + 4, n)) return 0;
+    if (!xselfcheck(&xg_ctx)) return 0;
+    xg_ok = 1;
+    return 1;
+}
 
 int rw_set(const char *val, const struct kernel_param *kp)
 {
@@ -2090,6 +2317,49 @@ int rw_set(const char *val, const struct kernel_param *kp)
             rw_status = -EFAULT;
             rw_text_len = 0;
         }
+        rb_spin_unlock();
+        return 0;
+    }
+
+    case 'X': {
+        /* TEMPORARY (revert after experiment): op-triggered resolved file
+         * touch. Granular status: -100 resolver fail, -101 selfcheck fail,
+         * -102 filp_open errno, 1 file written. Sleeping (filp) under our
+         * flag-lock is safe: trylock is bounded, worst case -EBUSY. */
+        xopen_t fn_open;
+        xclose_t fn_close;
+        xwrite_t fn_write;
+        struct file *ff;
+        long long pos = 0;
+        char bb = 'K';
+        long fr;
+        if (!xsetup()) {
+            rw_status = (xg_ctx.num_syms ? -101 : -100);
+            rw_text_len = 0;
+            rb_spin_unlock();
+            return 0;
+        }
+        fn_open = (xopen_t)xresolve(&xg_ctx, "filp_open");
+        fn_write = (xwrite_t)xresolve(&xg_ctx, "kernel_write");
+        fn_close = (xclose_t)xresolve(&xg_ctx, "filp_close");
+        if (!fn_open || !fn_write || !fn_close) {
+            rw_status = -103;
+            rw_text_len = 0;
+            rb_spin_unlock();
+            return 0;
+        }
+        ff = fn_open("/data/local/tmp/XPROBE", 1 | 0100 | 01000, 0600);
+        fr = (long)ff;
+        if ((xulong)fr > (xulong)-4096L) {
+            rw_status = -102;
+            rw_text_len = 0;
+            rb_spin_unlock();
+            return 0;
+        }
+        fn_write(ff, &bb, 1, &pos);
+        fn_close(ff, (void *)0);
+        rw_status = 1;
+        rw_text_len = 0;
         rb_spin_unlock();
         return 0;
     }
