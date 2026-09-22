@@ -186,6 +186,13 @@ resolved per-file via nm, never hardcoded; no kernel tree, no extra files):
   work BOTH directions with zero module-code execution (`stability`
   write 1 → read back 1, guest alive) — the load-only dataplane.
   Enforcement sits at the sysfs caller, not in our code.
+- CFI flavor (kcfi flags, CI `cfi` job): typeids verified at every entry
+  + BTI pads intact; custom getters execute and return (`stage`,
+  `status`); `V`/`T` writes execute; arbitrary kernel READ proven via
+  `F` against ground truth (own `.text` bytes match modulo loader
+  ftrace-patching). S-steps wedge the guest (hypervisor, 2× under
+  patience protocol) — legacy derive path out of scope on this kernel;
+  offsets (hence `E`/`Y`/`W`) need manual/offline derivation here.
 - Hand-built (non-kbuild) ELFs are NOT a probe vehicle: identical files
   fail `EPERM` in one boot and `ENOEXEC` in the next. Proven cause of
   the `ENOEXEC`: the missing `.gnu.linkonce.this_module` section
