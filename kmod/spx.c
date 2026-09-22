@@ -721,6 +721,10 @@ int main(int argc, char **argv)
             work = NULL;
         }
     }
+    if (dry) {
+        jlog("spx", "dry-run complete (no actions taken)");
+        return 0;
+    }
     jlog("spx", "NO-GO: all flavors exhausted (see journal)");
     if (jfp)
         fclose(jfp);
