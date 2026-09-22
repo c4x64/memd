@@ -85,7 +85,20 @@ truth) → full session (writes). `run.sh` takes them as
 
 ## Install
 
-`run.sh` + `rwbridge.ko` side by side (the CI artifact), root required:
+CI's sole deliverable is the SPX packed binary (`rwbridge-spx`: both LKM
+flavors embedded + native select/patch/load/journal; `--dry-run` previews
+without touching anything, `--extract-runsh` prints the shell fallback).
+It picks per kernel (CFI + 6.1+ → cfi; older and non-CFI → normal),
+patches the copy (vermagic, dispatch slots), loads via `finit_module`,
+and journals every step with panic-surviving attempt counting (falls back
+across a reboot instead of retrying into a wall). Root required:
+
+```sh
+su -c './rwbridge-spx'
+```
+
+Shell fallback (no python3/toolchain on target): `run.sh` + loose
+`rwbridge.ko` side by side (same contract, shell implementation).
 
 ```sh
 su -c 'sh ./run.sh'

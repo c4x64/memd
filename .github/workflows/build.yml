@@ -114,10 +114,10 @@ jobs:
           # field and go through run.sh's ELF-extend path, which is
           # tested live on-device (byte-identical to patchvm), not here.
 
-      - name: Upload artifact (single universal build + installer)
+      - name: Upload build artifact (internal, consumed by pack job)
         uses: actions/upload-artifact@v4
         with:
-          name: rwbridge-universal
+          name: _build-universal
           path: |
             kmod/rwbridge.ko
             run.sh
@@ -185,10 +185,58 @@ jobs:
           python3 check_universal.py rwbridge-cfi.ko /tmp/cfi.undef
           N=$(llvm-objdump -d rwbridge-cfi.ko | grep -c "brk.*0x8228"); echo "kcfi traps: $N"; [ "$N" -gt 0 ]
 
-      - name: Upload artifact (CFI flavor + installer)
+      - name: Upload build artifact (internal, consumed by pack job)
         uses: actions/upload-artifact@v4
         with:
-          name: rwbridge-cfi
+          name: _build-cfi
           path: |
             kmod/rwbridge-cfi.ko
             run.sh
+
+  pack:
+    runs-on: ubuntu-latest
+    needs: [universal, cfi]
+    steps:
+      - name: Checkout (spx.c source)
+        uses: actions/checkout@v4
+
+      - name: Fetch build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: _build-*
+          path: dl
+          merge-multiple: true
+
+      - name: Install cross linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu file
+
+      - name: Generate blobs + build packed binary
+        run: |
+          ls dl/kmod/ 2>/dev/null || ls dl/ 2>/dev/null
+          python3 - dl/kmod/rwbridge.ko dl/kmod/rwbridge-cfi.ko run.sh blobs.c <<'PYEOF'
+          import sys
+          def emit(name, path):
+              d = open(path, 'rb').read()
+              L = ['const unsigned char %s_start[] = {' % name]
+              L.append(','.join(str(b) for b in d))
+              L.append('};')
+              L.append('const unsigned long %s_len = %d;' % (name, len(d)))
+              return '\n'.join(L)
+          _, plain, cfi, sh, out = sys.argv
+          open(out, 'w').write(
+              emit('_binary_rwbridge_ko', plain) + '\n' +
+              emit('_binary_rwbridge_cfi_ko', cfi) + '\n' +
+              emit('_binary_runsh', sh) + '\n')
+          print('blobs written')
+          PYEOF
+          aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o rwbridge-spx kmod/spx.c blobs.c
+          file rwbridge-spx
+          ls -la rwbridge-spx
+
+      - name: Upload product (sole deliverable)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rwbridge-spx
+          path: rwbridge-spx
