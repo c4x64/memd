@@ -208,11 +208,17 @@ resolved per-file via nm, never hardcoded; no kernel tree, no extra files):
   Enforcement sits at the sysfs caller, not in our code.
 - CFI flavor (kcfi flags, CI `cfi` job): typeids verified at every entry
   + BTI pads intact; custom getters execute and return (`stage`,
-  `status`); `V`/`T` writes execute; arbitrary kernel READ proven via
-  `F` against ground truth (own `.text` bytes match modulo loader
-  ftrace-patching). S-steps wedge the guest (hypervisor, 2× under
-  patience protocol) — legacy derive path out of scope on this kernel;
-  offsets (hence `E`/`Y`/`W`) need manual/offline derivation here.
+  `status`); `V`/`T` writes execute; MAPPED kernel reads proven via `F`
+  against ground truth (own `.text` bytes match modulo loader
+  ftrace-patching). UNMAPPED reads panic (2/2: `F,0`, `F,high`) — the
+  `__ex_table` armor does NOT fire here. Prime candidate (unproven):
+  same struct skew fallout (extable registration reads `num_exentries`/
+  `extable` via skewed `struct module` offsets → our fixups never
+  registered; vendor modules with correct layout unaffected). Consequence:
+  no discovery-by-scan on this kernel — offsets arrive externally
+  (`E`/`Y` explicit args, server-driven tables), never via sweeps.
+  S-steps wedge the guest (hypervisor, patience-protocol confirmed) —
+  legacy derive path out of scope on this kernel.
 - Hand-built (non-kbuild) ELFs are NOT a probe vehicle: identical files
   fail `EPERM` in one boot and `ENOEXEC` in the next. Proven cause of
   the `ENOEXEC`: the missing `.gnu.linkonce.this_module` section
