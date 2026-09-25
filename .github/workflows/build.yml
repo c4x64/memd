@@ -46,16 +46,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Resolve DDK tree + toolchain
+        run: |
+          # DDK layout: /opt/ddk/kdir/<kmi> + clang under /opt/ddk/clang.
+          # KERNEL_SRC is NOT an image env (wuwa sets it manually) — resolve
+          # here, loud on miss. Strip our -cfi variant suffix for the tree.
+          IMG="${{ matrix.img }}"
+          for cand in "/opt/ddk/kdir/$IMG" /opt/ddk/kdir/*${IMG%%-*}* ; do
+            if [ -d "$cand" ]; then KDIR_CAND="$cand"; break; fi
+          done
+          [ -n "$KDIR_CAND" ] || KDIR_CAND="/opt/ddk/kdir/$IMG"
+          [ -d "$KDIR_CAND" ] || { echo "FATAL: no kdir for $IMG"; ls /opt/ddk/kdir/ 2>/dev/null; exit 1; }
+          echo "KDIR_RESOLVED=$KDIR_CAND" >> "$GITHUB_ENV"
+          for cd in /opt/ddk/clang/*/bin; do
+            [ -d "$cd" ] && echo "$cd" >> /tmp/clangpaths
+          done
+          CLANG_BIN=$(head -1 /tmp/clangpaths 2>/dev/null || true)
+          echo "CLANG_BIN=$CLANG_BIN" >> "$GITHUB_ENV"
+          echo "kdir=$KDIR_CAND clang=$CLANG_BIN"
+          # nm/objdump for the gate: LLVM first, GNU cross, host last.
+          for t in llvm-nm aarch64-linux-gnu-nm nm; do
+            command -v $t >/dev/null 2>&1 && { echo "NM_BIN=$t" >> "$GITHUB_ENV"; break; }
+          done
+          for t in llvm-objdump aarch64-linux-gnu-objdump objdump; do
+            command -v $t >/dev/null 2>&1 && { echo "OBJDUMP_BIN=$t" >> "$GITHUB_ENV"; break; }
+          done
+
       - name: Build module for ${{ matrix.kmi }}
+        env:
+          ARCH: arm64
+          CROSS_COMPILE: aarch64-linux-gnu-
+          LLVM: 1
+          LLVM_IAS: 1
         run: |
           echo "=== KMI: ${{ matrix.kmi }} ==="
           # CRCs pin a build past its KMI (runtime vermagic patch cannot
           # fix them): force MODVERSIONS off in the donor tree, re-prepare.
-          (cd "$KERNEL_SRC" && ./scripts/config --disable MODVERSIONS)
-          (cd "$KERNEL_SRC" && make olddefconfig >/dev/null 2>&1)
-          grep -q "# CONFIG_MODVERSIONS is not set" "$KERNEL_SRC/.config" \
+          (cd "$KDIR_RESOLVED" && ./scripts/config --disable MODVERSIONS)
+          (cd "$KDIR_RESOLVED" && make olddefconfig >/dev/null 2>&1)
+          grep -q "# CONFIG_MODVERSIONS is not set" "$KDIR_RESOLVED/.config" \
             || { echo "FATAL: MODVERSIONS still on"; exit 1; }
-          (cd "$KERNEL_SRC" && make modules_prepare >/dev/null 2>&1)
+          (cd "$KDIR_RESOLVED" && make modules_prepare >/dev/null 2>&1)
           BASEUTS=$(cd "$KERNEL_SRC" && make -s kernelrelease 2>/dev/null || echo "0.0.0")
           echo "donor UTS: $BASEUTS"
           # Pad EXTRAVERSION so baked UTS reaches the 63-char cap: every
@@ -71,12 +102,13 @@ jobs:
           if [ "${{ matrix.cf }}" = "true" ]; then
             sudo apt-get update && sudo apt-get install -y clang lld llvm
           fi
-          make KDIR="$KERNEL_SRC" KMI="${{ matrix.kmi }}" EXTRAVERSION="-${PAD}" ${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
+          export PATH="$CLANG_BIN:$PATH"
+          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" EXTRAVERSION="-${PAD}" ${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
 
       - name: Per-target gate (imports, BTI, placeholder)
         run: |
           cd kmod
-          make KDIR="$KERNEL_SRC" KMI="${{ matrix.kmi }}" check-universal
+          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal
           if [ "${{ matrix.cf }}" = "true" ]; then
             N=$(llvm-objdump -d "rwbridge.ko" | grep -c "brk.*0x8228"); echo "kcfi traps: $N"; [ "$N" -gt 0 ]
           fi

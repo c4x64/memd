@@ -85,11 +85,16 @@ clean:
 # placeholder stay inline below.
 check-universal: all
 	@echo "== versions/imports via check_universal.py =="
-	@$(CROSS_COMPILE)nm -u rwbridge.ko | awk '{print $$2}' | sort -u | tee /tmp/rwbridge.undef
+	@$(NM) -u rwbridge.ko 2>/dev/null | awk '{print $$2}' | sort -u | tee /tmp/rwbridge.undef || \
+		($(CROSS_COMPILE)nm -u rwbridge.ko | awk '{print $$2}' | sort -u | tee /tmp/rwbridge.undef)
 	@python3 check_universal.py rwbridge.ko /tmp/rwbridge.undef $(KMI) $(KDIR)/System.map
 	@echo "== BTI landing pads present =="
-	@$(CROSS_COMPILE)objdump -d rwbridge.ko | grep -qiE 'bti([[:space:]]|$$)|hint[[:space:]]' || \
+	@($(OBJDUMP) -d rwbridge.ko 2>/dev/null || $(CROSS_COMPILE)objdump -d rwbridge.ko) | grep -qiE 'bti([[:space:]]|$$)|hint[[:space:]]' || \
 		{ echo "FAIL: no BTI pads (BTI kernels fault on entry -> reboot)"; exit 1; }
+	@echo "-- pad count (need >=9 entry points covered) --"; \
+	N=$$((($(OBJDUMP) -d rwbridge.ko 2>/dev/null || $(CROSS_COMPILE)objdump -d rwbridge.ko) | grep -ciE 'bti([[:space:]]|$$)|hint[[:space:]]')); \
+	echo "pads=$$N"; [ "$$N" -ge 9 ] || \
+		{ echo "FAIL: only $$N pads, need >=9 entry points covered"; exit 1; }
 	@echo "== vermagic placeholder present =="
 	@strings rwbridge.ko | grep -q '^vermagic=' || { echo "FAIL: no vermagic"; exit 1; }
 	@echo "-- KMI=$(KMI) checks passed"
