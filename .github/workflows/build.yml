@@ -48,30 +48,23 @@ jobs:
 
       - name: Resolve DDK tree + toolchain
         run: |
-          # DDK layout: /opt/ddk/kdir/<kmi> + clang under /opt/ddk/clang.
-          # KERNEL_SRC is NOT an image env (wuwa sets it manually) — resolve
-          # here, loud on miss. Strip our -cfi variant suffix for the tree.
+          # DDK images export KERNEL_SRC/KDIR/CLANG_PATH already; trust but
+          # verify, stripping our -cfi variant suffix for the tree. Persist
+          # via workspace file (cross-step env proved flaky here).
           IMG="${{ matrix.img }}"
-          for cand in "/opt/ddk/kdir/$IMG" /opt/ddk/kdir/*${IMG%%-*}* ; do
-            if [ -d "$cand" ]; then KDIR_CAND="$cand"; break; fi
-          done
-          [ -n "$KDIR_CAND" ] || KDIR_CAND="/opt/ddk/kdir/$IMG"
-          [ -d "$KDIR_CAND" ] || { echo "FATAL: no kdir for $IMG"; ls /opt/ddk/kdir/ 2>/dev/null; exit 1; }
-          echo "KDIR_RESOLVED=$KDIR_CAND" >> "$GITHUB_ENV"
-          for cd in /opt/ddk/clang/*/bin; do
-            [ -d "$cd" ] && echo "$cd" >> /tmp/clangpaths
-          done
-          CLANG_BIN=$(head -1 /tmp/clangpaths 2>/dev/null || true)
-          echo "CLANG_BIN=$CLANG_BIN" >> "$GITHUB_ENV"
-          echo "kdir=$KDIR_CAND clang=$CLANG_BIN"
+          KDIR_CAND="${KERNEL_SRC:-/opt/ddk/kdir/$IMG}"
+          [ -d "$KDIR_CAND" ] || KDIR_CAND="/opt/ddk/kdir/$IMG"
+          [ -d "$KDIR_CAND" ] || { echo "FATAL: no kdir for $IMG (KERNEL_SRC=$KERNEL_SRC)"; ls /opt/ddk/kdir/ 2>/dev/null; exit 1; }
+          echo "$KDIR_CAND" > "$GITHUB_WORKSPACE/.kdir"
+          echo "kdir=$KDIR_CAND"
           # nm/objdump for the gate: LLVM first, GNU cross, host last.
           for t in llvm-nm aarch64-linux-gnu-nm nm; do
-            command -v $t >/dev/null 2>&1 && { echo "NM_BIN=$t" >> "$GITHUB_ENV"; break; }
+            command -v $t >/dev/null 2>&1 && { echo "$t" > "$GITHUB_WORKSPACE/.nm"; break; }
           done
           for t in llvm-objdump aarch64-linux-gnu-objdump objdump; do
-            command -v $t >/dev/null 2>&1 && { echo "OBJDUMP_BIN=$t" >> "$GITHUB_ENV"; break; }
+            command -v $t >/dev/null 2>&1 && { echo "$t" > "$GITHUB_WORKSPACE/.objdump"; break; }
           done
-
+          cat "$GITHUB_WORKSPACE/.kdir"
       - name: Build module for ${{ matrix.kmi }}
         env:
           ARCH: arm64
@@ -82,6 +75,9 @@ jobs:
           echo "=== KMI: ${{ matrix.kmi }} ==="
           # CRCs pin a build past its KMI (runtime vermagic patch cannot
           # fix them): force MODVERSIONS off in the donor tree, re-prepare.
+          KDIR_RESOLVED=$(cat "$GITHUB_WORKSPACE/.kdir")
+          NM_BIN=$(cat "$GITHUB_WORKSPACE/.nm")
+          OBJDUMP_BIN=$(cat "$GITHUB_WORKSPACE/.objdump")
           (cd "$KDIR_RESOLVED" && ./scripts/config --disable MODVERSIONS)
           (cd "$KDIR_RESOLVED" && make olddefconfig >/dev/null 2>&1)
           grep -q "# CONFIG_MODVERSIONS is not set" "$KDIR_RESOLVED/.config" \
@@ -103,14 +99,17 @@ jobs:
             sudo apt-get update && sudo apt-get install -y clang lld llvm
           fi
           export PATH="$CLANG_BIN:$PATH"
-          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" EXTRAVERSION="-${PAD}" ${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
+          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" EXTRAVERSION="-${PAD}" ${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
 
       - name: Per-target gate (imports, BTI, placeholder)
         run: |
+          KDIR_RESOLVED=$(cat "$GITHUB_WORKSPACE/.kdir")
+          NM_BIN=$(cat "$GITHUB_WORKSPACE/.nm")
+          OBJDUMP_BIN=$(cat "$GITHUB_WORKSPACE/.objdump")
           cd kmod
           make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal
           if [ "${{ matrix.cf }}" = "true" ]; then
-            N=$(llvm-objdump -d "rwbridge.ko" | grep -c "brk.*0x8228"); echo "kcfi traps: $N"; [ "$N" -gt 0 ]
+            N=$("$OBJDUMP_BIN" -d "rwbridge.ko" | grep -c "brk.*0x8228"); echo "kcfi traps: $N"; [ "$N" -gt 0 ]
           fi
 
       - name: Rename per KMI + strip
