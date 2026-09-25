@@ -155,6 +155,18 @@ uintptr_t vaddr_to_phy_addr(struct mm_struct* mm, uintptr_t va) {
 
 typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
 
+#ifdef WUWA_NO_KPROBE_TRICK
+/* Vendor 5.x kernels (Samsung etc.): kprobes are unexported AND the strict
+ * loader rejects GOT-page relocs (311/312) against even weak kprobe
+ * references, so the trick is compiled out entirely here. kallsyms stays
+ * unresolved; init_arch/cfi_bypass already fail soft per-op, and plain
+ * memory R/W needs no kallsyms. CFI-enforcing 5.x is refused
+ * userspace-side (SPX /proc/config.gz guard) rather than trapped. */
+unsigned long kallsyms_lookup_name_ex(const char* name) {
+    (void)name;
+    return 0;
+}
+#else
 static unsigned long NO_CFI call_kln(kallsyms_lookup_name_t f, const char *n) {
     return f(n);
 }
@@ -192,6 +204,7 @@ unsigned long kallsyms_lookup_name_ex(const char* name) {
     return kallsyms_lookup_name(name);
 #endif
 }
+#endif /* WUWA_NO_KPROBE_TRICK */
 
 struct task_struct* get_target_task(pid_t pid) {
     struct pid* pid_struct = find_get_pid(pid);
@@ -209,6 +222,11 @@ struct task_struct* get_target_task(pid_t pid) {
 }
 
 int disable_kprobe_blacklist(void) {
+#ifdef WUWA_NO_KPROBE_TRICK
+    /* We install no kprobes: nothing to unblacklist. Success, so init
+     * never fails on kernels where kallsyms is unresolvable. */
+    return 0;
+#else
     struct kprobe_blacklist_entry* ent;
     struct list_head* kprobe_blacklist = (struct list_head*)kallsyms_lookup_name_ex("kprobe_blacklist");
     if (!kprobe_blacklist) {
@@ -229,6 +247,7 @@ int disable_kprobe_blacklist(void) {
     wuwa_info("Disabled %d kprobe blacklist entries\n", count);
 
     return 0;
+#endif /* WUWA_NO_KPROBE_TRICK */
 }
 
 void compare_pt_regs(struct pt_regs* regs1, struct pt_regs* regs2) {

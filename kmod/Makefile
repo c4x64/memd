@@ -67,6 +67,14 @@ ccflags-y += -fno-stack-protector -fno-stack-check
 # clang emits no kcfi traps for this codebase — no indirect-call typeids —
 # so the variant was byte-identical to plain; not worth a matrix slot).
 ccflags-remove-y += -fsanitize=cfi -fsanitize=kcfi -fsanitize-cfi-cross-dso
+# Vendor 5.x kernels (Samsung etc.): strict loaders reject GOT-page relocs
+# against weak kprobe symbols, and kprobes are unexported there anyway, so
+# the kprobe kallsyms trick is compiled out of 5.10/5.15 artifacts (plain
+# R/W needs no kallsyms; init fails soft per-op). 6.x keeps the trick: GKI
+# exports kprobes and upstream loaders tolerate the weak refs.
+ifneq ($(filter %-5.10 %-5.15,$(KMI)),)
+ccflags-y += -DWUWA_NO_KPROBE_TRICK
+endif
 # DBG variant (DBG=1, android14-6.1-dbg job): full debug info kept for
 # crash forensics (pstore/dmesg decoding). Never auto-selected by the
 # loader (explicit --ko only); identical code to the plain artifact.

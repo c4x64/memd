@@ -332,6 +332,32 @@ static int is_live(void)
     return found;
 }
 
+/* CFI-enforcement pre-check: 5.10/5.15 artifacts carry no kallsyms path
+ * (WUWA_NO_KPROBE_TRICK), so on an enforcing kernel the CFI bypass could
+ * never run and the first kernel->module call would trap. Refuse those
+ * flavors outright (NO-GO, never a panic). Unknown config (no config.gz)
+ * means proceed: absence of proof is not proof of enforcement. Cached. */
+static int kernel_is_cfi(void)
+{
+    static int cached = -1;
+    FILE *p;
+    char line[256];
+    if (cached >= 0)
+        return cached;
+    cached = 0;
+    p = popen("gzip -dc /proc/config.gz 2>/dev/null", "r");
+    if (!p)
+        return cached;
+    while (fgets(line, sizeof(line), p)) {
+        if (!strncmp(line, "CONFIG_CFI_CLANG=y", 18)) {
+            cached = 1;
+            break;
+        }
+    }
+    pclose(p);
+    return cached;
+}
+
 /* proto liveness: scan families for the driver marker (SEQPACKET ->
  * ENOKEY) then open a RAW socket on it. Proves the proto registered,
  * i.e. the module is not just present but serving. Bounded scan. */
@@ -535,6 +561,15 @@ int main(int argc, char **argv)
         int *tried = &st.tried[fi];
         if (*tried >= 2) {
             snprintf(msg, sizeof(msg), "%s already tried twice, skipping",
+                     flavors[fi].name);
+            jlog("select", msg);
+            continue;
+        }
+        if ((!strcmp(flavors[fi].kver, "5.10") ||
+             !strcmp(flavors[fi].kver, "5.15")) && kernel_is_cfi()) {
+            snprintf(msg, sizeof(msg),
+                     "%s skipped: CFI-enforcing kernel + no kallsyms path "
+                     "in 5.x builds (refusing: a load here would trap)",
                      flavors[fi].name);
             jlog("select", msg);
             continue;

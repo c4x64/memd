@@ -22,6 +22,17 @@ transports are excluded. Process-hide is a tracked TODO, not present.
   functions after load (kallsyms-resolved, RET fill). No separate CFI
   artifact, no flavor switch, no dispatch-slot surgery (matched builds
   need none).
+- **5.10/5.15 builds carry no kprobe trick** (`WUWA_NO_KPROBE_TRICK`):
+  vendor 5.x kernels neither export kprobes nor tolerate the weak
+  references (their loaders reject GOT-page relocs 311/312 outright —
+  proven on Samsung 5.15: `unsupported RELA relocation`). Plain R/W
+  needs no kallsyms and init fails soft per-op, so these load Live
+  where resolution is impossible. 6.x keeps the trick (GKI exports
+  kprobes; upstream loaders tolerate weak refs).
+- **Enforcing + 5.x is refused, never trapped**: SPX and run.sh read
+  `/proc/config.gz`; `CONFIG_CFI_CLANG=y` with a 5.x flavor is a NO-GO
+  (the bypass could never run there — a load would trap on first use).
+  Unknown config proceeds as before.
 - **Symbols resolve at runtime** (kprobe trick on
   `kallsyms_lookup_name`); unresolvable kernels fail closed at init
   (return code, never half-alive).

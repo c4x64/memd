@@ -115,6 +115,16 @@ if [ -f /proc/config.gz ]; then
     fi
 fi
 log "CFI: $CFI (runtime-handled)"
+# Refusal (mirrors SPX): 5.x builds carry no kallsyms path, so on an
+# enforcing kernel the bypass could never run and first use would trap.
+# NO-GO here is strictly better than a panic. Applies to explicit $1 too.
+case "$KO" in
+*-5.10.ko|*-5.15.ko)
+    if [ "$CFI" = "yes" ]; then
+        die "refusing $KO: CFI-enforcing kernel + no kallsyms path in 5.x builds"
+    fi
+    ;;
+esac
 
 # 3. Resolve the TARGET vermagic value.
 # Priority: full vermagic from any on-device .ko (exact, incl. extras —
