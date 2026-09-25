@@ -9,8 +9,11 @@ transports are excluded. Process-hide is a tracked TODO, not present.
 
 - **8 builds, 1 deliverable.** DDK matrix
   (`android12-5.10`, `android13-5.10`, `android13-5.15`,
-  `android14-5.15`, `android14-6.1`, `android15-6.1`, `android15-6.6`,
-  `android16-6.12`); each artifact matches its own generation's headers.
+  `android14-5.15`, `android14-6.1`, `android14-6.1-cfi`,
+  `android15-6.6`, `android16-6.12`); each artifact matches its own
+  generation's headers. The `-cfi` variant (kcfi-instrumented module)
+  is tried first on 6.1 matches: inert without enforcement, required
+  with it (plain risks a trap before the runtime bypass runs).
   Vendor variance inside a generation (UTS suffixes) is absorbed by the
   vermagic placeholder + install-time patch (dmesg-feedback retry).
   Cross-generation attempts are refused outright (wrong structs would

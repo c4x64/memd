@@ -90,7 +90,7 @@ if [ -z "$KO" ]; then
     KMAJ=$(echo "$KREL" | cut -d. -f1); KMIN=$(echo "$KREL" | cut -d. -f2 | cut -d- -f1)
     KV="$KMAJ.$KMIN"
     for pass in exact kver; do
-        for kmi in android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1 android15-6.1 android15-6.6 android16-6.12; do
+        for kmi in android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1-cfi android14-6.1 android15-6.6 android16-6.12; do
             kkver=$(echo "$kmi" | cut -d- -f2); kgen=$(echo "$kmi" | cut -d- -f1);
             [ "$kkver" = "$KV" ] || continue
             if [ "$pass" = exact ]; then case "$KREL" in *"$kgen"*) ;; *) continue;; esac; fi

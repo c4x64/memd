@@ -24,15 +24,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kmi:
-          - android12-5.10
-          - android13-5.10
-          - android13-5.15
-          - android14-5.15
-          - android14-6.1
-          - android15-6.1
-          - android15-6.6
-          - android16-6.12
+        include:
+          - kmi: android12-5.10
+          - kmi: android13-5.10
+          - kmi: android13-5.15
+          - kmi: android14-5.15
+          - kmi: android14-6.1
+          - kmi: android14-6.1-cfi
+            cf: true
+          - kmi: android15-6.6
+          - kmi: android16-6.12
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,9 +43,11 @@ jobs:
           echo "=== KMI: ${{ matrix.kmi }} ==="
           # CRCs pin a build past its KMI (runtime vermagic patch cannot
           # fix them): force MODVERSIONS off in the donor tree, re-prepare.
-          (cd "$KERNEL_SRC" && ./scripts/config --disable MODVERSIONS || true)
-          (cd "$KERNEL_SRC" && make olddefconfig >/dev/null 2>&1 || true)
-          (cd "$KERNEL_SRC" && make modules_prepare >/dev/null 2>&1 || true)
+          (cd "$KERNEL_SRC" && ./scripts/config --disable MODVERSIONS)
+          (cd "$KERNEL_SRC" && make olddefconfig >/dev/null 2>&1)
+          grep -q "# CONFIG_MODVERSIONS is not set" "$KERNEL_SRC/.config" \
+            || { echo "FATAL: MODVERSIONS still on"; exit 1; }
+          (cd "$KERNEL_SRC" && make modules_prepare >/dev/null 2>&1)
           BASEUTS=$(cd "$KERNEL_SRC" && make -s kernelrelease 2>/dev/null || echo "0.0.0")
           echo "donor UTS: $BASEUTS"
           # Pad EXTRAVERSION so baked UTS reaches the 63-char cap: every
@@ -57,12 +60,18 @@ jobs:
             PAD=""
           fi
           cd kmod
-          make KDIR="$KERNEL_SRC" KMI="${{ matrix.kmi }}" EXTRAVERSION="-${PAD}"
+          if [ "${{ matrix.cf }}" = "true" ]; then
+            sudo apt-get update && sudo apt-get install -y clang lld llvm
+          fi
+          make KDIR="$KERNEL_SRC" KMI="${{ matrix.kmi }}" EXTRAVERSION="-${PAD}" ${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
 
       - name: Per-target gate (imports, BTI, placeholder)
         run: |
           cd kmod
           make KDIR="$KERNEL_SRC" KMI="${{ matrix.kmi }}" check-universal
+          if [ "${{ matrix.cf }}" = "true" ]; then
+            N=$(llvm-objdump -d "rwbridge.ko" | grep -c "brk.*0x8228"); echo "kcfi traps: $N"; [ "$N" -gt 0 ]
+          fi
 
       - name: Rename per KMI + strip
         run: |
@@ -107,7 +116,7 @@ jobs:
             dl/kmod/rwbridge-android13-5.15.ko \
             dl/kmod/rwbridge-android14-5.15.ko \
             dl/kmod/rwbridge-android14-6.1.ko \
-            dl/kmod/rwbridge-android15-6.1.ko \
+            dl/kmod/rwbridge-android14-6.1-cfi.ko \
             dl/kmod/rwbridge-android15-6.6.ko \
             dl/kmod/rwbridge-android16-6.12.ko \
             run.sh blobs.c <<'PYEOF'

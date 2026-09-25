@@ -57,6 +57,13 @@ ccflags-y += -mbranch-protection=bti -march=armv8.5-a
 # No stack-protector runtime dependency (single image must not depend on
 # per-tree helper availability beyond the checked import surface).
 ccflags-y += -fno-stack-protector -fno-stack-check
+# CFI variant (CFI=1, android14-6.1-cfi job): kcfi typeids so kernel->module
+# indirect calls pass the type check on enforcing kernels. kcfi is
+# clang-only (CI passes CC=clang for that job). No new imports (typeids
+# are local labels). Runtime cfi_bypass stays on regardless.
+ifdef CFI
+ccflags-y += -fsanitize=kcfi
+endif
 
 all:
 	@if [ -z "$(KDIR)" ]; then \
