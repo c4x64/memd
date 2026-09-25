@@ -73,9 +73,6 @@ endif
 # are local labels). Runtime cfi_bypass stays on regardless.
 ifdef CFI
 ccflags-y += -fsanitize=kcfi
-$(info CFI-MODE-ON cfiflags-set)
-else
-$(info CFI-MODE-OFF)
 endif
 
 all:
