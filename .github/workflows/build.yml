@@ -19,21 +19,29 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-20251016
+      image: ghcr.io/ylarod/ddk:${{ matrix.img }}-20251016
       options: --privileged
     strategy:
       fail-fast: false
       matrix:
         include:
           - kmi: android12-5.10
+            img: android12-5.10
           - kmi: android13-5.10
+            img: android13-5.10
           - kmi: android13-5.15
+            img: android13-5.15
           - kmi: android14-5.15
+            img: android14-5.15
           - kmi: android14-6.1
+            img: android14-6.1
           - kmi: android14-6.1-cfi
+            img: android14-6.1
             cf: true
           - kmi: android15-6.6
+            img: android15-6.6
           - kmi: android16-6.12
+            img: android16-6.12
     steps:
       - name: Checkout
         uses: actions/checkout@v4
