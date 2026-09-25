@@ -1,14 +1,14 @@
-name: build-universal-kmod
+name: build-matrix-kmod
 
-# rwbridge is compiled ONCE. The build tree is only a header/source donor —
-# the .ko carries no per-KMI data: struct layouts arrive via the kopts
-# runtime channel (or init-time self-derivation) and vermagic is patched to
-# the running kernel by run.sh at install time.
+# rwbridge is built once PER KMI GENERATION (8 DDK targets). Each artifact
+# matches its own generation's headers/layouts; vendor variance inside a
+# generation (UTS suffixes) is absorbed at install by the vermagic
+# placeholder + run.sh/SPX patch. The single deliverable stays ONE packed
+# binary (rwbridge-spx, all 8 artifacts inside) + one shell bundle.
 #
-# We deliberately build against the OLDEST supported headers (5.10): if the
-# source used any newer-only API, this build breaks — so a green build
-# proves the code is 5.10-compatible, and 5.10-compatible code using only
-# the stable surface runs on every later kernel too.
+# DDK provides containerized kernel trees per KMI (no source on any
+# device, never in this repo). ddk_release is pinned; bumping it is a
+# deliberate, reviewed change (new compiler/headers alter every artifact).
 
 on:
   push:
@@ -16,186 +16,72 @@ on:
   workflow_dispatch:
 
 jobs:
-  universal:
+  build:
     runs-on: ubuntu-latest
-    env:
-      ARCH: arm64
-      CROSS_COMPILE: aarch64-linux-gnu-
-      KVER: 5.10.209
+    container:
+      image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-20251016
+      options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.1
+          - android15-6.6
+          - android16-6.12
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install cross toolchain
+      - name: Build module for ${{ matrix.kmi }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            libssl-dev libelf-dev bison flex bc
+          echo "=== KMI: ${{ matrix.kmi }} ==="
+          # CRCs pin a build past its KMI (runtime vermagic patch cannot
+          # fix them): force MODVERSIONS off in the donor tree, re-prepare.
+          (cd "$KERNEL_SRC" && ./scripts/config --disable MODVERSIONS || true)
+          (cd "$KERNEL_SRC" && make olddefconfig >/dev/null 2>&1 || true)
+          (cd "$KERNEL_SRC" && make modules_prepare >/dev/null 2>&1 || true)
+          BASEUTS=$(cd "$KERNEL_SRC" && make -s kernelrelease 2>/dev/null || echo "0.0.0")
+          echo "donor UTS: $BASEUTS"
+          # Pad EXTRAVERSION so baked UTS reaches the 63-char cap: every
+          # real target vermagic then fits the in-place runtime patch
+          # (patch only ever shrinks; kbuild fails past 64, loud).
+          BLEN=${#BASEUTS}
+          if [ "$BLEN" -lt 63 ]; then
+            PAD=$(python3 -c "print('x'*$((63 - $BLEN)))")
+          else
+            PAD=""
+          fi
+          cd kmod
+          make KDIR="$KERNEL_SRC" KMI="${{ matrix.kmi }}" EXTRAVERSION="-${PAD}"
 
-      - name: Fetch kernel source (headers donor only)
-        run: |
-          for try in 1 2 3; do
-            for base in \
-              "https://cdn.kernel.org/pub/linux/kernel/v5.x" \
-              "https://mirrors.edge.kernel.org/pub/linux/kernel/v5.x" \
-              "https://mirrors.tuna.tsinghua.edu.cn/kernel/v5.x"; do
-              wget -q --timeout=90 "$base/linux-$KVER.tar.xz" && break 2
-              rm -f linux-$KVER.tar.xz
-            done
-            echo "mirror pass $try failed; retrying"; sleep 10
-          done
-          [ -f linux-$KVER.tar.xz ] || { echo "no source for $KVER"; exit 1; }
-          tar xf linux-$KVER.tar.xz
-
-      - name: Prepare tree (max-length UTS_RELEASE placeholder)
-        run: |
-          cd linux-$KVER
-          # UTS_RELEASE is capped at 63 chars by kbuild itself
-          # (utsrelease.h generation fails beyond 64), so the baked
-          # vermagic field tops out ~80 chars. Longer real targets
-          # (6.1-GKI: 100) are handled by run.sh via ELF section
-          # surgery (extend .modinfo), verified byte-identical live.
-          # "5.10.209" is 8 chars -> EXTRAVERSION supplies the other 55.
-          PAD=$(python3 -c "print('x'*54)")
-          make ARCH=$ARCH defconfig
-          ./scripts/config --disable LOCALVERSION_AUTO
-          ./scripts/config --disable MODVERSIONS
-          ./scripts/config --enable MODULES
-          ./scripts/config --enable MODULE_UNLOAD
-          make ARCH=$ARCH olddefconfig
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
-            EXTRAVERSION="-${PAD}" modules_prepare scripts
-          echo "baked release: $(cat include/generated/utsrelease.h | head -1)"
-          # Donor-tree branch protection would shadow the module's own
-          # -mbranch-protection=bti (last-wins) and strip our BTI landing
-          # pads. The module must carry the ONLY such flag on its cmdline,
-          # so neutralize the donor default (donor tree is build scaffolding
-          # only — vmlinux is never built here).
-          echo "--- donor branch-protection origin ---"
-          grep -rn "mbranch-protection" arch/arm64/Makefile Makefile 2>/dev/null | head -5 || true
-          sed -i "s/-mbranch-protection=[^ ']*/ /g" arch/arm64/Makefile Makefile 2>/dev/null || true
-          echo "--- after neutralize ---"
-          grep -rn "mbranch-protection" arch/arm64/Makefile Makefile 2>/dev/null | head -5 || echo "(none left)"
-
-      - name: Build universal module
+      - name: Per-target gate (imports, BTI, placeholder)
         run: |
           cd kmod
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
-            KDIR="$GITHUB_WORKSPACE/linux-$KVER"
+          make KDIR="$KERNEL_SRC" KMI="${{ matrix.kmi }}" check-universal
 
-      - name: Universality gate (imports, versions, placeholder)
+      - name: Rename per KMI + strip
         run: |
           cd kmod
-          make CROSS_COMPILE=$CROSS_COMPILE KDIR="$GITHUB_WORKSPACE/linux-$KVER" check-universal
-
-      - name: Vermagic patch self-test (mirrors run.sh)
-        run: |
-          cd kmod
-          cp rwbridge.ko /tmp/patchtest.ko
-          # vendor-style long target incl. extras
-          TARGET="vermagic=5.15.137-android13-8-gabcdef1-ab1234567 SMP preempt mod_unload aarch64"
-          python3 - /tmp/patchtest.ko "$TARGET" <<'PYEOF'
-          import sys
-          ko, want = sys.argv[1], sys.argv[2].encode()
-          b = bytearray(open(ko, 'rb').read())
-          i = b.find(b'vermagic=')
-          assert i >= 0
-          j = b.find(b'\x00', i)
-          assert len(want) <= j - i, "placeholder too short for target"
-          b[i:i+len(want)] = want
-          for k in range(i+len(want), j): b[k] = 0
-          open(ko, 'wb').write(b)
-          PYEOF
-          strings /tmp/patchtest.ko | grep -x "$TARGET" \
-            || { echo "patch self-test FAILED"; exit 1; }
-          echo "patch self-test passed"
-          # NOTE: 6.1-GKI-length targets (100 chars) exceed the baked
-          # field and go through run.sh's ELF-extend path, which is
-          # tested live on-device (byte-identical to patchvm), not here.
+          mv rwbridge.ko "rwbridge-${{ matrix.kmi }}.ko"
+          llvm-strip -d "rwbridge-${{ matrix.kmi }}.ko" || true
+          ls -la "rwbridge-${{ matrix.kmi }}.ko"
 
       - name: Upload build artifact (internal, consumed by pack job)
         uses: actions/upload-artifact@v4
         with:
-          name: _build-universal
+          name: _build-${{ matrix.kmi }}
           path: |
-            kmod/rwbridge.ko
-            run.sh
-
-  cfi:
-    runs-on: ubuntu-latest
-    env:
-      ARCH: arm64
-      CROSS_COMPILE: aarch64-linux-gnu-
-      KVER: 5.10.209
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install cross toolchain + clang
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            clang lld llvm \
-            libssl-dev libelf-dev bison flex bc
-
-      - name: Fetch kernel source (headers donor only)
-        run: |
-          for try in 1 2 3; do
-            for base in \
-              "https://cdn.kernel.org/pub/linux/kernel/v5.x" \
-              "https://mirrors.edge.kernel.org/pub/linux/kernel/v5.x" \
-              "https://mirrors.tuna.tsinghua.edu.cn/kernel/v5.x"; do
-              wget -q --timeout=90 "$base/linux-$KVER.tar.xz" && break 2
-              rm -f linux-$KVER.tar.xz
-            done
-            echo "mirror pass $try failed; retrying"; sleep 10
-          done
-          [ -f linux-$KVER.tar.xz ] || { echo "no source for $KVER"; exit 1; }
-          tar xf linux-$KVER.tar.xz
-
-      - name: Prepare tree (identical to universal job — gcc path)
-        run: |
-          cd linux-$KVER
-          PAD=$(python3 -c "print('x'*54)")
-          make ARCH=$ARCH defconfig
-          ./scripts/config --disable LOCALVERSION_AUTO
-          ./scripts/config --disable MODVERSIONS
-          ./scripts/config --enable MODULES
-          ./scripts/config --enable MODULE_UNLOAD
-          make ARCH=$ARCH olddefconfig
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
-            EXTRAVERSION="-${PAD}" modules_prepare scripts
-          grep -rn "mbranch-protection" arch/arm64/Makefile Makefile 2>/dev/null | head -3 || true
-          sed -i "s/-mbranch-protection=[^ ']*/ /g" arch/arm64/Makefile Makefile 2>/dev/null || true
-
-      - name: Build CFI module (clang for the module only)
-        run: |
-          cd kmod
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
-            CC="clang --target=aarch64-linux-gnu -fintegrated-as" \
-            CFI=1 KDIR="$GITHUB_WORKSPACE/linux-$KVER"
-          cp rwbridge.ko rwbridge-cfi.ko
-
-      - name: CFI checks (instrumented, pads kept, imports clean)
-        run: |
-          cd kmod
-          llvm-nm -u rwbridge-cfi.ko | awk '{print $2}' | sort -u | tee /tmp/cfi.undef
-          python3 check_universal.py rwbridge-cfi.ko /tmp/cfi.undef
-          N=$(llvm-objdump -d rwbridge-cfi.ko | grep -c "brk.*0x8228"); echo "kcfi traps: $N"; [ "$N" -gt 0 ]
-
-      - name: Upload build artifact (internal, consumed by pack job)
-        uses: actions/upload-artifact@v4
-        with:
-          name: _build-cfi
-          path: |
-            kmod/rwbridge-cfi.ko
+            kmod/rwbridge-${{ matrix.kmi }}.ko
             run.sh
 
   pack:
     runs-on: ubuntu-latest
-    needs: [universal, cfi]
+    needs: [build]
     steps:
       - name: Checkout (spx.c source)
         uses: actions/checkout@v4
@@ -215,22 +101,35 @@ jobs:
       - name: Generate blobs + build packed binary
         run: |
           ls dl/kmod/ 2>/dev/null || ls dl/ 2>/dev/null
-          python3 - dl/kmod/rwbridge.ko dl/kmod/rwbridge-cfi.ko run.sh blobs.c <<'PYEOF'
+          python3 - \
+            dl/kmod/rwbridge-android12-5.10.ko \
+            dl/kmod/rwbridge-android13-5.10.ko \
+            dl/kmod/rwbridge-android13-5.15.ko \
+            dl/kmod/rwbridge-android14-5.15.ko \
+            dl/kmod/rwbridge-android14-6.1.ko \
+            dl/kmod/rwbridge-android15-6.1.ko \
+            dl/kmod/rwbridge-android15-6.6.ko \
+            dl/kmod/rwbridge-android16-6.12.ko \
+            run.sh blobs.c <<'PYEOF'
           import sys
           def emit(name, path):
               d = open(path, 'rb').read()
-              L = ['const unsigned char %s_start[] = {' % name]
+              # C symbol hygiene: dots/dashes cannot appear in identifiers
+              sym = name.replace('.', '_').replace('-', '_')
+              L = ['const unsigned char %s_start[] = {' % sym]
               L.append(','.join(str(b) for b in d))
               L.append('};')
-              L.append('const unsigned long %s_len = %d;' % (name, len(d)))
+              L.append('const unsigned long %s_len = %d;' % (sym, len(d)))
               return '\n'.join(L)
-          _, plain, cfi, sh, out = sys.argv
-          open(out, 'w').write(
-              emit('_binary_rwbridge_ko', plain) + '\n' +
-              emit('_binary_rwbridge_cfi_ko', cfi) + '\n' +
-              emit('_binary_runsh', sh) + '\n')
-          print('blobs written')
+          *kos, sh, out = sys.argv[1:]
+          assert len(kos) == 8, "need exactly 8 KMI artifacts, got %d" % len(kos)
+          parts = [emit('_binary_rwbridge_' + k.split('rwbridge-')[1].rsplit('.ko', 1)[0], k)
+                   for k in kos]
+          parts.append(emit('_binary_runsh', sh))
+          open(out, 'w').write('\n'.join(parts) + '\n')
+          print('blobs written: 8 artifacts + run.sh')
           PYEOF
+          grep -c "_binary_rwbridge_.*_start" blobs.c
           aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o rwbridge-spx kmod/spx.c blobs.c
           file rwbridge-spx
           ls -la rwbridge-spx
@@ -240,3 +139,11 @@ jobs:
         with:
           name: rwbridge-spx
           path: rwbridge-spx
+
+      - name: Upload shell bundle (SPX fallback path)
+        uses: actions/upload-artifact@v4
+        with:
+          name: shell-bundle
+          path: |
+            dl/kmod/rwbridge-*.ko
+            run.sh

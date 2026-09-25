@@ -1,48 +1,66 @@
 # SPDX-License-Identifier: GPL-2.0
-# rwbridge — UNIVERSAL single build.
+# rwbridge — wuwa-derived driver, 8-target DDK matrix + single SPX deliverable.
 #
-# Compile ONCE against ANY arm64 kernel tree 5.10+; the resulting .ko is not
-# tied to that tree: struct layouts come from the kopts runtime channel or
-# init-time self-derivation, and vermagic is patched to the running kernel
-# by run.sh at install time. CI builds against the OLDEST supported headers
-# (5.10) which proves no newer-only API is used.
+# Each artifact is built against its own generation's headers (DDK); nothing
+# is shared across generations at compile time. Runtime kernel variance
+# inside a generation (vendor UTS suffixes) is absorbed by the vermagic
+# placeholder + run.sh patch (same contract as before). Symbol resolution
+# (kallsyms via kprobe trick) and CFI-disable run at init; failures refuse
+# loudly (no degraded operation).
 #
-# KDIR is only needed to BUILD (any prepared arm64 tree 5.10+).
+# Product surface: socket (PF_DECnet) + ioctl transports. Inline hooks are
+# NEVER used (hook/ not built); hide paths are compiled out (flags below).
+# Process-hide is a tracked TODO (see README), not present in this tree.
+#
+# KDIR points at the prepared tree for ONE target (CI sets it per matrix
+# job: KMI=android13-5.15 etc.). KMI names the output for packing.
 # check-universal runs on the already-built rwbridge.ko, no KDIR needed.
-obj-m += rwbridge.o
 
-# Self-contained: no libc imports, no stack protector runtime, no CFI
-# instrumentation (single build must load on CFI and non-CFI kernels alike —
-# see README "CFI" for the one residual risk on enforcing kernels).
+obj-m += rwbridge.o
+rwbridge-y := \
+    wuwa/core/wuwa.o \
+    wuwa/net/wuwa_sock.o \
+    wuwa/net/wuwa_protocol.o \
+    wuwa/utils/wuwa_utils.o \
+    wuwa/utils/karray_list.o \
+    wuwa/ioctl/wuwa_ioctl.o \
+    wuwa/mm/wuwa_page_walk.o \
+    wuwa/mm/wuwa_bindproc.o \
+    wuwa/proc/wuwa_proc.o \
+    wuwa/inlinehook/hijack_arm64.o
+
+# hijack_arm64.o is linked ONLY for hook_write_range (CFI-disable path).
+# check_target_can_hijack and the call-redirection machinery are never
+# called (no call sites outside that file); kept compiled to avoid forking
+# upstream logic.
+
+ccflags-y += -I$(src)/wuwa/core -I$(src)/wuwa/net -I$(src)/wuwa/ioctl
+ccflags-y += -I$(src)/wuwa/mm -I$(src)/wuwa/inlinehook -I$(src)/wuwa/proc
+ccflags-y += -I$(src)/wuwa/utils
+
+# Behavior flags (locked, not per-target): CFI-disable ON (needed on
+# enforcing kernels — was the plain loader's wall); every hide path OFF;
+# dmabuf transport OFF (socket/ioctl cover the product surface).
+ccflags-y += -DBUILD_NO_CFI -DWUWA_DISABLE_DMABUF
+
+# Warning profile (upstream-tolerant, load-bearing warnings stay on).
+ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes
+ccflags-y += -Wno-int-conversion -Wno-gcc-compat
+ccflags-y += -Wno-declaration-after-statement -Wno-unused-function
+ccflags-y += -Wno-unused-variable
+
 # BTI landing pads are REQUIRED (not optional): BTI-enforcing kernels fault
-# on any indirect branch into pad-less code (oops -> reboot where
-# panic_on_oops=1). Pads decode as NOPs where BTI is unsupported, so one
-# build stays universal. PAC deliberately excluded (no key dependency).
-ccflags-y += -fno-builtin-memcpy -fno-stack-protector -fno-stack-check -fno-builtin -mbranch-protection=bti
-# -ffreestanding -fno-builtin: our byte-loop helpers (rw_memcpy/rw_memset)
-# must never be re-emitted as mem* calls (import surface + load refusal
-# on trees without them). Per-object form below is the enforced one.
-# Per-object form: strongest kbuild guarantee (ccflags-y alone was observed
-# to never reach the gcc line on some trees). Duplicate value = harmless.
-# -march=armv8.5-a is REQUIRED for the bti flag to take effect at all: on
-# the kernel's baseline -march the flag is silently inoperative (no pads, no
-# note, no error). Safe on older CPUs: BTI hints decode as NOP pre-8.5, and
-# this source emits no other 8.5+ instructions (no atomics — spinlock is
-# inline-asm LDXR/STXR; mem* are library calls).
-CFLAGS_rwbridge.o := -mbranch-protection=bti -march=armv8.5-a -ffreestanding -fno-builtin
-# CFI flavor (CFI=1): kcfi typeids so kernel->module indirect calls pass
-# the type check on enforcing kernels. Append-only (BTI pads above stay).
-# kcfi is clang-only: CI cfi job builds with LLVM=1. Typeids are
-# canonical prototype hashes (compiler-version independent in theory —
-# verified live on the CFI test kernel, never assumed). No new imports
-# (typeids are local labels), so the allowlist below still holds.
-ifdef CFI
-CFLAGS_rwbridge.o += -fsanitize=kcfi
-endif
+# on any indirect branch into pad-less code. Pads decode as NOPs elsewhere.
+# -march=armv8.5-a is REQUIRED for the flag to take effect at all.
+ccflags-y += -mbranch-protection=bti -march=armv8.5-a
+
+# No stack-protector runtime dependency (single image must not depend on
+# per-tree helper availability beyond the checked import surface).
+ccflags-y += -fno-stack-protector -fno-stack-check
 
 all:
 	@if [ -z "$(KDIR)" ]; then \
-		echo "KDIR unset: point it at ANY prepared arm64 kernel tree 5.10+"; \
+		echo "KDIR unset: point it at the prepared tree for one matrix target (see README + CI)"; \
 		exit 1; \
 	fi
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
@@ -50,27 +68,21 @@ all:
 clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
 
-# Static universality gate: fails the build if the module drifted off the
-# stable import surface or grew version bindings. NOTE: printk/_printk are
-# deliberately ABSENT — logging is zero-import (in-module ring); if code
-# ever emits a printk-family import again, this gate must fail.
-# Allowlist besides module_layout/mem*: copy_from_kernel_nofault (stable
-# since forever, linear-map reads) and param_ops_int (stability/readonly
-# flags use the kernel's own int handlers — zero custom parse code, ABI
-# frozen for 15+ years). Versions/imports are checked by
-# check_universal.py (exact ELF parsing — readelf column-guessing caused
-# a false failure once); BTI/pads/vermagic stay inline below.
+# Static gate: fails the build if the module drifted off the checked
+# surface. Import rule (owner-amended for the matrix architecture): GKI
+# trees always export printk + the socket/mm/process APIs used here, and
+# each artifact is verified against ITS OWN generation's System.map by
+# check_universal.py (exact ELF parsing). kallsyms_lookup_name is never
+# imported (kprobe-trick runtime resolution only). No procfs (sysfs-free:
+# socket/ioctl transport). No CR0/WP games. BTI pads + vermagic
+# placeholder stay inline below.
 check-universal: all
 	@echo "== versions/imports via check_universal.py =="
 	@$(CROSS_COMPILE)nm -u rwbridge.ko | awk '{print $$2}' | sort -u | tee /tmp/rwbridge.undef
-	@python3 check_universal.py rwbridge.ko /tmp/rwbridge.undef
+	@python3 check_universal.py rwbridge.ko /tmp/rwbridge.undef $(KMI) $(KDIR)/System.map
 	@echo "== BTI landing pads present =="
 	@$(CROSS_COMPILE)objdump -d rwbridge.ko | grep -qiE 'bti([[:space:]]|$$)|hint[[:space:]]' || \
 		{ echo "FAIL: no BTI pads (BTI kernels fault on entry -> reboot)"; exit 1; }
-	@echo "-- pad count (need >=9: init/exit + 7 param handlers) --"; \
-	N=$$($(CROSS_COMPILE)objdump -d rwbridge.ko | grep -ciE 'bti([[:space:]]|$$)|hint[[:space:]]'); \
-	echo "pads=$$N"; [ "$$N" -ge 9 ] || \
-		{ echo "FAIL: only $$N pads, need >=9 entry points covered"; exit 1; }
 	@echo "== vermagic placeholder present =="
 	@strings rwbridge.ko | grep -q '^vermagic=' || { echo "FAIL: no vermagic"; exit 1; }
-	@echo "universal checks passed"
+	@echo "-- KMI=$(KMI) checks passed"

@@ -1,18 +1,21 @@
-/* spx.c — SPX packed loader: ONE native binary carrying both LKM flavors
- * (plain + CFI) plus run.sh, responsible for external patching and loading.
+/* spx.c — SPX packed loader: ONE native binary carrying the 8 KMI LKM
+ * artifacts plus run.sh, responsible for external patching and loading.
  *
- * Flow: detect kernel (uname) -> select flavor (CFI+6.1+ => cfi, older and
- * non-CFI => plain) -> patch embedded copy (vermagic, dispatch slots) ->
- * finit_module -> verify Live. Journal with attempt counting + fsync
- * survives panics: a post-reboot run sees attempt-without-success and
- * falls back to the next flavor instead of retrying into a wall.
- * Never loops forever: each flavor attempted at most twice, then NO-GO.
+ * Flow: detect kernel (uname -r) -> select artifacts whose (kver+generation)
+ * match, exact matches first, kver-only siblings after -> patch embedded
+ * copy (vermagic placeholder) -> finit_module -> verify Live (modules +
+ * socket-probe). Journal with per-artifact attempt counting + fsync survives
+ * panics: a post-reboot run sees attempt-without-success and moves to the
+ * next match instead of retrying into a wall. Never loops forever: each
+ * artifact attempted at most twice, then NO-GO (refuse loudly — a wrong
+ * generation's structs would mis-walk, strictly worse than not loading).
+ * No dispatch-slot surgery exists anymore (matched builds need none).
  *
- * No python3, no toybox beyond sh, no zlib (no config parsing — ground
- * truth from journal + Live checks instead). Static PIE (runs on bionic).
+ * No python3, no toybox beyond sh, no zlib (ground truth from journal +
+ * Live checks instead). Static PIE (runs on bionic).
  *
- * Build (CI pack job): blobs generated from the two .ko files + run.sh
- *   python3 genblobs.py rwbridge.ko rwbridge-cfi.ko run.sh > blobs.c
+ * Build (CI pack job): blobs generated from the eight .ko files + run.sh
+ * (see workflow heredoc) then
  *   aarch64-linux-gnu-gcc -static-pie -O2 -o rwbridge-spx spx.c blobs.c
  *
  * CLI: rwbridge-spx [--dry-run] [--extract-runsh] [--ko PATH (test hook)]
@@ -39,10 +42,22 @@
 #endif
 
 /* blobs.c provides these (generated, never committed) */
-extern const unsigned char _binary_rwbridge_ko_start[];
-extern const unsigned long _binary_rwbridge_ko_len;
-extern const unsigned char _binary_rwbridge_cfi_ko_start[];
-extern const unsigned long _binary_rwbridge_cfi_ko_len;
+extern const unsigned char _binary_rwbridge_a12_5_10_ko_start[];
+extern const unsigned long _binary_rwbridge_a12_5_10_ko_len;
+extern const unsigned char _binary_rwbridge_a13_5_10_ko_start[];
+extern const unsigned long _binary_rwbridge_a13_5_10_ko_len;
+extern const unsigned char _binary_rwbridge_a13_5_15_ko_start[];
+extern const unsigned long _binary_rwbridge_a13_5_15_ko_len;
+extern const unsigned char _binary_rwbridge_a14_5_15_ko_start[];
+extern const unsigned long _binary_rwbridge_a14_5_15_ko_len;
+extern const unsigned char _binary_rwbridge_a14_6_1_ko_start[];
+extern const unsigned long _binary_rwbridge_a14_6_1_ko_len;
+extern const unsigned char _binary_rwbridge_a15_6_1_ko_start[];
+extern const unsigned long _binary_rwbridge_a15_6_1_ko_len;
+extern const unsigned char _binary_rwbridge_a15_6_6_ko_start[];
+extern const unsigned long _binary_rwbridge_a15_6_6_ko_len;
+extern const unsigned char _binary_rwbridge_a16_6_12_ko_start[];
+extern const unsigned long _binary_rwbridge_a16_6_12_ko_len;
 extern const unsigned char _binary_runsh_start[];
 extern const unsigned long _binary_runsh_len;
 
@@ -67,8 +82,7 @@ static void jlog(const char *op, const char *msg)
 
 /* ---- state: attempt counting across reboots ---- */
 struct state {
-    int cfi_tried;
-    int plain_tried;
+    int tried[8];
 };
 
 static void state_load(struct state *s)
@@ -78,9 +92,10 @@ static void state_load(struct state *s)
     f = fopen(STATE_PATH, "r");
     if (!f)
         return;
-    if (fscanf(f, "%d %d", &s->cfi_tried, &s->plain_tried) != 2) {
-        s->cfi_tried = 0;
-        s->plain_tried = 0;
+    if (fscanf(f, "%d %d %d %d %d %d %d %d", &s->tried[0], &s->tried[1],
+                &s->tried[2], &s->tried[3], &s->tried[4], &s->tried[5],
+                &s->tried[6], &s->tried[7]) != 8) {
+        memset(s->tried, 0, sizeof(s->tried));
     }
     fclose(f);
 }
@@ -90,7 +105,9 @@ static void state_save(const struct state *s)
     FILE *f = fopen(STATE_PATH, "w");
     if (!f)
         return;
-    fprintf(f, "%d %d\n", s->cfi_tried, s->plain_tried);
+    fprintf(f, "%d %d %d %d %d %d %d %d\n", s->tried[0], s->tried[1],
+            s->tried[2], s->tried[3], s->tried[4], s->tried[5],
+            s->tried[6], s->tried[7]);
     fflush(f);
     fsync(fileno(f));
     fclose(f);
@@ -242,171 +259,12 @@ static int dmesg_want(char *out, int cap)
 }
 
 /* ---- ELF helpers (pure, no deps) ---- */
-struct esecs {
-    long mod_off, mod_size;
-    long rela_off;
-    long rela_count;
-    long sym_off;
-    long str_off;
-};
 
-static int elf_sections(const unsigned char *d, long n, struct esecs *e,
-                        long *shoff_out)
-{
-    Elf64_Ehdr *h;
-    Elf64_Shdr *sh;
-    char *shstr;
-    int i, shnum;
-    long shoff;
-    if (n < (long)sizeof(Elf64_Ehdr) || memcmp(d, "\x7f" "ELF", 4))
-        return -1;
-    h = (Elf64_Ehdr *)d;
-    if (h->e_ident[EI_CLASS] != ELFCLASS64)
-        return -1;
-    shoff = (long)h->e_shoff;
-    shnum = h->e_shnum;
-    memset(e, 0, sizeof(*e));
-    if (shoff <= 0 || shoff + (long)shnum * (long)sizeof(Elf64_Shdr) > n)
-        return -1;
-    sh = (Elf64_Shdr *)(d + shoff);
-    if (h->e_shstrndx >= (Elf64_Half)shnum)
-        return -1;
-    shstr = (char *)(d + sh[h->e_shstrndx].sh_offset);
-    for (i = 0; i < shnum; i++) {
-        const char *nm = shstr + sh[i].sh_name;
-        if (!strcmp(nm, ".gnu.linkonce.this_module")) {
-            e->mod_off = (long)sh[i].sh_offset;
-            e->mod_size = (long)sh[i].sh_size;
-        } else if (!strcmp(nm, ".rela.gnu.linkonce.this_module")) {
-            e->rela_off = (long)sh[i].sh_offset;
-            e->rela_count = (long)(sh[i].sh_size / sizeof(Elf64_Rela));
-        } else if (!strcmp(nm, ".strtab")) {
-            e->str_off = (long)sh[i].sh_offset;
-        } else if (sh[i].sh_type == SHT_SYMTAB) {
-            e->sym_off = (long)sh[i].sh_offset;
-        }
-    }
-    if (shoff_out)
-        *shoff_out = shoff;
-    return (e->mod_off > 0 && e->rela_off > 0 && e->sym_off > 0 &&
-            e->str_off > 0) ? 0 : -1;
-}
 
-static int sym_name(const unsigned char *d, long sym_off, long str_off,
-                    long idx, char *out, int cap)
-{
-    Elf64_Sym *s = (Elf64_Sym *)(d + sym_off + idx * sizeof(Elf64_Sym));
-    long a = str_off + (long)s->st_name;
-    int i = 0;
-    while (i < cap - 1 && d[a + i]) {
-        out[i] = (char)d[a + i];
-        i++;
-    }
-    out[i] = 0;
-    return 0;
-}
 
 /* read current init/exit slot offsets from target's relas (symbol-matched) */
-static int target_slots(unsigned char *d, long n, long *init_off,
-                        long *exit_off)
-{
-    struct esecs e;
-    long i;
-    char nm[64];
-    *init_off = *exit_off = -1;
-    if (elf_sections(d, n, &e, NULL) < 0)
-        return -1;
-    for (i = 0; i < e.rela_count; i++) {
-        Elf64_Rela *r = (Elf64_Rela *)(d + e.rela_off + i * sizeof(*r));
-        sym_name(d, e.sym_off, e.str_off, (long)ELF64_R_SYM(r->r_info), nm,
-                 sizeof(nm));
-        if (!strcmp(nm, "init_module"))
-            *init_off = (long)r->r_offset;
-        else if (!strcmp(nm, "cleanup_module"))
-            *exit_off = (long)r->r_offset;
-    }
-    return (*init_off >= 0 && *exit_off >= 0) ? 0 : -1;
-}
 
 /* dispatch-slot surgery: grow this_module if needed, move relas to ref slots */
-static int slot_surgery(unsigned char **dp, long *np, long want_init,
-                        long want_exit)
-{
-    unsigned char *d = *dp;
-    long n = *np;
-    struct esecs e;
-    long i, ins_at, need, shoff;
-    Elf64_Ehdr *h;
-    char nm[64];
-    int changed = 0;
-    if (elf_sections(d, n, &e, &shoff) < 0)
-        return -1;
-    need = (want_init > want_exit ? want_init : want_exit) + 8;
-    if (need > e.mod_size) {
-        /* grow: insert 0x100 zeros at section end, fix e_shoff/sh_offsets */
-        long grow = 0x100, shnum;
-        unsigned char *nd;
-        ins_at = e.mod_off + e.mod_size;
-        nd = malloc((size_t)(n + grow));
-        if (!nd)
-            return -1;
-        memcpy(nd, d, (size_t)ins_at);
-        memset(nd + ins_at, 0, (size_t)grow);
-        memcpy(nd + ins_at + grow, d + ins_at, (size_t)(n - ins_at));
-        free(d);
-        d = nd;
-        n += grow;
-        h = (Elf64_Ehdr *)d;
-        shnum = h->e_shnum;
-        h->e_shoff += (Elf64_Off)grow;
-        for (i = 0; i < shnum; i++) {
-            Elf64_Shdr *s = (Elf64_Shdr *)(d + h->e_shoff + i * sizeof(*s));
-            if ((long)s->sh_offset >= ins_at && s->sh_size)
-                s->sh_offset += (Elf64_Off)grow;
-        }
-        /* re-derive (struct copy, recompute below via fresh parse) */
-        if (elf_sections(d, n, &e, NULL) < 0) {
-            free(d);
-            return -1;
-        }
-        {
-            /* fix grown section size */
-            long shoff2;
-            int j, shn2;
-            Elf64_Ehdr *h2 = (Elf64_Ehdr *)d;
-            shoff2 = (long)h2->e_shoff;
-            shn2 = h2->e_shnum;
-            for (j = 0; j < shn2; j++) {
-                Elf64_Shdr *s = (Elf64_Shdr *)(d + shoff2 + j * sizeof(*s));
-                if ((long)s->sh_offset == e.mod_off) {
-                    s->sh_size += (Elf64_Xword)grow;
-                    break;
-                }
-            }
-            if (elf_sections(d, n, &e, NULL) < 0) {
-                free(d);
-                return -1;
-            }
-        }
-    }
-    for (i = 0; i < e.rela_count; i++) {
-        Elf64_Rela *r = (Elf64_Rela *)(d + e.rela_off + i * sizeof(*r));
-        long want = -1;
-        sym_name(d, e.sym_off, e.str_off, (long)ELF64_R_SYM(r->r_info), nm,
-                 sizeof(nm));
-        if (!strcmp(nm, "init_module"))
-            want = want_init;
-        else if (!strcmp(nm, "cleanup_module"))
-            want = want_exit;
-        if (want >= 0 && (long)r->r_offset != want) {
-            r->r_offset = (Elf64_Addr)want;
-            changed = 1;
-        }
-    }
-    *dp = d;
-    *np = n;
-    return changed ? 1 : 0;
-}
 
 /* vermagic in-place patch (placeholder always fits: baked 63-char UTS cap) */
 static int patch_vermagic(unsigned char *d, long n, const char *want)
@@ -427,46 +285,8 @@ static int patch_vermagic(unsigned char *d, long n, const char *want)
 }
 
 /* read whole file; 0 ok with malloc'd *out (caller frees), -1 fail */
-static int read_file(const char *path, unsigned char **out, long *n)
-{
-    FILE *f = fopen(path, "rb");
-    struct stat st;
-    unsigned char *d;
-    if (!f)
-        return -1;
-    if (fstat(fileno(f), &st) < 0 || st.st_size <= 0 ||
-        st.st_size > (32 << 20)) {
-        fclose(f);
-        return -1;
-    }
-    d = malloc((size_t)st.st_size);
-    if (!d) {
-        fclose(f);
-        return -1;
-    }
-    if (fread(d, 1, (size_t)st.st_size, f) != (size_t)st.st_size) {
-        free(d);
-        fclose(f);
-        return -1;
-    }
-    fclose(f);
-    *out = d;
-    *n = (long)st.st_size;
-    return 0;
-}
 
 /* dispatch slots from a reference .ko file (symbol-matched, 0 ok) */
-static int ref_slots_from_file(const char *path, long *rio, long *reo)
-{
-    unsigned char *d;
-    long n;
-    int r;
-    if (read_file(path, &d, &n) < 0)
-        return -1;
-    r = target_slots(d, n, rio, reo);
-    free(d);
-    return r;
-}
 
 /* ---- finit_module + Live verify ---- */
 static int do_insmod(const unsigned char *d, long n, const char *args)
@@ -512,38 +332,63 @@ static int is_live(void)
     return found;
 }
 
-static int saferead(char *out, int cap, const char *path)
+/* proto liveness: scan families for the driver marker (SEQPACKET ->
+ * ENOKEY) then open a RAW socket on it. Proves the proto registered,
+ * i.e. the module is not just present but serving. Bounded scan. */
+#include <sys/socket.h>
+#include <errno.h>
+#ifndef SOCK_SEQPACKET
+#define SOCK_SEQPACKET 5
+#endif
+#ifndef SOCK_RAW
+#define SOCK_RAW 3
+#endif
+#ifndef PF_DECNET
+#define PF_DECNET 12
+#endif
+#ifndef ENOKEY
+#define ENOKEY 126
+#endif
+static int proto_live(void)
 {
-    FILE *f = fopen(path, "r");
-    int i = 0, c;
-    if (!f)
-        return -1;
-    while (i < cap - 1 && (c = fgetc(f)) != EOF && c != '\n')
-        out[i++] = (char)c;
-    out[i] = 0;
-    fclose(f);
+    int fam, s1, s2;
+    for (fam = PF_DECnet; fam < PF_DECnet + 16; fam++) {
+        s1 = socket(fam, SOCK_SEQPACKET, 0);
+        if (s1 >= 0) {
+            close(s1);
+            continue;
+        }
+        if (errno != ENOKEY)
+            continue;
+        s2 = socket(fam, SOCK_RAW, 0);
+        if (s2 < 0)
+            continue;
+        close(s2);
+        return 1;
+    }
     return 0;
 }
+
 
 /* ---- flavor blobs ---- */
 struct blob {
     const char *name;
+    const char *kver;
+    const char *gen;
     const unsigned char *d;
     long n;
-    int cfi;
 };
 
 int main(int argc, char **argv)
 {
     struct state st;
-    char vm[160], msg[256], stab[32], iss[32];
+    char vm[160], msg[256];
     int major, i, rc;
     const unsigned char *bd;
     long bn;
-    int use_cfi;
     unsigned char *work;
-    struct blob flavors[2];
-    int order[2], norder = 0;
+    struct blob flavors[8];
+    int order[8], norder = 0;
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dry-run")) {
@@ -565,31 +410,93 @@ int main(int argc, char **argv)
     }
     jlog("spx", "start");
 
-    flavors[0].name = "plain";
-    flavors[0].d = _binary_rwbridge_ko_start;
-    flavors[0].n = (long)_binary_rwbridge_ko_len;
-    flavors[0].cfi = 0;
-    flavors[1].name = "cfi";
-    flavors[1].d = _binary_rwbridge_cfi_ko_start;
-    flavors[1].n = (long)_binary_rwbridge_cfi_ko_len;
-    flavors[1].cfi = 1;
+    flavors[0].name = "a12-5.10"; flavors[0].kver = "5.10"; flavors[0].gen = "android12";
+    flavors[0].d = _binary_rwbridge_a12_5_10_ko_start;
+    flavors[0].n = (long)_binary_rwbridge_a12_5_10_ko_len;
+    flavors[1].name = "a13-5.10"; flavors[1].kver = "5.10"; flavors[1].gen = "android13";
+    flavors[1].d = _binary_rwbridge_a13_5_10_ko_start;
+    flavors[1].n = (long)_binary_rwbridge_a13_5_10_ko_len;
+    flavors[2].name = "a13-5.15"; flavors[2].kver = "5.15"; flavors[2].gen = "android13";
+    flavors[2].d = _binary_rwbridge_a13_5_15_ko_start;
+    flavors[2].n = (long)_binary_rwbridge_a13_5_15_ko_len;
+    flavors[3].name = "a14-5.15"; flavors[3].kver = "5.15"; flavors[3].gen = "android14";
+    flavors[3].d = _binary_rwbridge_a14_5_15_ko_start;
+    flavors[3].n = (long)_binary_rwbridge_a14_5_15_ko_len;
+    flavors[4].name = "a14-6.1"; flavors[4].kver = "6.1"; flavors[4].gen = "android14";
+    flavors[4].d = _binary_rwbridge_a14_6_1_ko_start;
+    flavors[4].n = (long)_binary_rwbridge_a14_6_1_ko_len;
+    flavors[5].name = "a15-6.1"; flavors[5].kver = "6.1"; flavors[5].gen = "android15";
+    flavors[5].d = _binary_rwbridge_a15_6_1_ko_start;
+    flavors[5].n = (long)_binary_rwbridge_a15_6_1_ko_len;
+    flavors[6].name = "a15-6.6"; flavors[6].kver = "6.6"; flavors[6].gen = "android15";
+    flavors[6].d = _binary_rwbridge_a15_6_6_ko_start;
+    flavors[6].n = (long)_binary_rwbridge_a15_6_6_ko_len;
+    flavors[7].name = "a16-6.12"; flavors[7].kver = "6.12"; flavors[7].gen = "android16";
+    flavors[7].d = _binary_rwbridge_a16_6_12_ko_start;
+    flavors[7].n = (long)_binary_rwbridge_a16_6_12_ko_len;
 
     major = kernel_major();
     snprintf(msg, sizeof(msg), "kernel major=%d", major);
     jlog("detect", msg);
 
-    /* selection contract: CFI + 6.1+ => cfi; older and non-CFI => plain.
-     * CFI presence is read from ground truth, not config: try cfi first
-     * on 6.x (journal survives a trap), plain first below 6. */
+    /* selection contract: match uname -r against (kver AND generation)
+     * exactly first (pass 1), then kver-only siblings (pass 2, e.g. vendor
+     * releases without an android tag). kver compares NUMERICALLY
+     * (major.minor) so 6.1 never matches 6.12. Cross-generation attempts
+     * are refused outright: a wrong generation's structs would mis-walk,
+     * strictly worse than not loading. */
     state_load(&st);
-    if (major >= 6) {
-        order[0] = 1;
-        order[1] = 0;
-    } else {
-        order[0] = 0;
-        order[1] = 1;
+    {
+        struct utsname u;
+        char rel[160] = {0};
+        int pass, f;
+        if (uname(&u) == 0) {
+            size_t rl = strlen(u.release);
+            if (rl >= sizeof(rel)) rl = sizeof(rel) - 1;
+            memcpy(rel, u.release, rl);
+            rel[rl] = 0;
+        }
+        snprintf(msg, sizeof(msg), "release=%s", rel[0] ? rel : "?");
+        jlog("detect", msg);
+        for (pass = 0; pass < 2 && norder < 8; pass++) {
+            for (f = 0; f < 8 && norder < 8; f++) {
+                int kvmaj = 0, kvmin = 0, ok = 0;
+                if (!rel[0]) continue;
+                if (sscanf(rel, "%d.%d", &kvmaj, &kvmin) != 2) continue;
+                {
+                    int fmaj = 0, fmin = 0;
+                    if (sscanf(flavors[f].kver, "%d.%d", &fmaj, &fmin) != 2)
+                        continue;
+                    if (kvmaj != fmaj || kvmin != fmin)
+                        continue;
+                }
+                if (pass == 0) {
+                    if (!strstr(rel, flavors[f].gen))
+                        continue;
+                    ok = 1;
+                } else {
+                    ok = 1;
+                }
+                if (ok) {
+                    int dup = 0, k;
+                    for (k = 0; k < norder; k++)
+                        if (order[k] == f) dup = 1;
+                    if (!dup) {
+                        order[norder++] = f;
+                        snprintf(msg, sizeof(msg), "match pass %d: %s",
+                                 pass, flavors[f].name);
+                        jlog("select", msg);
+                    }
+                }
+            }
+        }
     }
-    norder = 2;
+    if (norder == 0) {
+        jlog("select", "NO-GO: no artifact matches this kernel");
+        if (jfp)
+            fclose(jfp);
+        return 1;
+    }
 
     if (target_vermagic(vm, sizeof(vm)) < 0) {
         jlog("vermagic", "target resolve failed, aborting");
@@ -599,8 +506,7 @@ int main(int argc, char **argv)
 
     for (i = 0; i < norder; i++) {
         int fi = order[i];
-        long rio = -1, reo = -1;
-        int *tried = fi ? &st.cfi_tried : &st.plain_tried;
+        int *tried = &st.tried[fi];
         if (*tried >= 2) {
             snprintf(msg, sizeof(msg), "%s already tried twice, skipping",
                      flavors[fi].name);
@@ -613,7 +519,7 @@ int main(int argc, char **argv)
                  bn);
         jlog("select", msg);
         if (dry) {
-            jlog("dry-run", "would patch vermagic + slots, then insmod");
+            jlog("dry-run", "would patch vermagic, then insmod");
             continue;
         }
         work = malloc((size_t)bn);
@@ -627,64 +533,19 @@ int main(int argc, char **argv)
             free(work);
             continue;
         }
-        /* dispatch slots: derive per-device from on-device reference
-         * (never hardcoded offsets); surgery applies to the cfi flavor
-         * (instrumented: dispatch safe). Plain on CFI kernels is left
-         * alone (dispatch would load-panic — silent-Live wins). */
-        use_cfi = flavors[fi].cfi;
-        if (major >= 6 && use_cfi) {
-            static const char *rdirs[] = {
-                "/vendor/lib/modules", "/vendor_dlkm/lib/modules",
-                "/system/lib/modules", NULL
-            };
-            int di, found = 0;
-            for (di = 0; rdirs[di] && !found; di++) {
-                DIR *dp = opendir(rdirs[di]);
-                struct dirent *de;
-                if (!dp)
-                    continue;
-                while ((de = readdir(dp))) {
-                    size_t L = strlen(de->d_name);
-                    char rp[512];
-                    if (L < 4 || strcmp(de->d_name + L - 3, ".ko"))
-                        continue;
-                    snprintf(rp, sizeof(rp), "%s/%s", rdirs[di],
-                             de->d_name);
-                    if (!ref_slots_from_file(rp, &rio, &reo))
-                        found = 1;
-                    if (found)
-                        break;
-                }
-                closedir(dp);
-            }
-            if (found) {
-                int sr = slot_surgery(&work, &bn, rio, reo);
-                snprintf(msg, sizeof(msg),
-                         "slots init=%#lx exit=%#lx -> %s", rio, reo,
-                         sr > 0 ? "APPLIED" : (sr == 0 ? "already matching" :
-                                                            "FAILED"));
-                jlog("surgery", msg);
-            } else {
-                jlog("surgery", "SKIPPED (no usable reference .ko)");
-            }
-        }
         (*tried)++;
         state_save(&st);
         jlog("insmod", "attempting (state saved + synced)");
-        rc = do_insmod(work, bn, getenv("RWBRIDGE_ARGS"));
+        rc = do_insmod(work, bn, "");
         free(work);
         work = NULL;
-        if (rc == 0 && is_live()) {
-            if (!saferead(stab, sizeof(stab),
-                          "/sys/module/rwbridge/parameters/stability") &&
-                !saferead(iss, sizeof(iss), "/sys/module/rwbridge/initstate")) {
-                snprintf(msg, sizeof(msg), "Live confirmed (%s flavor)",
-                         flavors[fi].name);
-                jlog("verify", msg);
-                if (jfp)
-                    fclose(jfp);
-                return 0;
-            }
+        if (rc == 0 && is_live() && proto_live()) {
+            snprintf(msg, sizeof(msg), "Live confirmed (%s artifact)",
+                     flavors[fi].name);
+            jlog("verify", msg);
+            if (jfp)
+                fclose(jfp);
+            return 0;
         }
         snprintf(msg, sizeof(msg), "%s load failed rc=%d, trying dmesg retry",
                  flavors[fi].name, rc);
@@ -702,12 +563,11 @@ int main(int argc, char **argv)
             if (work) {
                 memcpy(work, flavors[fi].d, (size_t)bn);
                 if (!patch_vermagic(work, bn, vm)) {
-                    /* re-apply surgery on the fresh buffer when gated */
                     jlog("insmod", "retrying same flavor (state kept)");
-                    rc = do_insmod(work, bn, getenv("RWBRIDGE_ARGS"));
+                    rc = do_insmod(work, bn, "");
                     free(work);
                     work = NULL;
-                    if (rc == 0 && is_live()) {
+                    if (rc == 0 && is_live() && proto_live()) {
                         jlog("verify", "Live confirmed on retry");
                         if (jfp)
                             fclose(jfp);

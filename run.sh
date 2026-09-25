@@ -1,22 +1,20 @@
 #!/system/bin/sh
-# rwbridge run.sh — install the UNIVERSAL single-build .ko on any 5.10+ kernel.
+# rwbridge run.sh — install the per-KMI matched .ko on 5.10+ arm64 kernels.
 #
-# There is exactly one rwbridge.ko (no per-KMI matrix). Three things that
-# used to be compile-time are resolved here, at runtime:
+# Eight DDK-built artifacts (one per KMI generation); selection matches
+# uname -r numerically (kver) + android generation, exact first, kver-only
+# siblings after. Two things that used to be compile-time are resolved
+# here, at runtime:
 #   1. vermagic — the baked placeholder is patched in a temp copy to match
 #      the running kernel (dmesg-feedback retry if extras differ), then
 #      insmod runs clean (no --force, ever).
-#   2. kernel layout data — per-kernel offsets (task_struct, mm_struct,
-#      page-table geometry) travel in each E/Y op's arguments (explicit,
-#      stateless; see README "Bring-up on a new kernel"). Nothing is
-#      baked per-KMI and nothing is derived by blind sweeps.
-#   3. diagnostics — printk candidates are surveyed (informational; the
-#      module imports none), every risky action is journaled with
-#      expectation + outcome to /sdcard/MemoryD/J*.log (sync-before-risk,
-#      post-reboot forensics), and the session log is saved to
-#      /sdcard/MemoryD/N.log (next free number). On CFI kernels the
-#      journal + kernel-side surfaces ARE the log: custom params trap,
-#      so they are never touched there.
+#   2. CFI — enforcing kernels are handled inside the driver (cfi_bypass
+#      patches the check functions at init); no separate artifact, no
+#      flavor switch.
+# Diagnostics: every risky action is journaled with expectation + outcome
+# to /sdcard/MemoryD/J*.log (sync-before-risk, post-reboot forensics),
+# and the session log is saved to /sdcard/MemoryD/N.log (next free
+# number). Verify = modules entry + socket-proto probe.
 #
 # Requires root. Nothing persists (no boot scripts); worst case is one reboot.
 # Layout: this script + rwbridge.ko side by side (CI artifact, /data/local/tmp).
@@ -31,9 +29,9 @@ die() { echo "[rwbridge] ERROR: $1"; exit 1; }
 
 # 0b. Op journal — the logging system that survives hostile kernels.
 # Every risky action is recorded with timestamp + expectation + outcome,
-# persisted incrementally (sync before anything that can reboot). On CFI
-# kernels custom-param reads trap, so this journal plus kernel-side
-# surfaces (coresize/initstate/int params/dmesg/uptime) ARE the log.
+# persisted incrementally (sync before anything that can reboot). The
+# journal plus dmesg/uptime ARE the log (the driver exposes no sysfs
+# params; verify via modules entry + socket probe).
 JDIR="/sdcard/MemoryD"
 JFILE=""
 jinit() {
@@ -81,18 +79,32 @@ else
     done
 fi
 [ -n "$KO" ] || die "rwbridge.ko not found (pass path as \$1 or place next to run.sh)"
-# Flavor: filename decides (CFI instrumented or plain universal).
-CFIFLAVOR="no"
-case "$KO" in *cfi*) CFIFLAVOR="yes";; esac
-
-KVER=$(uname -r)
+KVER=$(uname -r 2>/dev/null)
 log "kernel: $KVER"
+# 1b. Artifact selection: 8 per-KMI builds, match uname -r.
+# Exact (kver+android generation) wins; kver-only siblings are fallback
+# (vendor releases without an android tag). Cross-generation attempts are
+# refused: wrong structs would mis-walk. Explicit $1 still wins.
+if [ -z "$KO" ]; then
+    KREL=$(uname -r 2>/dev/null)
+    KMAJ=$(echo "$KREL" | cut -d. -f1); KMIN=$(echo "$KREL" | cut -d. -f2 | cut -d- -f1)
+    KV="$KMAJ.$KMIN"
+    for pass in exact kver; do
+        for kmi in android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1 android15-6.1 android15-6.6 android16-6.12; do
+            kkver=$(echo "$kmi" | cut -d- -f2); kgen=$(echo "$kmi" | cut -d- -f1);
+            [ "$kkver" = "$KV" ] || continue
+            if [ "$pass" = exact ]; then case "$KREL" in *"$kgen"*) ;; *) continue;; esac; fi
+            for c in "${SCRIPT_DIR}/rwbridge-${kmi}.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge-${kmi}.ko"; do
+                if [ -f "$c" ]; then KO="$c"; break 3; fi
+            done
+        done
+    done
+fi
+[ -n "$KO" ] || die "no artifact matches $KVER (need per-KMI build; see README)"
+log "artifact selected: $KO"
 
-# 2. CFI safety gate (/proc/config.gz present on GKI).
-# Non-CFI kernels: always fine. CFI kernels: every kernel->module sysfs
-# access and rmmod trap deterministically (each op reboots, not just the
-# first); init is skipped by the loader. Without pstore the panic string
-# is lost on reboot, so the config flag itself is the diagnosis.
+# CFI note: enforcing kernels are handled at runtime (cfi_bypass patches
+# the check functions after load). No separate artifact, no flavor switch.
 CFI="unknown"
 if [ -f /proc/config.gz ]; then
     if gzip -dc /proc/config.gz 2>/dev/null | grep -q "^CONFIG_CFI_CLANG=y"; then
@@ -101,24 +113,7 @@ if [ -f /proc/config.gz ]; then
         CFI="no"
     fi
 fi
-if [ "$CFI" = "yes" ]; then
-    log "WARNING: CFI-enforcing kernel — every sysfs access reboots;"
-    log "  this kernel needs a CFI build (source needs no change, flags only)."
-    log "  Confirm via /proc/config.gz (dmesg does not survive reboot). Continuing in 3s..."
-    # Prefer the CFI flavor artifact when present (explicit $1 still wins).
-    if [ -z "$1" ]; then
-        for _c in "${SCRIPT_DIR}/rwbridge-cfi.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge-cfi.ko"; do
-            if [ -f "$_c" ]; then
-                KO="$_c"; CFIFLAVOR="yes"
-                log "CFI flavor selected: $KO"
-                break
-            fi
-        done
-    fi
-    sleep 3
-else
-    log "CFI: $CFI (proceeding)"
-fi
+log "CFI: $CFI (runtime-handled)"
 
 # 3. Resolve the TARGET vermagic value.
 # Priority: full vermagic from any on-device .ko (exact, incl. extras —
@@ -321,223 +316,10 @@ PYEOF
 patch_vermagic "$TMPKO" "$TARGET_VM" || die "vermagic patch failed"
 log "vermagic patched"
 
-# 5. Staged-trust flags (see README): stability soak first (load +
-# idle, no scans), then read-only sessions, writes last. Plain kernel
-# int params (no custom parse code on either side).
-# NOTE: the kopts string channel is RETIRED (reads of module-arg memory
-# wedge some loaders; the module answers -EPERM). RWBRIDGE_KOPTS is
-# ignored with a warning; per-kernel layout data travels via E/Y op
-# arguments (explicit, stateless), never via insmod.
+# 5. Module args: none. The driver takes no insmod parameters
+# (all state is runtime-derived or socket-passed).
 INSMOD_OPTS=""
-if [ -n "$RWBRIDGE_KOPTS" ]; then
-    log "WARN: RWBRIDGE_KOPTS retired — layout data goes in E/Y op args now"
-fi
-# Bring-up modes (staged trust — see README): stability soak first
-# (load + idle, no scans), then read-only sessions, writes last.
-if [ -n "$RWBRIDGE_STABILITY" ]; then
-    INSMOD_OPTS="${INSMOD_OPTS:+$INSMOD_OPTS }stability=1"
-    log "stability soak requested"
-fi
-if [ -n "$RWBRIDGE_READONLY" ]; then
-    INSMOD_OPTS="${INSMOD_OPTS:+$INSMOD_OPTS }readonly=1"
-    log "read-only session requested"
-fi
-if [ -z "$INSMOD_OPTS" ]; then
-    log "flags: none (full session)"
-fi
 
-# 6. Printk-family candidate search (informational).
-# The module imports no printk-family symbol, so this never blocks loading;
-# it only records what this kernel offers, for the log header.
-printk_candidates() {
-    grep -E ' (_printk|printk|printk_deferred|vprintk|printk_once)$' /proc/kallsyms 2>/dev/null \
-        | awk '{print $3}' | sort -u | tr '\n' ' '
-}
-CANDS=$(printk_candidates)
-if [ -z "$CANDS" ]; then
-    CANDS="(none exported — module unaffected: zero-import logging)"
-fi
-log "printk candidates on this kernel: $CANDS"
-
-# 7. Persist the session log: /sdcard/MemoryD/<next>.log where <next> is one
-# past the highest existing numeric name (0.log first, then 1, 2, ...).
-# Best-effort: an unwritable sdcard never fails the install.
-dump_log() {
-    _why="$1"
-    _dir="/sdcard/MemoryD"
-    mkdir -p "$_dir" 2>/dev/null
-    _next=0
-    if [ -d "$_dir" ]; then
-        for _f in "$_dir"/*.log; do
-            [ -f "$_f" ] || continue
-            _b=$(basename "$_f" .log)
-            case "$_b" in
-                ''|*[!0-9]*) continue ;;
-            esac
-            if [ "$_b" -ge "$_next" ] 2>/dev/null; then
-                _next=$((_b + 1))
-            fi
-        done
-    fi
-    LASTLOG="$_dir/$_next.log"
-    {
-        echo "=== rwbridge session log ($_why) ==="
-        echo "date: $(date 2>/dev/null)"
-        echo "kernel: $(uname -r)"
-        echo "journal: $JFILE"
-        echo "printk candidates: $CANDS"
-        if [ "$CFI" = "yes" ]; then
-            echo "--- CFI kernel: custom params (log/stage/status/out) SKIPPED (trap) ---"
-            echo "--- safe surface ---"
-            echo "coresize=$(saferead /sys/module/rwbridge/coresize)"
-            echo "initstate=$(saferead /sys/module/rwbridge/initstate)"
-            echo "stability=$(saferead /sys/module/rwbridge/parameters/stability)"
-            echo "readonly=$(saferead /sys/module/rwbridge/parameters/readonly)"
-            echo "uptime=$(cat /proc/uptime 2>/dev/null)"
-            echo "kallsyms_syms=$(grep -c rwbridge /proc/kallsyms 2>/dev/null)"
-        else
-            echo "--- module log param ---"
-            cat /sys/module/rwbridge/parameters/log 2>/dev/null || echo "(module not loaded)"
-            echo "--- stage/status ---"
-            echo "stage=$(cat /sys/module/rwbridge/parameters/stage 2>/dev/null)"
-            echo "status=$(cat /sys/module/rwbridge/parameters/status 2>/dev/null)"
-        fi
-        echo "--- dmesg (rwbridge) ---"
-        dmesg 2>/dev/null | grep -i rwbridge | tail -30
-    } > "$LASTLOG" 2>/dev/null
-    if [ -f "$LASTLOG" ]; then
-        log "session log: $LASTLOG"
-    else
-        log "note: could not write $LASTLOG (sdcard unwritable?)"
-        LASTLOG="(unwritten)"
-    fi
-}
-
-# 7b. Dispatch-slot surgery (single-artifact fat behavior).
-# A 5.10-built __this_module carries .init/.exit at +0x150/+0x300; 6.x
-# kernels read them elsewhere (6.1: +0x140/+0x3D8) — without adaptation
-# init is skipped (NULL) and rmmod jumps wild. Derive the target slots
-# per-device from an on-device reference .ko (symbol-name matching, never
-# hardcoded offsets): grow this_module if needed + rewrite the two relas.
-# HARD GATES: CFI=yes → skip (dispatch would load-panic, worse than
-# silent-Live); major!=6 → skip (5.x needs nothing); no python3/no
-# reference → skip (silent-Live as today). Idempotent (no-op when matching).
-maybe_surgery() {
-    _ko="$1"
-    _kmajor=$(uname -r 2>/dev/null | cut -d. -f1)
-    # Uninstrumented artifact on CFI kernel: dispatch would load-panic,
-    # strictly worse than silent-Live. The CFI FLAVOR is instrumented,
-    # so dispatch is safe there — surgery applies to it normally.
-    if [ "$CFI" = "yes" ] && [ "$CFIFLAVOR" != "yes" ]; then
-        jlog "surgery" "dispatch slots" "SKIPPED (CFI + plain artifact: dispatch would load-panic)"
-        return 0
-    fi
-    if [ "$_kmajor" != "6" ]; then
-        jlog "surgery" "dispatch slots" "SKIPPED (major $_kmajor needs nothing)"
-        return 0
-    fi
-    command -v python3 >/dev/null 2>&1 || {
-        jlog "surgery" "dispatch slots" "SKIPPED (no python3)"
-        return 0
-    }
-    for _d in /vendor/lib/modules /vendor_dlkm/lib/modules /system/lib/modules; do
-        [ -d "$_d" ] || continue
-        for _k in "$_d"/*.ko; do
-            [ -f "$_k" ] || continue
-            cp -f "$_k" /data/local/tmp/rwref.ko 2>/dev/null || continue
-            _out=$(python3 - /data/local/tmp/rwref.ko "$_ko" <<'PYEOF' 2>&1
-import struct, sys
-ref, tgt = sys.argv[1], sys.argv[2]
-def parse(fname):
-    try: d = bytearray(open(fname, 'rb').read())
-    except Exception: return None
-    if d[:4] != b'\x7fELF': return None
-    e_shoff, = struct.unpack_from('<Q', d, 0x28)
-    e_shentsize, e_shnum = struct.unpack_from('<HH', d, 0x3A)
-    shstr_idx, = struct.unpack_from('<H', d, 0x3E)
-    ss_foff, = struct.unpack_from('<Q', d, e_shoff + shstr_idx*e_shentsize + 24)
-    def secname(off): return d[ss_foff+off:].split(b'\x00')[0].decode()
-    secs = {}
-    for n in range(e_shnum):
-        o = e_shoff + n*e_shentsize
-        nm = secname(struct.unpack_from('<I', d, o)[0])
-        _, st, _, _, so, ss = struct.unpack_from('<IIQQQQ', d, o)
-        secs[nm] = (n, o, st, so, ss)
-    sym = strt = None
-    for nm, (n, o, st, so, ss) in secs.items():
-        if st == 2: sym = (so, ss)
-        if nm == '.strtab': strt = (so, ss)
-    return {'d': d, 'e_shoff': e_shoff, 'e_shentsize': e_shentsize,
-            'e_shnum': e_shnum, 'secs': secs, 'sym': sym, 'strt': strt}
-def symname(p, idx):
-    so, ss = p['sym']; sto, sts = p['strt']
-    sn, = struct.unpack_from('<I', p['d'], so + idx*24)
-    return p['d'][sto+sn:].split(b'\x00')[0].decode()
-def slots(p):
-    if '.rela.gnu.linkonce.this_module' not in p['secs']: return None
-    n, o, st, so, ss = p['secs']['.rela.gnu.linkonce.this_module']
-    out = {}
-    for i in range(ss // 24):
-        eo = so + i*24
-        r_off, r_info = struct.unpack_from('<QQ', p['d'], eo)
-        nm = symname(p, r_info >> 32)
-        if nm in ('init_module', 'cleanup_module'): out[nm] = r_off
-    return out if len(out) == 2 else None
-rp = parse(ref)
-sl = slots(rp) if rp else None
-if sl is None:
-    print('SKIP: no slot relas in reference')
-    sys.exit(1)
-p = parse(tgt)
-cur = slots(p)
-if cur is None:
-    print('SKIP: target slots unreadable')
-    sys.exit(1)
-if cur == sl:
-    print('SKIP: already matching (no-op)')
-    sys.exit(1)
-d = p['d']
-n, o, st, so, ss = p['secs']['.gnu.linkonce.this_module']
-GROW = 0x100
-need = max(sl.values()) + 8
-if need > ss:
-    ins_at = so + ss
-    d[ins_at:ins_at] = b'\x00' * GROW
-    newoff = p['e_shoff'] + GROW
-    struct.pack_into('<Q', d, 0x28, newoff)
-    for m in range(p['e_shnum']):
-        oo = newoff + m*p['e_shentsize']
-        sso, sss = struct.unpack_from('<QQ', d, oo + 24)
-        if sso >= ins_at and sss: struct.pack_into('<Q', d, oo + 24, sso + GROW)
-        if m == n: struct.pack_into('<Q', d, oo + 32, sss + GROW)
-    for nm2 in list(p['secs'].keys()):
-        n2, _, st2, _, _ = p['secs'][nm2]
-        oo2 = newoff + n2*p['e_shentsize']
-        so2, ss2 = struct.unpack_from('<QQ', d, oo2 + 24)
-        p['secs'][nm2] = (n2, oo2, st2, so2, ss2)
-        if st2 == 2: p['sym'] = (so2, ss2)
-        if nm2 == '.strtab': p['strt'] = (so2, ss2)
-rn, ro, rst, rso, rss = p['secs']['.rela.gnu.linkonce.this_module']
-for i in range(rss // 24):
-    eo = rso + i*24
-    r_off, r_info = struct.unpack_from('<QQ', d, eo)
-    nm = symname(p, r_info >> 32)
-    if nm in sl and r_off != sl[nm]: struct.pack_into('<Q', d, eo, sl[nm])
-open(tgt, 'wb').write(bytes(d))
-print('APPLIED init=%#x exit=%#x' % (sl['init_module'], sl['cleanup_module']))
-PYEOF
-)
-            rm -f /data/local/tmp/rwref.ko 2>/dev/null
-            case "$_out" in
-                APPLIED*) jlog "surgery" "dispatch slots" "$_out"; return 0 ;;
-                SKIP*) continue ;;
-                *) continue ;;
-            esac
-        done
-    done
-    jlog "surgery" "dispatch slots" "SKIPPED (no usable reference .ko)"
-    return 0
-}
 
 # 8. Load (never --force) + verify, with dmesg-feedback vermagic retry.
 # If the kernel rejects our extras guess (e.g. it expects a `modversions`
@@ -549,7 +331,6 @@ try_insmod() {
     # must already be on disk for post-reboot forensics (panic = no sync).
     sync 2>/dev/null
     # Dispatch-slot surgery (6.x, CFI-off only; no-op otherwise).
-    maybe_surgery "$TMPKO"
     # shellcheck disable=SC2086
     eval insmod '"$TMPKO"' $INSMOD_OPTS 2>/dev/null
     return $?
@@ -583,21 +364,43 @@ if ! try_insmod; then
 fi
 rm -f "$TMPKO"
 sleep 1
-if [ "$CFI" = "yes" ]; then
-    # Custom stage/status getters trap on CFI kernels — verify via the
-    # kernel-side int param instead (proven readable+writable, zero
-    # module-code execution).
-    STAB=$(saferead /sys/module/rwbridge/parameters/stability)
-    jlog "verify" "Live + readable int params" "initstate=$(saferead /sys/module/rwbridge/initstate) stability=$STAB"
-    log "loaded (CFI: verified via kernel-side surface; custom params untouched)"
-else
-    STAGE=$(cat /sys/module/rwbridge/parameters/stage 2>/dev/null)
-    jlog "verify" "stage readable" "stage=$STAGE"
-    log "loaded; stage=$STAGE"
-    if [ "$STAGE" != "ok" ]; then
-        log "note: derivation did not complete"
-        log "  fix: use explicit E/Y ops with this kernel's offset table (see README)"
+# Verify: module present + socket proto serving. The proto registers on the
+# first free family from 12 (normally 12); a SEQPACKET open returning ENOKEY
+# is the driver's marker, RAW must then succeed. Needs python3; without it
+# the modules entry alone is the verdict (documented, weaker).
+if ! grep -q "^rwbridge " /proc/modules 2>/dev/null; then
+    dump_log "verify"
+    die "module not present after insmod"
+fi
+if command -v python3 >/dev/null 2>&1; then
+    if python3 -c "
+import socket, errno
+for fam in range(12, 28):
+    try:
+        s = socket.socket(fam, socket.SOCK_SEQPACKET)
+        s.close()
+        continue
+    except OSError as e:
+        if e.errno != 126:
+            continue
+    try:
+        s = socket.socket(fam, socket.SOCK_RAW)
+        s.close()
+        print('proto-live fam=%d' % fam)
+        raise SystemExit(0)
+    except OSError:
+        continue
+raise SystemExit(1)
+" 2>/dev/null; then
+        jlog "verify" "modules + socket proto" "Live"
+        log "loaded (proto serving)"
+    else
+        jlog "verify" "modules present, proto silent" "loaded-unverified (see README)"
+        log "loaded (proto check inconclusive — see README)"
     fi
+else
+    jlog "verify" "modules present (no python3 for proto probe)" "loaded-unverified"
+    log "loaded (no proto probe: python3 absent)"
 fi
 
 dump_log "install"

@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
-"""check_universal.py — static universality gate for rwbridge.ko.
-Fails (exit 1) if the module drifted off the universal contract:
-  - __versions section with real CRCs (pins build to one KMI).
-    Absent OR empty is fine (empty lets MODVERSIONS kernels load
-    CRC-less: missing entries warn-and-pass; verified live on 6.1).
-  - undefined symbols outside the allowlist (printk family forbidden).
-  - missing BTI landing pads / vermagic placeholder.
-Usage: check_universal.py rwbridge.ko <nm-undef-file>
-(The nm file is produced by the Makefile with the right CROSS nm.)
+"""check_universal.py — per-KMI static gate for rwbridge.ko.
+Fails (exit 1) if the module drifted off the matrix contract:
+  - __versions section with real CRCs (pins build past its KMI; the
+    runtime vermagic patch cannot fix CRC mismatches).
+  - undefined symbols NOT exported by that KMI generation's own
+    System.map (exact ground truth: the donor tree the artifact was
+    built against). Suffixes (.cfi etc.) are stripped before lookup.
+  - missing vermagic placeholder (runtime patch needs it).
+BTI pads are checked inline by the Makefile, not here.
+Usage: check_universal.py rwbridge.ko <nm-undef-file> <KMI> <System.map>
 """
+import re
 import struct
 import sys
-
-ALLOW = {
-    "module_layout", "memset", "memcpy", "memmove", "memcmp", "strlen",
-    "copy_from_kernel_nofault", "param_ops_int",
-}
 
 
 def die(msg):
@@ -24,15 +21,15 @@ def die(msg):
 
 
 def main():
-    ko_path, undef_path = sys.argv[1], sys.argv[2]
-    b = open(ko_path, "rb").read()
+    ko_path, undef_path, kmi, sysmap_path = sys.argv[1:5]
+    b = open(ko_path, 'rb').read()
     if b[0:4] != b"\x7fELF" or b[4] != 2:
         die("not a 64-bit ELF")
     e_shoff, = struct.unpack_from("<Q", b, 0x28)
     e_shentsize, = struct.unpack_from("<H", b, 0x3A)
     e_shnum, = struct.unpack_from("<H", b, 0x3C)
     e_shstrndx, = struct.unpack_from("<H", b, 0x3E)
-    if e_shentsize != 64 or e_shnum == 0 or e_shnum > 200:
+    if e_shentsize != 64 or e_shnum == 0 or e_shnum > 400:
         die("unexpected section table shape")
     s = e_shoff + e_shstrndx * 64
     st_off, = struct.unpack_from("<Q", b, s + 24)
@@ -47,23 +44,30 @@ def main():
             continue
         size = struct.unpack_from("<Q", b, base + 32)[0]
         if size != 0:
-            die("__versions has CRCs (%d bytes; pins build to one KMI)" % size)
-        print("note: empty __versions present (modversions-loader bypass, no CRCs)")
+            die("__versions has CRCs (%d bytes; pins build past %s)" % (size, kmi))
+        print("note: empty __versions present (no CRCs)")
         break
     else:
-        print("note: no __versions section (pre-modversions kernels load fine)")
+        print("note: no __versions section")
 
+    exported = set()
+    for line in open(sysmap_path, errors="replace"):
+        m = re.match(r"^[0-9a-fA-F]+ [A-Za-z] (\S+)", line)
+        if m:
+            exported.add(m.group(1))
+    if not exported:
+        die("empty System.map?")
     bad = []
     for line in open(undef_path):
         sym = line.split()
         if not sym:
             continue
-        sym = sym[-1]
-        if sym not in ALLOW:
+        sym = sym[-1].split('.')[0]
+        if sym not in exported:
             bad.append(sym)
     if bad:
-        die("unexpected imports: " + " ".join(sorted(set(bad))))
-    print("universal checks passed")
+        die("imports missing from %s System.map: %s" % (kmi, " ".join(sorted(set(bad)))))
+    print("KMI %s checks passed" % kmi)
 
 
 main()

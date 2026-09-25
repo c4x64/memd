@@ -1,294 +1,111 @@
-# rwbridge — universal memory R/W kernel module (ARM64 Android, 5.10+)
+# rwbridge — per-KMI memory R/W driver (ARM64 Android, 5.10+)
 
-One `.ko`, compiled **once**, loads on **any 5.10+ kernel**. Nothing
-kernel-specific is baked in:
+One packed deliverable (`rwbridge-spx`) carrying **8 per-generation
+artifacts**; the loader matches `uname -r` numerically and installs the
+right one. Driver core derived from fuqiuluo/android-wuwa (socket
+transport, page-table walk, phys R/W, kallsyms resolution, CFI-disable);
+inline hooks are never used, hide paths are compiled out, procfs/dmabuf
+transports are excluded. Process-hide is a tracked TODO, not present.
 
-- **Kernel layout data ("offsets") arrives per-op as arguments** to the
-  `E`/`Y` ops (explicit, stateless — see "Bring-up on a new kernel").
-  No per-KMI tables, no blind discovery sweeps in the hot path.
-- **vermagic is resolved at runtime**: `run.sh` patches the baked
-  placeholder to the running kernel in a temp copy, then `insmod`s it.
-  If the kernel rejects the extras guess, dmesg names the exact string
-  it wants and `run.sh` re-patches + retries once. No `--force`, ever.
-  No per-KMI build matrix.
-- **Zero log imports**: the module imports no printk-family symbol at
-  all (diagnostics live in an in-module ring, readable via the `log`
-  sysfs param). A kernel exporting no printk still loads fine.
-- Link-time imports: `module_layout` + compiler `mem*` if emitted,
-  `copy_from_kernel_nofault` (linear-map reads, stable forever),
-  `param_ops_int` (stability/readonly flags use the kernel's own int
-  handlers — zero custom parse code, ABI frozen 15+ years).
-- Page-table geometry (4K/16K/64K pages; 36/39/42/47/48-bit VA) is
-  explicit per-op too, with refuse-on-mismatch semantics (never
-  mis-walks).
+- **8 builds, 1 deliverable.** DDK matrix
+  (`android12-5.10`, `android13-5.10`, `android13-5.15`,
+  `android14-5.15`, `android14-6.1`, `android15-6.1`, `android15-6.6`,
+  `android16-6.12`); each artifact matches its own generation's headers.
+  Vendor variance inside a generation (UTS suffixes) is absorbed by the
+  vermagic placeholder + install-time patch (dmesg-feedback retry).
+  Cross-generation attempts are refused outright (wrong structs would
+  mis-walk — strictly worse than not loading). No `--force`, ever.
+- **CFI is handled at runtime**: `cfi_bypass()` patches the CFI check
+  functions after load (kallsyms-resolved, RET fill). No separate CFI
+  artifact, no flavor switch, no dispatch-slot surgery (matched builds
+  need none).
+- **Symbols resolve at runtime** (kprobe trick on
+  `kallsyms_lookup_name`); unresolvable kernels fail closed at init
+  (return code, never half-alive).
+- **Init is load-bearing** (socket server + resolution + CFI patch must
+  run): unlike the previous sysfs design, there is no useful
+  degraded state, so init failure refuses the load instead of going
+  silent-Live.
+- **Logging via printk** (`wuwa_info/err`): GKI trees always export it
+  and each artifact is verified against its own generation's System.map
+  by the gate. Kernels without the import surface are an explicit
+  NO-GO (below), never a silent break.
 
-## Operations
+## Client contract (product path: socket)
 
-Via the `rw` sysfs param, plus `status`/`out`/`stage`/`log` diagnostic
-params and `stability`/`readonly` session flags (plain kernel int
-params, set at insmod or live via sysfs):
+No device node, no sysfs params. The driver registers a socket family
+(first free from `AF_DECnet`); discover it by probing families with
+`SOCK_SEQPACKET` (driver answers `-ENOKEY`) then opening `SOCK_RAW`.
+All commands are `ioctl()`s on that fd (see `kmod/wuwa/ioctl/`):
 
 ```
-E,pid,addr,size,pid_off,tasks_off,mm_off,pgd_off,page_off,phys_off[,owner[,pshift,vabits]]
-                                  stateless read; hex bytes in `out`
-Y,<same>[,owner[,pshift,vabits]],value
-                                  stateless write (1..8 bytes, native-LE hex)
-V,byteoff,hexval                  verify one u32 at cur_task+off (sync validation)
-F,hexaddr                         single guarded read at absolute kernel VA
-Q,hihex,lohex,offhex              absolute read via hi/lo halves (32-bit shells)
-C,pid,pid_off,tasks_off,mm_off,owner
-                                  owner-validated pid→task census (reports base)
-D                                 stateless tasks-list proof sweep (report-only)
-S,0..7                            single derive steps (legacy path)
-R,pid,addr,size / W,...           legacy cached derive path (4K-only)
-T                                 bare TTBR0-read probe (hypervisor-trap check)
-N / G / K                         retired bisect ops (kept, inert)
-P,cmdline-substr                  find PID by process name substring
-B,pid,libname                     module base (use /proc/<pid>/maps as root instead)
+WUWA_IOCTL_READ_MEMORY / WRITE_MEMORY (phys, arbitrary size)
+WUWA_IOCTL_ADDR_TRANSLATE / AT_S1E0R  (VA translation)
+WUWA_IOCTL_DEBUG_INFO                 (TTBR0/task/mm/pgd — bring-up)
+WUWA_IOCTL_GET_MODULE_BASE / FIND_PROCESS / IS_PROCESS_ALIVE
+WUWA_IOCTL_PAGE_INFO / PAGE_TABLE_WALK / PTE_MAPPING
+WUWA_IOCTL_BIND_PROC / COPY_PROCESS
+WUWA_IOCTL_HIDE_PROCESS               (present, unused — see TO DO)
+WUWA_IOCTL_GIVE_ROOT                  (present, NEVER used by product)
+WUWA_IOCTL_*_IOREMAP / DMA_BUF_CREATE (present, unused by product)
 ```
 
-Conventions: `pid`/`size`/shifts dec; addresses and offsets hex
-(`5d8` = 1496). Every op reports in `status` (`0` = ok, negative errno
-otherwise) with stage breadcrumbs in `stage` and hex/text in `out`.
-`Y` (and legacy `W`) in a `readonly=1` session refuse with `-EROFS`.
-
-Strict validation everywhere: `pid>0`, IN-APP-VA gate (target fully
-inside user address space — NULL/wrap/kernel-spill refused),
-`size` bounds, offset range checks, page-table geometry combo check,
-page_off↔VA-size consistency check. Invalid input returns `-EINVAL`
-(or the specific errno), never oopses.
-
-## Bring-up on a new kernel
-
-Offsets are per-kernel constants, derived once with safe single reads
-(`F`/`V`/`Q` — no sweeps, no walks) plus offline analysis, then passed
-explicitly forever after. Proven recipe (see project history):
-
-1. `S,0` → `cur_task` + `ttbr0` for a live writer.
-2. `V,<off>,<own-pid-hex>` across `task_struct` to confirm `pid_off`
-   (match = offset proven for that writer).
-3. Adjacent-equal-pair + pointer-shape analysis (offline) for
-   `tasks`/`mm` candidates; `V`-verify each.
-4. Walk one `mm_struct` with `F` (batched, single reads): `task_size`,
-   `pgd`, `owner` coherence identifies `mm` and `pgd_off`.
-5. `phys_off = (ttbr0 & PA-mask) − (pgd_va − page_off)` (offline math).
-6. `page_off` from VA high bits (39/48-bit bases; 16K kernels: pass
-   explicit geometry).
-7. Prove end-to-end: `E` read of a known mapping (ELF magic) +
-   `Y` write with `E` readback, both against ground truth.
-
-Bring-up order: plain session (prove load + idle safety) →
-`readonly=1` session (validate translation via reads against ground
-truth) → full session (writes). `run.sh` takes them as
-`RWBRIDGE_STABILITY=1` / `RWBRIDGE_READONLY=1` env passthrough
-(translated to `stability=`/`readonly=` insmod args).
+Strict validation everywhere: `pid>0`, user-VA gates, size bounds.
+Invalid input returns errno, never oopses.
 
 ## Install
 
-CI's sole deliverable is the SPX packed binary (`rwbridge-spx`: both LKM
-flavors embedded + native select/patch/load/journal; `--dry-run` previews
-without touching anything, `--extract-runsh` prints the shell fallback).
-It picks per kernel (CFI + 6.1+ → cfi; older and non-CFI → normal),
-patches the copy (vermagic, dispatch slots), loads via `finit_module`,
-and journals every step with panic-surviving attempt counting (falls back
-across a reboot instead of retrying into a wall). Root required:
+Preferred: `su -c './rwbridge-spx'` (`--dry-run` previews, `--ko PATH`
+tests one file, `--extract-runsh` prints the shell fallback). Journal to
+`/sdcard/MemoryD/J*.log` (+`N.log` session dump), attempt counts in
+`/data/local/tmp/rwbridge.spx` (each artifact at most twice, then
+NO-GO). Fallback: `su -c 'sh ./run.sh [ko]'` with the shell bundle
+(8 `.ko` + `run.sh`). Verify = `/proc/modules` entry + socket-proto
+probe (SEQPACKET→ENOKEY then RAW opens). Nothing persists
+(no boot scripts); worst case is one reboot.
 
-```sh
-su -c './rwbridge-spx'
-```
+## Build (8 × DDK)
 
-Shell fallback (no python3/toolchain on target): `run.sh` + loose
-`rwbridge.ko` side by side (same contract, shell implementation).
+`kmod/Makefile` takes `KDIR` (one prepared tree) + `KMI` (target name).
+CI builds the matrix in DDK containers (pinned release), forces
+MODVERSIONS off (CRCs would pin past the KMI), pads UTS toward the
+63-char cap, runs `check-universal` per artifact (imports ⊆ that
+generation's System.map, no CRCs, BTI pads, placeholder present), then
+packs all 8 + `run.sh` into `blobs.c` and links `rwbridge-spx`
+(static-PIE). Local installs are for TESTING a staged build only.
 
-```sh
-su -c 'sh ./run.sh'
-su -c "echo 'R,1234,0x7ff9a00000,8' > /sys/module/rwbridge/parameters/rw"
-su -c "cat /sys/module/rwbridge/parameters/out"
-su -c "cat /sys/module/rwbridge/parameters/stage"   # breadcrumb on failure
-```
+## Explicit NO-GO list
 
-Every run also surveys printk-family exports (informational only) and
-saves a session log to `/sdcard/MemoryD/<next>.log` (`<next>` = one past
-the highest existing number: `0.log`, then `1.log`, ...) containing the
-module `log` ring, stage/status, candidates, and dmesg lines. If the
-kernel exports no printk at all, this file — not dmesg — is the log.
+`CONFIG_MODULES=n`, module-sig enforcement, kernels not exporting the
+checked import surface, kprobe-blocked kernels (symbol resolution fails
+closed at init), unparseable `uname -r`. A new NO-GO must be explicit,
+never silent. 16K/64K pages are SUPPORTED (explicit geometry in the
+address path); CFI-enforcing kernels are SUPPORTED (runtime bypass).
 
-Per-kernel tables live wherever *you* keep them (a shell associative
-array, a JSON file, the backend) — the module takes them per-op, so no
-file in this repo pins a kernel. Example session:
+## Deviations from the previous generation (owner-ordered)
 
-```sh
-su -c "echo 'E,4123,7f3a9000,16,5d8,4d0,520,40,ffffff8000000000,500000000,70' > /sys/module/rwbridge/parameters/rw"
-```
+The old laws assumed one universal build; the merged driver is
+per-generation by construction. What changed and why: (1) 8-target
+matrix replaces single-artifact (deliverable stays single SPX);
+(2) printk import allowed (GKI-universal, per-target verified);
+(3) kprobe-trick kallsyms allowed (no import; fail-closed);
+(4) eager init (socket server must exist before any client);
+(5) hook/proc/dmabuf sources excluded from the build (present upstream
+only); `hijack_arm64.c` stays linked SOLELY for `hook_write_range`
+(CFI path) — call-redirection is never installed.
 
-## Build (once)
+## TO DO
 
-Against **any** prepared arm64 tree 5.10+ (CI uses 5.10 = oldest, which
-proves no newer-only API is used). Tree config must have MODVERSIONS off
-(GKI default) so the build emits no `__versions` section:
-
-```
-make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KDIR=$LINUX_TREE
-make CROSS_COMPILE=aarch64-linux-gnu- check-universal
-```
-
-`check-universal` fails the build if the module grew `__versions`,
-unexpected imports, or lost its vermagic placeholder. The placeholder
-release is baked at exactly 63 chars (UTS cap), so every real target
-vermagic fits the in-place runtime patch.
-
-## Explicit NO-GO list (no code fixes these — documented, not silent)
-
-- `CONFIG_MODULES=n` kernels: nothing to insmod. Fail is at `insmod`.
-- Module-signature enforcement (`CONFIG_MODULE_SIG_FORCE` + no trusted
-  key): load refused by the kernel. Unsigned single build by design.
-- Kernels **with** MODVERSIONS enabled: our CRC-less imports are refused.
-  (Effectively no Android GKI/vendor kernel — noted for completeness.)
-- 16K/64K kernels: supported *only* via explicit E/Y geometry
-  (`page_shift` 14/16 + matching `va_bits`); the legacy derive path
-  stays 4K-only and refuses anything else cleanly. No 16K runtime
-  verification exists yet in this project — the contract is
-  build-verified (CI) and refuse-on-mismatch by construction.
-- CFI-enforcing kernels, two generations (AOSP: KCFI replaces classic
-  CFI starting with 6.1 GKI):
-  - KCFI (6.1+, incl. 6.6/6.12): covered by the `rwbridge-cfi` flavor
-    (canonical typeids — CI clang-18 build validated live on 6.1;
-    cross-version by construction). Selection contract: CFI + 6.1+ →
-    cfi build; older and non-CFI → normal build (`run.sh` applies it
-    automatically; the packed binary embeds both).
-  - Classic CFI, LTO-based (5.10/5.15 GKI and vendor backports):
-    explicit NO-GO — classic CFI couples modules to the kernel's exact
-    LTO build, infeasible standalone. Nothing to build here.
-  On KCFI kernels every uninstrumented callback traps deterministically;
-  without `pstore` the panic string is lost on reboot (dmesg does not
-  survive), so the config flag itself is the diagnosis.
-
-## Loader-contract map (proven 2026-09-20, `6.1.23-android14-4-...` AVD)
-
-Same kernel, transplant-patched probes (8-byte entry-head rewrites on a
-CI-built `.ko` with binutils nm/readelf/objdump + python3 — entry offsets
-resolved per-file via nm, never hardcoded; no kernel tree, no extra files):
-
-- `init_module` is NEVER called — cause PROVEN (not mysterious): `struct
-  module` ABI skew. CI builds against 5.10 headers, whose `.init`/`.exit`
-  slots sit at `__this_module`+0x150/+0x300; the 6.1 kernel reads them at
-  +0x140/+0x3D8 (rela offsets compared ours-vs-vendor, subagent-sourced
-  loader code confirms the `NULL`-skips-silently path). So 6.1 reads
-  init=NULL (file bytes `0000000000000000`) → skip → Live, and reads exit
-  as wild `0x004d000000361400` → rmmod jumps wild → reboot. Five
-  witnesses agree (spin/nonzero/positional/file-touch/int-param-0).
-  CFI is EXCLUDED as the skip cause (a checked call would trap loudly,
-  never skip silently). Consequence: the single-artifact premise is
-  broken for struct-coupled fields — execution needs generation-matched
-  headers; 5.10-built artifacts are load+dataplane-only on 6.x (params,
-  kallsyms, state all pre-init paths, unaffected).
-- Single artifact SURVIVES via install-time slot surgery (proven 3/3):
-  grow `.gnu.linkonce.this_module` by 0x100 (append zeros, fix
-  `e_shoff`/shifted `sh_offset`s — same extend pattern as vermagic),
-  then rewrite the two rela offsets (0x150→0x140, 0x300→0x3D8,
-  symbols/addends untouched; the growth is MANDATORY — the 6.1 slot
-  0x3D8 lies past the 5.10 section end, and relocation writes there
-  would corrupt the neighbor). The surgered load traps at init entry
-  (reboot) where the identical unsurgered artifact goes Live silent —
-  dispatch restored. So one shipped file + per-generation rela patch =
-  fat behavior, no CI matrix. HARD GATE: surgery only where CFI is OFF
-  (on CFI kernels dispatch → load-panic, strictly worse than
-  silent-Live; `run.sh` already detects CFI). Residual: other skewed
-  struct fields stay as-is (load/state/params/kallsyms all empirically
-  fine); any field-level source surgery stays forbidden — this is
-  loader-facing rela adaptation, verifiable by dispatch test, not
-  struct redesign.
-- `cleanup_module` / `rmmod` path kills even with a trivial body: the exit
-  call path itself is enforced, not the exit code.
-- Param show/store kill even with trivial import-free bodies (`stage`
-  read: pure copy loop); kernel-only paths (`coresize`, write-only `rw`
-  read → `-EACCES`, loaded idle) always survive. Plain kernel int params
-  work BOTH directions with zero module-code execution (`stability`
-  write 1 → read back 1, guest alive) — the load-only dataplane.
-  Enforcement sits at the sysfs caller, not in our code.
-- CFI flavor (kcfi flags, CI `cfi` job): typeids verified at every entry
-  + BTI pads intact; custom getters execute and return (`stage`,
-  `status`); `V`/`T` writes execute; MAPPED kernel reads proven via `F`
-  against ground truth (own `.text` bytes match modulo loader
-  ftrace-patching). UNMAPPED reads panic (2/2: `F,0`, `F,high`) — the
-  `__ex_table` armor does NOT fire here. Prime candidate (unproven):
-  same struct skew fallout (extable registration reads `num_exentries`/
-  `extable` via skewed `struct module` offsets → our fixups never
-  registered; vendor modules with correct layout unaffected). Consequence:
-  no discovery-by-scan on this kernel — offsets arrive externally
-  (`E`/`Y` explicit args, server-driven tables), never via sweeps.
-  S-steps wedge the guest (hypervisor, patience-protocol confirmed) —
-  legacy derive path out of scope on this kernel.
-- Hand-built (non-kbuild) ELFs are NOT a probe vehicle: identical files
-  fail `EPERM` in one boot and `ENOEXEC` in the next. Proven cause of
-  the `ENOEXEC`: the missing `.gnu.linkonce.this_module` section
-  (rename-ablation on a working `.ko` → `ENOEXEC`); fabricating it needs
-  the full `struct module` layout (kernel headers — not standalone).
-  Transplant-patching the CI artifact is the reliable probe method.
-
-## What is possible / not possible on CFI kernels (research-backed)
-
-Mechanism (LLVM KCFI, arm64: `ldur w16,[xN,#-4]; movz/movk w17,#hash;
-cmp; b.eq ok; brk#0x8228; blr xN` — AOSP/LPC docs): every indirect call
-in kernel code checks the 4 bytes before the target for the expected
-type hash. Uninstrumented callees always mismatch → `brk` → `CFI
-failure` → panic (non-permissive; permissive mode is prod-forbidden per
-AOSP). Consequences, each verified or documented:
-
-- POSSIBLE, standalone: load + Live + params + kernel-only attr reads;
-  vermagic patching (`run.sh`); transplant probes (`tools/`);
-  uname/config.gz/kallsyms/sysfs/cmdline reads.
-- NOT POSSIBLE, standalone: executing any module callback (the check is
-  at the kernel caller — no source change can satisfy it; needs a
-  CFI-instrumented build from CI, flags only, no logic change).
-- NOT POSSIBLE, standalone: reading the panic string (no pstore here;
-  reboot clears dmesg — the config flag is the diagnosis); `initcall_debug`
-  or cmdline changes (no bootloader control); forcing imports/symbols
-  (kernel-owned: `EPERM`/`ENOEXEC`/`Unknown symbol`); printk in the
-  product (import doctrine — test builds excepted).
-- OPEN: why the init call never arrives here (symbol resolves per
-  kallsyms, call missing; cmdline has no blacklist entries). Needs a CFI
-  build to bisect (tolerant-skip vs dropped error) — same build that
-  fixes operations, so one vehicle answers both.
-
-## Zero-import resolution (technique note, reviewed, open)
-
-Problem split: (1) does init run? (2) can you resolve symbols? They
-compose only when (1) is solved — on this kernel it is not, so the
-design below is recorded, not shipped. Core insight (sound): indirect
-calls from *uninstrumented* code emit no CFI checks (checks live at
-instrumented callsites only), and kernel targets carry BTI pads — so
-calls through resolved pointers dodge both enforcements without importing
-anything. Reviewed resolver shape (fixes verified):
-
-- Scan loop bound computed once (`scan_end = addr - range` before the
-  loop; recomputing against a shrinking `addr` runs to zero).
-- `IS_ERR` as unsigned compare against `-4096UL` (valid kernel pointers
-  are negative signed — signed `> 0` rejects them).
-- PC-relative anchor (`adr %0,.`) instead of TTBR1 (table physical base,
-  not a VA — useless without translation).
-- Fault armor via `__ex_table` with **`.long` relative pairs only**:
-  entries are `{insn, fixup}` relative to their own field address;
-  absolute `.quad` pairs assemble but are silently ignored (fixups never
-  fire — same idiom as `SAFE_READ64` in `rwbridge.c`).
-- Needs a kernel where init runs (unidentified — candidates: non-CFI
-  GKI, older trees; identify with the transplant spin test or
-  `initcall_debug` where cmdline control exists).
+- Process hide: wire `do_hide_process` (task `PF_INVISIBLE` flag infra
+  already in tree: `wuwa_proc.c`, ioctl cmd 14) behind an explicit
+  product op with allowlist semantics. NOT active: no call sites ship.
+- Re-verify the loader-contract map per release (the old 6.1 map
+  described the previous driver; same method, new numbers).
+- 16K-page live proof (geometry path exercised on-device, not just CI).
 
 ## Diagnosis
 
-- On CFI kernels: use the op journal (`/sdcard/MemoryD/J*.log`) +
-  kernel-side surfaces (`coresize`, `initstate`, int params, dmesg,
-  uptime). NEVER `cat` custom params (`log`/`stage`/`status`/`out`)
-  or write `rw` there — each access reboots. `run.sh` already gates
-  all of this by the CFI flag.
-- Elsewhere: `cat /sys/module/rwbridge/parameters/status` — `0` /
-  negative errno
-- `cat .../parameters/out` — last result (hex)
-- `cat .../parameters/stage` — breadcrumb of the last op's failing
-  phase (`parse`, `eread`/`ewrite`, `ex-task`, `ex-mm`, `ex-pgd`, `ok`)
-- `dmesg | grep rwbridge` — boot lines (empty: zero-import logging;
-  use the `log` param instead)
-- `cat .../parameters/log` — the in-module ring (primary channel)
-- The `kopts` param is retired (always `-EPERM`, get shows last
-  rejected string); it is not a diagnostic surface anymore.
+Journal first (`/sdcard/MemoryD/`), then dmesg (vermagic exact-want),
+then `uname -r` vs matrix (selection log names the match passes), then
+the socket probe (SEQPACKET→ENOKEY?). A wedge inside exactly one phase
+convicts it; report phase + kernel string, never theory alone.
