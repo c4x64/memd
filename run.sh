@@ -26,6 +26,7 @@ TMPKO="/data/local/tmp/rwbridge-run.ko"
 
 log() { echo "[rwbridge] $1"; }
 die() { echo "[rwbridge] ERROR: $1"; exit 1; }
+dump_log() { echo "[rwbridge] --- dmesg ($1) ---"; dmesg 2>/dev/null | tail -15; }
 
 # 0b. Op journal — the logging system that survives hostile kernels.
 # Every risky action is recorded with timestamp + expectation + outcome,
