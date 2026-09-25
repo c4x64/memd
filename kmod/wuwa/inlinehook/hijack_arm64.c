@@ -6,19 +6,27 @@
 int (*aarch64_insn_write_ptr)(void *, u32) = NULL;
 void (*flush_icache_range_ptr)(unsigned long, unsigned long) = NULL;
 
+/* Best-effort resolution: insn-write/icache helpers exist only where the
+ * kernel lets kallsyms resolution succeed. Always returns 0 — callers
+ * (hook_write_range, cfi_bypass) fail closed per-op when unresolved, so
+ * plain memory R/W works on kernels that export nothing extra. */
 int init_arch(void) {
     aarch64_insn_write_ptr = (void *)kallsyms_lookup_name_ex("aarch64_insn_write");
     flush_icache_range_ptr = (void *)kallsyms_lookup_name_ex("caches_clean_inval_pou");
     if (!flush_icache_range_ptr) {
         flush_icache_range_ptr = (void *)kallsyms_lookup_name_ex("__flush_icache_range");
     }
-    return !(aarch64_insn_write_ptr && flush_icache_range_ptr);
+    if (!aarch64_insn_write_ptr || !flush_icache_range_ptr)
+        wuwa_err("insn-write helpers unresolved (CFI path unavailable)\n");
+    return 0;
 }
 
 __nocfi int hook_write_range(void *target, void *source, int size)
 {
     int ret = 0, i;
 
+    if (!aarch64_insn_write_ptr || !flush_icache_range_ptr)
+        return -ENODEV;
     for (i = 0; i < size; i = i + INSTRUCTION_SIZE) {
         ret = aarch64_insn_write_ptr(target + i, *(u32 *)(source + i));
         if (ret) {

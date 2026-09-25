@@ -69,7 +69,9 @@ def main():
         die("vermagic UTS too short (%d chars; need >= 55 for target room)" % len(uts))
     print("vermagic room: %d chars" % len(uts))
 
+    kmi = sys.argv[3] if len(sys.argv) > 3 else ""
     bad = []
+    cfi_bad = []
     for line in open(undef_path):
         sym = line.split()
         if not sym:
@@ -79,6 +81,19 @@ def main():
             bad.append(sym)
     if bad:
         die("imports missing from %s System.map: %s" % (kmi, " ".join(sorted(set(bad)))))
+    # except the -cfi variant, no artifact may import CFI handlers (they
+    # exist only on enforcing kernels; DDK CFI instrumentation must have
+    # been neutralized above or the module cannot load elsewhere)
+    if '-cfi' not in kmi:
+        for line in open(undef_path):
+            sym = line.split()
+            if not sym:
+                continue
+            sym = sym[-1].split('.')[0]
+            if 'cfi' in sym.lower() or 'ubsan' in sym.lower():
+                cfi_bad.append(sym)
+        if cfi_bad:
+            die("CFI imports in non-cfi artifact: " + " ".join(sorted(set(cfi_bad))))
     print("KMI %s checks passed" % kmi)
 
 

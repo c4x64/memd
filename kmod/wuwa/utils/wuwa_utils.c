@@ -159,18 +159,26 @@ static unsigned long NO_CFI call_kln(kallsyms_lookup_name_t f, const char *n) {
     return f(n);
 }
 
+/* Weak kprobe imports: hardened/vendor kernels that do not export them
+ * still load (references resolve NULL); resolution below degrades to
+ * "not found" instead of failing insmod. Plain memory R/W needs no
+ * kallsyms at all, so this is the correct fail-soft boundary. */
+__weak int register_kprobe(struct kprobe *p);
+__weak void unregister_kprobe(struct kprobe *p);
+
 unsigned long kallsyms_lookup_name_ex(const char* name) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
     static kallsyms_lookup_name_t lookup_name = NULL;
     if (lookup_name == NULL) {
         struct kprobe kp = {.symbol_name = "kallsyms_lookup_name"};
 
-        if (register_kprobe(&kp) < 0) {
+        if (!register_kprobe || register_kprobe(&kp) < 0) {
             return 0;
         }
 
         lookup_name = (kallsyms_lookup_name_t)kp.addr;
-        unregister_kprobe(&kp);
+        if (unregister_kprobe)
+            unregister_kprobe(&kp);
 
         if (lookup_name == NULL) {
             wuwa_err("kallsyms_lookup_name not found\n");

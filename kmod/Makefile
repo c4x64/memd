@@ -58,6 +58,16 @@ ccflags-y += -mbranch-protection=bti -march=armv8.5-a
 # No stack-protector runtime dependency (single image must not depend on
 # per-tree helper availability beyond the checked import surface).
 ccflags-y += -fno-stack-protector -fno-stack-check
+# Neutralize DDK-inherited CFI instrumentation for plain builds (DDK trees
+# build with CONFIG_CFI_CLANG=y: without this, our objects import
+# __cfi_slowpath*/__ubsan_* which non-CFI kernels do not export -> ENOENT
+# at load. The -cfi variant job appends -fsanitize=kcfi below instead).
+ccflags-y += -fno-sanitize=cfi -fno-sanitize=kcfi
+# DDK trees build with CFI on (cfi and/or kcfi spellings per generation);
+# without removal our objects import __cfi_* / __ubsan_* handlers that
+# non-CFI kernels do not export (ENOENT at load). Removal is order-proof
+# where -fno-* appends might lose to kbuild flag ordering.
+ccflags-remove-y += -fsanitize=cfi -fsanitize=kcfi -fsanitize-cfi-cross-dso
 # CFI variant (CFI=1, android14-6.1-cfi job): kcfi typeids so kernel->module
 # indirect calls pass the type check on enforcing kernels. kcfi is
 # clang-only (CI passes CC=clang for that job). No new imports (typeids
