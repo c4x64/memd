@@ -110,6 +110,7 @@ jobs:
           echo "OBJCOPY_BIN=$OBJCOPY_BIN" >> "$GITHUB_ENV"${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
           make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal
           if [ "${{ matrix.cf }}" = "true" ]; then
+            grep -m3 -o "fsanitize=[a-z-]*" kmod/wuwa/*/*.o.cmd 2>/dev/null | head -6 || true
             "$OBJDUMP_BIN" -d "rwbridge.ko" | grep -c "brk" || true
             llvm-nm "rwbridge.ko" 2>/dev/null | grep -ci "kcfi" || true
             llvm-readelf -S "rwbridge.ko" 2>/dev/null | grep -i "kcfi" || true
