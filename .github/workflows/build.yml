@@ -106,10 +106,22 @@ jobs:
           else
             echo "dbg variant: keeping debug info (no --strip-debug)"
           fi
-          "$OBJCOPY_BIN" --remove-section __versions rwbridge.ko
+          if [ "${{ matrix.dbg }}" != "true" ]; then
+            "$OBJCOPY_BIN" --remove-section __versions rwbridge.ko
+          else
+            # debug_info holds relocations against __versions, so the
+            # section cannot be removed — zero it in place instead (the
+            # gate accepts empty __versions as CRC-free).
+            : > empty_versions.bin
+            "$OBJCOPY_BIN" --update-section __versions=empty_versions.bin rwbridge.ko
+            echo "dbg variant: __versions zeroed in place (debug relocations kept)"
+          fi
           echo "stripped __versions (enforcing loaders warn-and-pass CRC-less)"
           echo "OBJCOPY_BIN=$OBJCOPY_BIN" >> "$GITHUB_ENV"
-          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal
+          # NOTE: DBG=1 must reach the gate too — check-universal depends
+          # on `all`, and kbuild would otherwise silently rebuild the
+          # objects WITHOUT -g and ship a non-debug "dbg" artifact.
+          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.dbg == true && 'DBG=1' || '' }} NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal
 
           mv rwbridge.ko "rwbridge-${{ matrix.kmi }}.ko"
           if [ "${{ matrix.dbg }}" != "true" ]; then
