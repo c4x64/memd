@@ -59,6 +59,9 @@ jobs:
           [ -d "$KDIR_RESOLVED" ] || KDIR_RESOLVED="/opt/ddk/kdir/$IMG"
           [ -d "$KDIR_RESOLVED" ] || { echo "FATAL: no kdir for $IMG (KERNEL_SRC=$KERNEL_SRC)"; ls /opt/ddk/kdir/; exit 1; }
           echo "kdir=$KDIR_RESOLVED"
+          ls "$KDIR_RESOLVED" | head -20
+          ls "$KDIR_RESOLVED/scripts/config" "$KDIR_RESOLVED/Makefile" "$KDIR_RESOLVED/System.map" 2>&1 | head -5
+          file "$KDIR_RESOLVED/scripts/config" 2>/dev/null || true
           NM_BIN=""; for t in llvm-nm aarch64-linux-gnu-nm nm; do command -v $t >/dev/null 2>&1 && { NM_BIN=$t; break; }; done
           OBJDUMP_BIN=""; for t in llvm-objdump aarch64-linux-gnu-objdump objdump; do command -v $t >/dev/null 2>&1 && { OBJDUMP_BIN=$t; break; }; done
           echo "tools: NM=$NM_BIN OBJDUMP=$OBJDUMP_BIN"
