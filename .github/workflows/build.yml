@@ -35,9 +35,9 @@ jobs:
             img: android14-5.15
           - kmi: android14-6.1
             img: android14-6.1
-          - kmi: android14-6.1-cfi
+          - kmi: android14-6.1-dbg
             img: android14-6.1
-            cf: true
+            dbg: true
           - kmi: android15-6.6
             img: android15-6.6
           - kmi: android16-6.12
@@ -96,29 +96,27 @@ jobs:
             printf '%s' "$PADUTS" > "$KDIR_RESOLVED/include/config/kernel.release"
           fi
           echo "baked UTS: $(cat "$KDIR_RESOLVED/include/generated/utsrelease.h")"
-          if [ "${{ matrix.cf }}" = "true" ]; then
-            sudo apt-get update && sudo apt-get install -y clang lld llvm
-            echo "CFIggio: [$CFI]"
-          fi
           cd kmod
           export PATH="$(echo /opt/ddk/clang/*/bin | cut -d' ' -f1):$PATH"
-          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
+          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.dbg == true && 'DBG=1' || '' }}
           OBJCOPY_BIN=$(cat "$GITHUB_WORKSPACE/.objcopy")
           [ -n "$OBJCOPY_BIN" ] || { echo "FATAL: no objcopy"; exit 1; }
-          "$OBJCOPY_BIN" --strip-debug rwbridge.ko
-          "$OBJCOPY_BIN" --remove-section __versions rwbridge.ko
-          echo "stripped debug + __versions (enforcing loaders warn-and-pass CRC-less)"
-          echo "OBJCOPY_BIN=$OBJCOPY_BIN" >> "$GITHUB_ENV"${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
-          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal
-          if [ "${{ matrix.cf }}" = "true" ]; then
-            grep -m3 -o "fsanitize=[a-z-]*" kmod/wuwa/*/*.o.cmd 2>/dev/null | head -6 || true
-            "$OBJDUMP_BIN" -d "rwbridge.ko" | grep -c "brk" || true
-            llvm-nm "rwbridge.ko" 2>/dev/null | grep -ci "kcfi" || true
-            llvm-readelf -S "rwbridge.ko" 2>/dev/null | grep -i "kcfi" || true
-            N=$("$OBJDUMP_BIN" -d "rwbridge.ko" | grep -c "brk.*0x8228" || true); echo "kcfi traps: $N"
+          if [ "${{ matrix.dbg }}" != "true" ]; then
+            "$OBJCOPY_BIN" --strip-debug rwbridge.ko
+          else
+            echo "dbg variant: keeping debug info (no --strip-debug)"
           fi
+          "$OBJCOPY_BIN" --remove-section __versions rwbridge.ko
+          echo "stripped __versions (enforcing loaders warn-and-pass CRC-less)"
+          echo "OBJCOPY_BIN=$OBJCOPY_BIN" >> "$GITHUB_ENV"
+          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal
+
           mv rwbridge.ko "rwbridge-${{ matrix.kmi }}.ko"
-          command -v llvm-strip >/dev/null 2>&1 && llvm-strip -d "rwbridge-${{ matrix.kmi }}.ko" || true
+          if [ "${{ matrix.dbg }}" != "true" ]; then
+            command -v llvm-strip >/dev/null 2>&1 && llvm-strip -g "rwbridge-${{ matrix.kmi }}.ko" || true
+          else
+            echo "dbg variant: skipping llvm-strip (forensics build)"
+          fi
           ls -la "rwbridge-${{ matrix.kmi }}.ko"
       - name: Upload build artifact (internal, consumed by pack job)
         uses: actions/upload-artifact@v4
@@ -156,7 +154,7 @@ jobs:
             dl/kmod/rwbridge-android13-5.15.ko \
             dl/kmod/rwbridge-android14-5.15.ko \
             dl/kmod/rwbridge-android14-6.1.ko \
-            dl/kmod/rwbridge-android14-6.1-cfi.ko \
+            dl/kmod/rwbridge-android14-6.1-dbg.ko \
             dl/kmod/rwbridge-android15-6.6.ko \
             dl/kmod/rwbridge-android16-6.12.ko \
             run.sh blobs.c <<'PYEOF'
@@ -174,7 +172,7 @@ jobs:
           assert len(kos) == 8, "need exactly 8 KMI artifacts, got %d" % len(kos)
           short = {'android12-5.10': 'a12_5_10', 'android13-5.10': 'a13_5_10',
                    'android13-5.15': 'a13_5_15', 'android14-5.15': 'a14_5_15',
-                   'android14-6.1': 'a14_6_1', 'android14-6.1-cfi': 'a14_6_1_cfi',
+                    'android14-6.1': 'a14_6_1', 'android14-6.1-dbg': 'a14_6_1_dbg',
                    'android15-6.6': 'a15_6_6', 'android16-6.12': 'a16_6_12'}
           parts = [emit('_binary_rwbridge_' + short[k.split('rwbridge-')[1].rsplit('.ko', 1)[0]] + '_ko', k)
                    for k in kos]

@@ -52,8 +52,8 @@ extern const unsigned char _binary_rwbridge_a14_5_15_ko_start[];
 extern const unsigned long _binary_rwbridge_a14_5_15_ko_len;
 extern const unsigned char _binary_rwbridge_a14_6_1_ko_start[];
 extern const unsigned long _binary_rwbridge_a14_6_1_ko_len;
-extern const unsigned char _binary_rwbridge_a14_6_1_cfi_ko_start[];
-extern const unsigned long _binary_rwbridge_a14_6_1_cfi_ko_len;
+extern const unsigned char _binary_rwbridge_a14_6_1_dbg_ko_start[];
+extern const unsigned long _binary_rwbridge_a14_6_1_dbg_ko_len;
 extern const unsigned char _binary_rwbridge_a15_6_6_ko_start[];
 extern const unsigned long _binary_rwbridge_a15_6_6_ko_len;
 extern const unsigned char _binary_rwbridge_a16_6_12_ko_start[];
@@ -387,13 +387,18 @@ int main(int argc, char **argv)
     const unsigned char *bd;
     long bn;
     unsigned char *work;
+    const char *force_name = NULL;
     struct blob flavors[8];
     int order[8], norder = 0;
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dry-run")) {
             dry = 1;
-            break;
+            continue;
+        }
+        if (!strcmp(argv[i], "--ko") && i + 1 < argc) {
+            force_name = argv[++i];
+            continue;
         }
         if (!strcmp(argv[i], "--extract-runsh")) {
             fwrite(_binary_runsh_start, 1,
@@ -422,9 +427,9 @@ int main(int argc, char **argv)
     flavors[3].name = "a14-5.15"; flavors[3].kver = "5.15"; flavors[3].gen = "android14";
     flavors[3].d = _binary_rwbridge_a14_5_15_ko_start;
     flavors[3].n = (long)_binary_rwbridge_a14_5_15_ko_len;
-    flavors[4].name = "a14-6.1-cfi"; flavors[4].kver = "6.1"; flavors[4].gen = "android14";
-    flavors[4].d = _binary_rwbridge_a14_6_1_cfi_ko_start;
-    flavors[4].n = (long)_binary_rwbridge_a14_6_1_cfi_ko_len;
+    flavors[4].name = "a14-6.1-dbg"; flavors[4].kver = "6.1"; flavors[4].gen = "android14";
+    flavors[4].d = _binary_rwbridge_a14_6_1_dbg_ko_start;
+    flavors[4].n = (long)_binary_rwbridge_a14_6_1_dbg_ko_len;
     flavors[5].name = "a14-6.1"; flavors[5].kver = "6.1"; flavors[5].gen = "android14";
     flavors[5].d = _binary_rwbridge_a14_6_1_ko_start;
     flavors[5].n = (long)_binary_rwbridge_a14_6_1_ko_len;
@@ -444,7 +449,8 @@ int main(int argc, char **argv)
      * releases without an android tag). kver compares NUMERICALLY
      * (major.minor) so 6.1 never matches 6.12. Cross-generation attempts
      * are refused outright: a wrong generation's structs would mis-walk,
-     * strictly worse than not loading. */
+     * strictly worse than not loading. flavors[4] (a14-6.1-dbg) is the
+     * forensics build and is NEVER auto-selected — explicit --ko only. */
     state_load(&st);
     {
         struct utsname u;
@@ -461,6 +467,8 @@ int main(int argc, char **argv)
         for (pass = 0; pass < 2 && norder < 8; pass++) {
             for (f = 0; f < 8 && norder < 8; f++) {
                 int kvmaj = 0, kvmin = 0, ok = 0;
+                if (f == 4)
+                    continue; /* -dbg forensics: explicit --ko only */
                 if (!rel[0]) continue;
                 if (sscanf(rel, "%d.%d", &kvmaj, &kvmin) != 2) continue;
                 {
@@ -490,6 +498,24 @@ int main(int argc, char **argv)
                 }
             }
         }
+    }
+    if (force_name) {
+        norder = 0;
+        for (i = 0; i < 8; i++) {
+            if (!strcmp(flavors[i].name, force_name)) {
+                order[norder++] = i;
+                break;
+            }
+        }
+        if (norder == 0) {
+            snprintf(msg, sizeof(msg), "NO-GO: --ko '%s' unknown", force_name);
+            jlog("select", msg);
+            if (jfp)
+                fclose(jfp);
+            return 1;
+        }
+        snprintf(msg, sizeof(msg), "forced flavor: %s", force_name);
+        jlog("select", msg);
     }
     if (norder == 0) {
         jlog("select", "NO-GO: no artifact matches this kernel");

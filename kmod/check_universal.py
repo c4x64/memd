@@ -4,8 +4,8 @@ Fails (exit 1) if the module drifted off the matrix contract:
   - __versions section with real CRCs (pins build past its KMI; the
     runtime vermagic patch cannot fix CRC mismatches).
   - undefined symbols NOT exported by that KMI generation's own
-    System.map (exact ground truth: the donor tree the artifact was
-    built against). Suffixes (.cfi etc.) are stripped before lookup.
+   System.map (exact ground truth: the donor tree the artifact was
+   built against).
   - missing vermagic placeholder (runtime patch needs it).
 BTI pads are checked inline by the Makefile, not here.
 Usage: check_universal.py rwbridge.ko <nm-undef-file> <KMI> <System.map>
@@ -81,19 +81,19 @@ def main():
             bad.append(sym)
     if bad:
         die("imports missing from %s System.map: %s" % (kmi, " ".join(sorted(set(bad)))))
-    # except the -cfi variant, no artifact may import CFI handlers (they
-    # exist only on enforcing kernels; DDK CFI instrumentation must have
-    # been neutralized above or the module cannot load elsewhere)
-    if '-cfi' not in kmi:
-        for line in open(undef_path):
-            sym = line.split()
-            if not sym:
-                continue
-            sym = sym[-1].split('.')[0]
-            if 'cfi' in sym.lower() or 'ubsan' in sym.lower():
-                cfi_bad.append(sym)
-        if cfi_bad:
-            die("CFI imports in non-cfi artifact: " + " ".join(sorted(set(cfi_bad))))
+    # All 8 artifacts (incl. -dbg, identical code to plain) must be free
+    # of CFI/ubsan imports: DDK CFI instrumentation must have been
+    # neutralized above or the module cannot load on non-enforcing
+    # kernels. Enforcing kernels are handled at runtime (cfi_bypass).
+    for line in open(undef_path):
+        sym = line.split()
+        if not sym:
+            continue
+        sym = sym[-1].split('.')[0]
+        if 'cfi' in sym.lower() or 'ubsan' in sym.lower():
+            cfi_bad.append(sym)
+    if cfi_bad:
+        die("CFI imports in artifact: " + " ".join(sorted(set(cfi_bad))))
     print("KMI %s checks passed" % kmi)
 
 

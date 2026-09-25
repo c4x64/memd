@@ -58,21 +58,20 @@ ccflags-y += -mbranch-protection=bti -march=armv8.5-a
 # No stack-protector runtime dependency (single image must not depend on
 # per-tree helper availability beyond the checked import surface).
 ccflags-y += -fno-stack-protector -fno-stack-check
-# Neutralize DDK-inherited CFI instrumentation for plain builds (DDK trees
-# build with CFI on: without removal our objects import __cfi_* / __ubsan_*
-# handlers that non-CFI kernels do not export -> ENOENT at load). Removal
-# by exact flag spelling (order-proof, no compiler-version dependency —
-# old clangs reject -fno-sanitize=kcfi outright). The -cfi variant job
-# appends -fsanitize=kcfi below instead.
-ifndef CFI
+# Neutralize DDK-inherited CFI instrumentation (DDK trees build with CFI
+# on: without removal our objects import __cfi_* / __ubsan_* handlers that
+# non-CFI kernels do not export -> ENOENT at load). Removal by exact flag
+# spelling (order-proof, no compiler-version dependency — old clangs reject
+# -fno-sanitize=kcfi outright). Enforcing kernels are handled at runtime by
+# cfi_bypass(); a kcfi-instrumented variant was tried and dropped (the DDK
+# clang emits no kcfi traps for this codebase — no indirect-call typeids —
+# so the variant was byte-identical to plain; not worth a matrix slot).
 ccflags-remove-y += -fsanitize=cfi -fsanitize=kcfi -fsanitize-cfi-cross-dso
-endif
-# CFI variant (CFI=1, android14-6.1-cfi job): kcfi typeids so kernel->module
-# indirect calls pass the type check on enforcing kernels. kcfi is
-# clang-only (CI passes CC=clang for that job). No new imports (typeids
-# are local labels). Runtime cfi_bypass stays on regardless.
-ifdef CFI
-ccflags-y += -fsanitize=kcfi
+# DBG variant (DBG=1, android14-6.1-dbg job): full debug info kept for
+# crash forensics (pstore/dmesg decoding). Never auto-selected by the
+# loader (explicit --ko only); identical code to the plain artifact.
+ifdef DBG
+ccflags-y += -g -fno-omit-frame-pointer
 endif
 
 all:
