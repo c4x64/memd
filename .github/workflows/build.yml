@@ -113,7 +113,7 @@ jobs:
             "$OBJDUMP_BIN" -d "rwbridge.ko" | grep -c "brk" || true
             llvm-nm "rwbridge.ko" 2>/dev/null | grep -ci "kcfi" || true
             llvm-readelf -S "rwbridge.ko" 2>/dev/null | grep -i "kcfi" || true
-            N=$("$OBJDUMP_BIN" -d "rwbridge.ko" | grep -c "brk.*0x8228"); echo "kcfi traps: $N"
+            N=$("$OBJDUMP_BIN" -d "rwbridge.ko" | grep -c "brk.*0x8228" || true); echo "kcfi traps: $N"
           fi
           mv rwbridge.ko "rwbridge-${{ matrix.kmi }}.ko"
           command -v llvm-strip >/dev/null 2>&1 && llvm-strip -d "rwbridge-${{ matrix.kmi }}.ko" || true
