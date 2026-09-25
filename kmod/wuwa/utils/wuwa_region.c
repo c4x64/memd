@@ -1,6 +1,6 @@
 #include "wuwa_region.h"
 
-#include <linux/rwlock.h>
+#include <linux/spinlock.h>
 #include <linux/slab.h>
 
 #include "karray_list.h"
