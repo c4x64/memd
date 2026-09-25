@@ -86,8 +86,9 @@ jobs:
           make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" EXTRAVERSION="-${PAD}"
           OBJCOPY_BIN=$(cat "$GITHUB_WORKSPACE/.objcopy")
           [ -n "$OBJCOPY_BIN" ] || { echo "FATAL: no objcopy"; exit 1; }
+          "$OBJCOPY_BIN" --strip-debug rwbridge.ko
           "$OBJCOPY_BIN" --remove-section __versions rwbridge.ko
-          echo "stripped __versions (enforcing loaders warn-and-pass CRC-less)"
+          echo "stripped debug + __versions (enforcing loaders warn-and-pass CRC-less)"
           echo "OBJCOPY_BIN=$OBJCOPY_BIN" >> "$GITHUB_ENV"${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
           make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal
           if [ "${{ matrix.cf }}" = "true" ]; then
