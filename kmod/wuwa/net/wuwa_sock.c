@@ -1,4 +1,5 @@
 #include "wuwa_sock.h"
+#include "wuwa_region.h"
 #include <asm/pgalloc.h>
 #include <asm/pgtable-hwdef.h>
 #include "wuwa_ioctl.h"

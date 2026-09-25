@@ -23,6 +23,7 @@ rwbridge-y := \
     wuwa/net/wuwa_protocol.o \
     wuwa/utils/wuwa_utils.o \
     wuwa/utils/karray_list.o \
+    wuwa/utils/wuwa_region.o \
     wuwa/ioctl/wuwa_ioctl.o \
     wuwa/mm/wuwa_page_walk.o \
     wuwa/mm/wuwa_bindproc.o \

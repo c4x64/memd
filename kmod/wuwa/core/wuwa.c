@@ -14,6 +14,7 @@
 #include "wuwa_protocol.h"
 #include "wuwa_sock.h"
 #include "wuwa_utils.h"
+#include "wuwa_region.h"
 #include "hijack_arm64.h"
 
 static int __init wuwa_init(void) {
@@ -40,6 +41,12 @@ static int __init wuwa_init(void) {
         goto out;
     }
 
+    ret = wuwa_region_init();
+    if (ret) {
+        wuwa_err("wuwa_region_init failed: %d\n", ret);
+        goto clean_proto;
+    }
+
 #if defined(BUILD_HIDE_SIGNAL)
     ret = wuwa_safe_signal_init();
     if (ret) {
@@ -59,6 +66,9 @@ static int __init wuwa_init(void) {
 
     return 0;
 
+clean_proto:
+    wuwa_proto_cleanup();
+
 #if defined(BUILD_HIDE_SIGNAL)
 clean_d0:
     wuwa_safe_signal_cleanup();
@@ -74,6 +84,7 @@ out:
 
 static void __exit wuwa_exit(void) {
     wuwa_info("bye!\n");
+    wuwa_region_cleanup();
     wuwa_proto_cleanup();
 #if defined(BUILD_HIDE_SIGNAL)
     wuwa_safe_signal_cleanup();
