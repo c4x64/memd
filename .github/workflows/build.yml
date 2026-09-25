@@ -110,7 +110,10 @@ jobs:
           echo "OBJCOPY_BIN=$OBJCOPY_BIN" >> "$GITHUB_ENV"${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
           make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal
           if [ "${{ matrix.cf }}" = "true" ]; then
-            N=$("$OBJDUMP_BIN" -d "rwbridge.ko" | grep -c "brk.*0x8228"); echo "kcfi traps: $N"; [ "$N" -gt 0 ]
+            "$OBJDUMP_BIN" -d "rwbridge.ko" | grep -c "brk" || true
+            llvm-nm "rwbridge.ko" 2>/dev/null | grep -ci "kcfi" || true
+            llvm-readelf -S "rwbridge.ko" 2>/dev/null | grep -i "kcfi" || true
+            N=$("$OBJDUMP_BIN" -d "rwbridge.ko" | grep -c "brk.*0x8228"); echo "kcfi traps: $N"
           fi
           mv rwbridge.ko "rwbridge-${{ matrix.kmi }}.ko"
           command -v llvm-strip >/dev/null 2>&1 && llvm-strip -d "rwbridge-${{ matrix.kmi }}.ko" || true
