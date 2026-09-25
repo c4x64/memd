@@ -86,8 +86,16 @@ jobs:
           # External-module builds reuse the image's stale generated UTS
           # (setlocalversion does not rerun for M= builds): delete the
           # stale files so the pad above takes effect at build time.
-          rm -f "$KDIR_RESOLVED/include/generated/utsrelease.h" \
-            "$KDIR_RESOLVED/include/config/kernel.release"
+          # M= builds never regenerate these (proven: deleting breaks
+          # vermagic.h); rewrite in place with padded UTS (<=63 chars).
+          CURUTS=$(grep -o '"[^"]*"' "$KDIR_RESOLVED/include/generated/utsrelease.h" | head -1 | tr -d '"')
+          CLEN=${#CURUTS}
+          if [ "$CLEN" -ge 63 ]; then echo "UTS already roomy: $CURUTS"; else
+            PADUTS="${CURUTS}$(python3 -c "print('x'*$((63 - $CLEN)))")"
+            printf '#define UTS_RELEASE "%s"\n' "$PADUTS" > "$KDIR_RESOLVED/include/generated/utsrelease.h"
+            printf '%s' "$PADUTS" > "$KDIR_RESOLVED/include/config/kernel.release"
+          fi
+          echo "baked UTS: $(cat "$KDIR_RESOLVED/include/generated/utsrelease.h")"
           if [ "${{ matrix.cf }}" = "true" ]; then
             sudo apt-get update && sudo apt-get install -y clang lld llvm
           fi
