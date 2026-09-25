@@ -46,26 +46,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve DDK tree + toolchain
-        run: |
-          # DDK images export KERNEL_SRC/KDIR/CLANG_PATH already; trust but
-          # verify, stripping our -cfi variant suffix for the tree. Persist
-          # via workspace file (cross-step env proved flaky here).
-          IMG="${{ matrix.img }}"
-          KDIR_CAND="${KERNEL_SRC:-/opt/ddk/kdir/$IMG}"
-          [ -d "$KDIR_CAND" ] || KDIR_CAND="/opt/ddk/kdir/$IMG"
-          [ -d "$KDIR_CAND" ] || { echo "FATAL: no kdir for $IMG (KERNEL_SRC=$KERNEL_SRC)"; ls /opt/ddk/kdir/ 2>/dev/null; exit 1; }
-          echo "$KDIR_CAND" > "$GITHUB_WORKSPACE/.kdir"
-          echo "kdir=$KDIR_CAND"
-          # nm/objdump for the gate: LLVM first, GNU cross, host last.
-          for t in llvm-nm aarch64-linux-gnu-nm nm; do
-            command -v $t >/dev/null 2>&1 && { echo "$t" > "$GITHUB_WORKSPACE/.nm"; break; }
-          done
-          for t in llvm-objdump aarch64-linux-gnu-objdump objdump; do
-            command -v $t >/dev/null 2>&1 && { echo "$t" > "$GITHUB_WORKSPACE/.objdump"; break; }
-          done
-          cat "$GITHUB_WORKSPACE/.kdir"
-      - name: Build module for ${{ matrix.kmi }}
+      - name: Resolve + build + gate ${{ matrix.kmi }}
         env:
           ARCH: arm64
           CROSS_COMPILE: aarch64-linux-gnu-
@@ -73,11 +54,16 @@ jobs:
           LLVM_IAS: 1
         run: |
           echo "=== KMI: ${{ matrix.kmi }} ==="
-          # CRCs pin a build past its KMI (runtime vermagic patch cannot
-          # fix them): force MODVERSIONS off in the donor tree, re-prepare.
-          KDIR_RESOLVED=$(cat "$GITHUB_WORKSPACE/.kdir")
-          NM_BIN=$(cat "$GITHUB_WORKSPACE/.nm")
-          OBJDUMP_BIN=$(cat "$GITHUB_WORKSPACE/.objdump")
+          IMG="${{ matrix.img }}"
+          KDIR_RESOLVED="${KERNEL_SRC:-/opt/ddk/kdir/$IMG}"
+          [ -d "$KDIR_RESOLVED" ] || KDIR_RESOLVED="/opt/ddk/kdir/$IMG"
+          [ -d "$KDIR_RESOLVED" ] || { echo "FATAL: no kdir for $IMG (KERNEL_SRC=$KERNEL_SRC)"; ls /opt/ddk/kdir/; exit 1; }
+          echo "kdir=$KDIR_RESOLVED"
+          NM_BIN=""; for t in llvm-nm aarch64-linux-gnu-nm nm; do command -v $t >/dev/null 2>&1 && { NM_BIN=$t; break; }; done
+          OBJDUMP_BIN=""; for t in llvm-objdump aarch64-linux-gnu-objdump objdump; do command -v $t >/dev/null 2>&1 && { OBJDUMP_BIN=$t; break; }; done
+          echo "tools: NM=$NM_BIN OBJDUMP=$OBJDUMP_BIN"
+          [ -n "$NM_BIN" ] && [ -n "$OBJDUMP_BIN" ] || { echo "FATAL: no nm/objdump"; exit 1; }
+          export PATH="$(echo /opt/ddk/clang/*/bin | cut -d' ' -f1):$PATH"
           (cd "$KDIR_RESOLVED" && ./scripts/config --disable MODVERSIONS)
           (cd "$KDIR_RESOLVED" && make olddefconfig >/dev/null 2>&1)
           grep -q "# CONFIG_MODVERSIONS is not set" "$KDIR_RESOLVED/.config" \
@@ -85,40 +71,25 @@ jobs:
           (cd "$KDIR_RESOLVED" && make modules_prepare >/dev/null 2>&1)
           BASEUTS=$(cd "$KDIR_RESOLVED" && make -s kernelrelease 2>/dev/null || echo "0.0.0")
           echo "donor UTS: $BASEUTS"
-          # Pad EXTRAVERSION so baked UTS reaches the 63-char cap: every
-          # real target vermagic then fits the in-place runtime patch
-          # (patch only ever shrinks; kbuild fails past 64, loud).
           BLEN=${#BASEUTS}
           if [ "$BLEN" -lt 63 ]; then
             PAD=$(python3 -c "print('x'*$((63 - $BLEN)))")
           else
             PAD=""
           fi
-          cd kmod
           if [ "${{ matrix.cf }}" = "true" ]; then
             sudo apt-get update && sudo apt-get install -y clang lld llvm
           fi
-          export PATH="$CLANG_BIN:$PATH"
-          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" EXTRAVERSION="-${PAD}" ${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
-
-      - name: Per-target gate (imports, BTI, placeholder)
-        run: |
-          KDIR_RESOLVED=$(cat "$GITHUB_WORKSPACE/.kdir")
-          NM_BIN=$(cat "$GITHUB_WORKSPACE/.nm")
-          OBJDUMP_BIN=$(cat "$GITHUB_WORKSPACE/.objdump")
           cd kmod
+          export PATH="$(echo /opt/ddk/clang/*/bin | cut -d' ' -f1):$PATH"
+          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" EXTRAVERSION="-${PAD}" ${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
           make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal
           if [ "${{ matrix.cf }}" = "true" ]; then
             N=$("$OBJDUMP_BIN" -d "rwbridge.ko" | grep -c "brk.*0x8228"); echo "kcfi traps: $N"; [ "$N" -gt 0 ]
           fi
-
-      - name: Rename per KMI + strip
-        run: |
-          cd kmod
           mv rwbridge.ko "rwbridge-${{ matrix.kmi }}.ko"
-          llvm-strip -d "rwbridge-${{ matrix.kmi }}.ko" || true
+          command -v llvm-strip >/dev/null 2>&1 && llvm-strip -d "rwbridge-${{ matrix.kmi }}.ko" || true
           ls -la "rwbridge-${{ matrix.kmi }}.ko"
-
       - name: Upload build artifact (internal, consumed by pack job)
         uses: actions/upload-artifact@v4
         with:
