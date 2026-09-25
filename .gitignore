@@ -14,3 +14,6 @@ modules.order
 # Local-only, never pushed (standalone-project rule)
 AGENTS.md
 tools/bst-watch.sh
+
+__pycache__/
+*.pyc
