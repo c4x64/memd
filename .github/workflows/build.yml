@@ -72,18 +72,23 @@ jobs:
           # warn-and-pass CRC-less modules; non-enforcing ignore them.
           BASEUTS=$(cd "$KDIR_RESOLVED" && make -s kernelrelease 2>/dev/null || echo "0.0.0")
           echo "donor UTS: $BASEUTS"
+          # Pad via a localversion file (kbuild appends localversion* to
+          # UTS; EXTRAVERSION overrides proved unreliable here). Target 63
+          # total: every real vermagic then fits the in-place runtime patch
+          # (patch only ever shrinks; kbuild fails past 64, loud).
+          # Remove any stale memd pad first (idempotent reruns).
+          rm -f "$KDIR_RESOLVED/localversion-memd"
           BLEN=${#BASEUTS}
           if [ "$BLEN" -lt 63 ]; then
-            PAD=$(python3 -c "print('x'*$((63 - $BLEN)))")
-          else
-            PAD=""
+            python3 -c "open('$KDIR_RESOLVED/localversion-memd','w').write('x'*$((63 - $BLEN)))"
           fi
+          echo "padded UTS: $(cd "$KDIR_RESOLVED" && make -s kernelrelease 2>/dev/null)"
           if [ "${{ matrix.cf }}" = "true" ]; then
             sudo apt-get update && sudo apt-get install -y clang lld llvm
           fi
           cd kmod
           export PATH="$(echo /opt/ddk/clang/*/bin | cut -d' ' -f1):$PATH"
-          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" EXTRAVERSION="-${PAD}"
+          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
           OBJCOPY_BIN=$(cat "$GITHUB_WORKSPACE/.objcopy")
           [ -n "$OBJCOPY_BIN" ] || { echo "FATAL: no objcopy"; exit 1; }
           "$OBJCOPY_BIN" --strip-debug rwbridge.ko
