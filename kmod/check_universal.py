@@ -57,6 +57,18 @@ def main():
             exported.add(m.group(1))
     if not exported:
         die("empty System.map?")
+    # vermagic placeholder must fit the longest real targets: UTS part
+    # (after 'vermagic=' up to first space) needs room (~55+ chars).
+    # Baked short + runtime-long target = unpatchable = NO-GO at install.
+    i = b.find(b'vermagic=')
+    if i < 0:
+        die("no vermagic string")
+    j = b.find(b' ', i)
+    uts = b[i + 9:j if j > 0 else i + 200]
+    if len(uts) < 55:
+        die("vermagic UTS too short (%d chars; need >= 55 for target room)" % len(uts))
+    print("vermagic room: %d chars" % len(uts))
+
     bad = []
     for line in open(undef_path):
         sym = line.split()

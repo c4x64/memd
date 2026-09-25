@@ -60,18 +60,16 @@ jobs:
           [ -d "$KDIR_RESOLVED" ] || { echo "FATAL: no kdir for $IMG (KERNEL_SRC=$KERNEL_SRC)"; ls /opt/ddk/kdir/; exit 1; }
           echo "kdir=$KDIR_RESOLVED"
           ls "$KDIR_RESOLVED" | head -20
-          ls "$KDIR_RESOLVED/scripts/config" "$KDIR_RESOLVED/Makefile" "$KDIR_RESOLVED/System.map" 2>&1 | head -5
-          file "$KDIR_RESOLVED/scripts/config" 2>/dev/null || true
           NM_BIN=""; for t in llvm-nm aarch64-linux-gnu-nm nm; do command -v $t >/dev/null 2>&1 && { NM_BIN=$t; break; }; done
+          OBJCOPY_BIN=""; for t in llvm-objcopy aarch64-linux-gnu-objcopy objcopy; do command -v $t >/dev/null 2>&1 && { OBJCOPY_BIN=$t; break; }; done
+          echo "$OBJCOPY_BIN" > "$GITHUB_WORKSPACE/.objcopy"
           OBJDUMP_BIN=""; for t in llvm-objdump aarch64-linux-gnu-objdump objdump; do command -v $t >/dev/null 2>&1 && { OBJDUMP_BIN=$t; break; }; done
           echo "tools: NM=$NM_BIN OBJDUMP=$OBJDUMP_BIN"
           [ -n "$NM_BIN" ] && [ -n "$OBJDUMP_BIN" ] || { echo "FATAL: no nm/objdump"; exit 1; }
           export PATH="$(echo /opt/ddk/clang/*/bin | cut -d' ' -f1):$PATH"
-          (cd "$KDIR_RESOLVED" && ./scripts/config --disable MODVERSIONS)
-          (cd "$KDIR_RESOLVED" && make olddefconfig >/dev/null 2>&1)
-          grep -q "# CONFIG_MODVERSIONS is not set" "$KDIR_RESOLVED/.config" \
-            || { echo "FATAL: MODVERSIONS still on"; exit 1; }
-          (cd "$KDIR_RESOLVED" && make modules_prepare >/dev/null 2>&1)
+          # No Kconfig tooling in DDK images (no scripts/config): CRCs are
+          # stripped post-build instead (objcopy below). Enforcing loaders
+          # warn-and-pass CRC-less modules; non-enforcing ignore them.
           BASEUTS=$(cd "$KDIR_RESOLVED" && make -s kernelrelease 2>/dev/null || echo "0.0.0")
           echo "donor UTS: $BASEUTS"
           BLEN=${#BASEUTS}
@@ -85,7 +83,12 @@ jobs:
           fi
           cd kmod
           export PATH="$(echo /opt/ddk/clang/*/bin | cut -d' ' -f1):$PATH"
-          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" EXTRAVERSION="-${PAD}" ${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
+          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" EXTRAVERSION="-${PAD}"
+          OBJCOPY_BIN=$(cat "$GITHUB_WORKSPACE/.objcopy")
+          [ -n "$OBJCOPY_BIN" ] || { echo "FATAL: no objcopy"; exit 1; }
+          "$OBJCOPY_BIN" --remove-section __versions rwbridge.ko
+          echo "stripped __versions (enforcing loaders warn-and-pass CRC-less)"
+          echo "OBJCOPY_BIN=$OBJCOPY_BIN" >> "$GITHUB_ENV"${{ matrix.cf == true && 'CFI=1 CC="clang --target=aarch64-linux-gnu -fintegrated-as"' || '' }}
           make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal
           if [ "${{ matrix.cf }}" = "true" ]; then
             N=$("$OBJDUMP_BIN" -d "rwbridge.ko" | grep -c "brk.*0x8228"); echo "kcfi traps: $N"; [ "$N" -gt 0 ]
