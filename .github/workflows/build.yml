@@ -83,6 +83,11 @@ jobs:
             python3 -c "open('$KDIR_RESOLVED/localversion-memd','w').write('x'*$((63 - $BLEN)))"
           fi
           echo "padded UTS: $(cd "$KDIR_RESOLVED" && make -s kernelrelease 2>/dev/null)"
+          # External-module builds reuse the image's stale generated UTS
+          # (setlocalversion does not rerun for M= builds): delete the
+          # stale files so the pad above takes effect at build time.
+          rm -f "$KDIR_RESOLVED/include/generated/utsrelease.h" \
+            "$KDIR_RESOLVED/include/config/kernel.release"
           if [ "${{ matrix.cf }}" = "true" ]; then
             sudo apt-get update && sudo apt-get install -y clang lld llvm
           fi
