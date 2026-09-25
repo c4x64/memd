@@ -160,15 +160,28 @@ jobs:
           export PATH="$(echo /opt/ddk/clang/*/bin | cut -d' ' -f1):$PATH"
           cd kmod/hello
           make -C "$KDIR_RESOLVED" M="$PWD" modules
+          cp hello.ko hello-raw.ko
+          echo "--- objcopy inventory ---"
+          command -v llvm-objcopy; command -v aarch64-linux-gnu-objcopy; command -v objcopy
           OBJCOPY_BIN=""; for t in llvm-objcopy aarch64-linux-gnu-objcopy objcopy; do command -v $t >/dev/null 2>&1 && { OBJCOPY_BIN=$t; break; }; done
-          "$OBJCOPY_BIN" --strip-debug hello.ko
-          "$OBJCOPY_BIN" --remove-section __versions hello.ko
-          ls -la hello.ko
+          cp hello.ko hello-strip.ko
+          "$OBJCOPY_BIN" --strip-debug hello-strip.ko
+          cp hello-strip.ko hello-novers.ko
+          "$OBJCOPY_BIN" --remove-section __versions hello-novers.ko
+          cp hello-strip.ko hello-emptyvers.ko
+          : > empty_versions.bin
+          "$OBJCOPY_BIN" --update-section __versions=empty_versions.bin hello-emptyvers.ko
+          if command -v aarch64-linux-gnu-objcopy >/dev/null 2>&1; then
+            cp hello-raw.ko hello-gnu.ko
+            aarch64-linux-gnu-objcopy --strip-debug hello-gnu.ko
+            aarch64-linux-gnu-objcopy --remove-section __versions hello-gnu.ko
+          fi
+          ls -la hello-*.ko
       - name: Upload hello probe
         uses: actions/upload-artifact@v4
         with:
           name: hello-probe
-          path: kmod/hello/hello.ko
+          path: kmod/hello/hello-*.ko
 
   pack:
     runs-on: ubuntu-latest
