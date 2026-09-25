@@ -98,6 +98,7 @@ jobs:
           echo "baked UTS: $(cat "$KDIR_RESOLVED/include/generated/utsrelease.h")"
           if [ "${{ matrix.cf }}" = "true" ]; then
             sudo apt-get update && sudo apt-get install -y clang lld llvm
+            echo "CFIggio: [$CFI]"
           fi
           cd kmod
           export PATH="$(echo /opt/ddk/clang/*/bin | cut -d' ' -f1):$PATH"
