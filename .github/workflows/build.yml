@@ -87,7 +87,7 @@ jobs:
           grep -q "# CONFIG_MODVERSIONS is not set" "$KDIR_RESOLVED/.config" \
             || { echo "FATAL: MODVERSIONS still on"; exit 1; }
           (cd "$KDIR_RESOLVED" && make modules_prepare >/dev/null 2>&1)
-          BASEUTS=$(cd "$KERNEL_SRC" && make -s kernelrelease 2>/dev/null || echo "0.0.0")
+          BASEUTS=$(cd "$KDIR_RESOLVED" && make -s kernelrelease 2>/dev/null || echo "0.0.0")
           echo "donor UTS: $BASEUTS"
           # Pad EXTRAVERSION so baked UTS reaches the 63-char cap: every
           # real target vermagic then fits the in-place runtime patch
