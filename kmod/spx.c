@@ -303,8 +303,6 @@ static int elf_sec(const unsigned char *d, long n, const char *want)
     if (n < 64 || memcmp(d, "\x7f" "ELF", 4) || d[4] != 2 || d[5] != 1)
         return -1;
     shoff = (long)rd64le(d + 40);
-    if (rd32le(d + 52) != 0 || rd32le(d + 48) != 0)
-        return -1;
     /* e_shentsize@58(2B) must be 64, e_shnum@60, e_shstrndx@62 */
     if (d[58] != 64 || d[59] != 0)
         return -1;
