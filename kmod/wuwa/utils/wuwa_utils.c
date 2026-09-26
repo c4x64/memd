@@ -356,8 +356,12 @@ static uintptr_t kaddr_to_phy_addr(uintptr_t va)
 
     if (!mm)
         return 0;
+    pr_info("[wuwa] kwalk: mm=%px init_task_mm=%px\n", mm,
+            init_task.active_mm);
     MM_READ_LOCK(mm);
     pgd = pgd_offset(mm, va);
+    pr_info("[wuwa] kwalk: pgd=%px val=%llx\n", pgd,
+            (unsigned long long)pgd_val(*pgd));
     if (pgd_none(*pgd) || pgd_bad(*pgd))
         goto out;
     p4d = p4d_offset(pgd, va);
@@ -368,6 +372,8 @@ static uintptr_t kaddr_to_phy_addr(uintptr_t va)
         goto out;
     if (pud_leaf(*pud)) {
         paddr = (pud_pfn(*pud) << PAGE_SHIFT) + (va & ((1UL << 30) - 1));
+        pr_info("[wuwa] kwalk: PUD leaf -> pa=%llx\n",
+                (unsigned long long)paddr);
         goto out;
     }
     pmd = pmd_offset(pud, va);
@@ -375,6 +381,8 @@ static uintptr_t kaddr_to_phy_addr(uintptr_t va)
         goto out;
     if (pmd_leaf(*pmd)) {
         paddr = (pmd_pfn(*pmd) << PAGE_SHIFT) + (va & ((1UL << 21) - 1));
+        pr_info("[wuwa] kwalk: PMD leaf -> pa=%llx\n",
+                (unsigned long long)paddr);
         goto out;
     }
     ptep = pte_offset_kernel(pmd, va);
