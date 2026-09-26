@@ -2,6 +2,7 @@
 
 #include <asm/sysreg.h>
 #include <linux/capability.h>
+#include <linux/preempt.h>
 #include <linux/hugetlb.h>
 #include <linux/interrupt.h>
 #include <linux/mm.h>
@@ -378,6 +379,117 @@ int wuwa_safe_read32(const void *src, unsigned int *dst)
     if (!err)
         *dst = v;
     return err;
+}
+
+/* Guarded u64 store (extable fixup on fault). Used for PTE AP flips and
+ * table entries that may be mapped read-only. */
+int wuwa_safe_write64(void *dst, unsigned long v)
+{
+    int err = -EFAULT;
+    asm volatile(
+        "1: str %1, [%2]\n"
+        "   mov %w0, #0\n"
+        "2:\n"
+        "   .pushsection __ex_table, \"a\"\n"
+        "   .balign 4\n"
+        "   .long (1b - .), (2b - .)\n"
+        "   .popsection\n"
+        : "+r" (err) : "r" (v), "r" (dst) : "memory");
+    return err;
+}
+
+/* Write a u64 to a possibly read-only kernel page (e.g. sys_call_table
+ * under STRICT_KERNEL_RWX): walk TTBR1 to the covering descriptor,
+ * flip AP to writable, local TLBI, guarded store, readback verify,
+ * exact descriptor restore, TLBI again. Zero new imports, no hypercalls.
+ * RKP-active kernels may trap the descriptor write itself (accepted
+ * owner risk); plain faults become clean errors, never panics. */
+int wuwa_table_write64(unsigned long entry_va, unsigned long val)
+{
+    unsigned long ttbr, base, v;
+    pgd_t pgd;
+    p4d_t p4d;
+    pud_t pud;
+    pmd_t pmd;
+    unsigned long desc_va = 0;
+    unsigned long orig_desc = 0;
+    unsigned long rw_desc;
+    int need_flip = 0;
+    int ret = -EFAULT;
+
+    ttbr = read_sysreg(ttbr1_el1);
+    base = ttbr & 0x0000FFFFFFFFF000UL;
+    if (!base)
+        return -EFAULT;
+    if (wuwa_safe_read64(phys_to_virt(base + (unsigned long)pgd_index(entry_va) * 8), &v))
+        return -EFAULT;
+    pgd = __pgd(v);
+    if (pgd_none(pgd) || pgd_bad(pgd))
+        return -EFAULT;
+    {
+        p4d_t *p = p4d_offset(&pgd, entry_va);
+        if (wuwa_safe_read64(p, &v))
+            return -EFAULT;
+        p4d = __p4d(v);
+        if (p4d_none(p4d) || p4d_bad(p4d))
+            return -EFAULT;
+    }
+    {
+        pud_t *p = pud_offset(&p4d, entry_va);
+        if (wuwa_safe_read64(p, &v))
+            return -EFAULT;
+        pud = __pud(v);
+        if (pud_none(pud) || pud_bad(pud))
+            return -EFAULT;
+    }
+    if (!pud_leaf(pud)) {
+        pmd_t *p = pmd_offset(&pud, entry_va);
+        if (wuwa_safe_read64(p, &v))
+            return -EFAULT;
+        pmd = __pmd(v);
+        if (pmd_none(pmd) || pmd_bad(pmd))
+            return -EFAULT;
+        if (!pmd_leaf(pmd)) {
+            pte_t *p = pte_offset_kernel(&pmd, entry_va);
+            desc_va = (unsigned long)p;
+            if (wuwa_safe_read64(p, &v))
+                return -EFAULT;
+            orig_desc = v;
+        } else {
+            desc_va = (unsigned long)pmd_offset(&pud, entry_va);
+            orig_desc = v;
+        }
+    } else {
+        desc_va = (unsigned long)pud_offset(&p4d, entry_va);
+        orig_desc = v;
+    }
+    if (!(orig_desc & 1))
+        return -EFAULT;
+    /* AP[1] set means read-only at EL1; clear it for the write. */
+    rw_desc = orig_desc & ~2UL;
+    need_flip = (rw_desc != orig_desc);
+    preempt_disable();
+    if (need_flip) {
+        if (wuwa_safe_write64((void *)desc_va, rw_desc))
+            goto out_preempt;
+        asm volatile("tlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va >> 12) : "memory");
+    }
+    if (wuwa_safe_write64((void *)entry_va, val))
+        goto restore;
+    {
+        unsigned long back = 0;
+        if (wuwa_safe_read64((void *)entry_va, &back) || back != val)
+            goto restore;
+    }
+    ret = 0;
+restore:
+    if (need_flip) {
+        wuwa_safe_write64((void *)desc_va, orig_desc);
+        asm volatile("tlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va >> 12) : "memory");
+    }
+out_preempt:
+    preempt_enable();
+    return ret;
 }
 
 static uintptr_t kaddr_to_phy_addr(uintptr_t va)

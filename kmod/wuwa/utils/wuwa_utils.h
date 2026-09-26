@@ -37,6 +37,13 @@ pte_t* page_from_virt_user(struct mm_struct* mm, uintptr_t va);
 
 uintptr_t vaddr_to_phy_addr(struct mm_struct* mm, uintptr_t va);
 
+/* Fault-safe kernel access (extable-guarded, no imports needed). */
+int wuwa_safe_read64(const void *src, unsigned long *dst);
+int wuwa_safe_read32(const void *src, unsigned int *dst);
+int wuwa_safe_write64(void *dst, unsigned long v);
+/* Write a u64 to a possibly read-only kernel page (AP flip + TLBI). */
+int wuwa_table_write64(unsigned long entry_va, unsigned long val);
+
 struct page* vaddr_to_page(struct mm_struct* mm, uintptr_t va);
 
 int translate_process_vaddr(pid_t pid, uintptr_t vaddr, uintptr_t* paddr_out);
