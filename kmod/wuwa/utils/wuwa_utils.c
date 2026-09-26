@@ -561,10 +561,14 @@ int translate_process_vaddr(pid_t pid, uintptr_t vaddr, uintptr_t* paddr_out) {
             return -EPERM;
         paddr = kaddr_to_phy_addr(vaddr);
         pr_info("[wuwa] kread: va=%lx -> pa=%lx\n", vaddr, paddr);
-        /* Sanity bound BEFORE pfn_valid: a garbage walk result used as
-         * a pfn array index faults unguarded (oops->panic). 64GB exceeds
-         * every phone; anything above is walk garbage, refuse cleanly. */
-        if (!paddr || paddr >= (64UL << 30))
+        /* Sanity bounds BEFORE pfn_valid: a garbage walk result used as
+         * a pfn array index faults unguarded (oops->panic), and a
+         * garbage phys in MMIO space can raise Synchronous External
+         * Abort (not extable-fixable -> silent reboot). DRAM on all
+         * targets lives at/above 0x40000000 (QEMU) or 0x80000000
+         * (Samsung); MMIO sits below; nothing real exceeds 64GB.
+         * Anything outside is walk garbage: refuse cleanly. */
+        if (!paddr || paddr < 0x40000000UL || paddr >= (64UL << 30))
             return -EFAULT;
         *paddr_out = paddr;
         return 0;
