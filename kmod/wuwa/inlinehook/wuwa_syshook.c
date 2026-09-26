@@ -200,6 +200,7 @@ static int scan_run_score(unsigned long base, unsigned long *distinct_out)
     unsigned long distinct = 0, ascents = 0;
     int ok = 0, sampled = 0, i = 0;
     unsigned int w;
+    unsigned int w0 = 0, w1 = 0, w2 = 0, w3 = 0;
     /* base points at run start; run length already established by caller
      * (SCAN_MIN_RUN consecutive in-window pointers). Sample prologues,
      * distinctness, and order. Sorted runs (kallsyms_addresses) are
@@ -217,10 +218,22 @@ static int scan_run_score(unsigned long base, unsigned long *distinct_out)
         }
         if (!safe_read32((void *)v, &w) && prologue_ok(w))
             ok++;
+        if (sampled == 0)
+            w0 = w;
+        else if (sampled == 1)
+            w1 = w;
+        else if (sampled == 2)
+            w2 = w;
+        else if (sampled == 3)
+            w3 = w;
         sampled++;
     }
-    if (sampled < SCAN_SAMPLE_TOTAL || ok < SCAN_SAMPLE_NEED)
+    if (sampled < SCAN_SAMPLE_TOTAL || ok < SCAN_SAMPLE_NEED) {
+        /* Log every failed 400+ run (bounded: only full runs score). */
+        pr_info("[wuwa] run @%lx: sampled=%d ok=%d asc=%lu dist=%lu w=%08x %08x %08x %08x\n",
+                base, sampled, ok, ascents, distinct, w0, w1, w2, w3);
         return 0;
+    }
     if (ascents >= SCAN_SAMPLE_TOTAL - 2)
         return 0; /* sorted: not a syscall table */
     *distinct_out = distinct;
