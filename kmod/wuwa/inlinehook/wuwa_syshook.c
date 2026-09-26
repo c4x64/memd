@@ -334,8 +334,8 @@ static int find_syscall_tables(unsigned long *out, int cap)
             near++;
         run = 0;
     }
-    pr_info("[wuwa] table scan: vbar=%lx win=[%lx,%lx] best_run=%lu at %lx near100=%lu found=%d\n",
-            vbar, lo, hi, best_run, best_at, near, found);
+    pr_info("[wuwa] table scan: vbar=%lx ttbr1=%lx win=[%lx,%lx] best_run=%lu at %lx near100=%lu found=%d\n",
+            vbar, (unsigned long)read_sysreg(ttbr1_el1), lo, hi, best_run, best_at, near, found);
     return found;
 }
 
