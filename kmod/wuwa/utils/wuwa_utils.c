@@ -560,7 +560,11 @@ int translate_process_vaddr(pid_t pid, uintptr_t vaddr, uintptr_t* paddr_out) {
         if (!capable(CAP_SYS_ADMIN))
             return -EPERM;
         paddr = kaddr_to_phy_addr(vaddr);
-        if (!paddr)
+        pr_info("[wuwa] kread: va=%lx -> pa=%lx\n", vaddr, paddr);
+        /* Sanity bound BEFORE pfn_valid: a garbage walk result used as
+         * a pfn array index faults unguarded (oops->panic). 64GB exceeds
+         * every phone; anything above is walk garbage, refuse cleanly. */
+        if (!paddr || paddr >= (64UL << 30))
             return -EFAULT;
         *paddr_out = paddr;
         return 0;
