@@ -160,11 +160,11 @@ jobs:
           cd kmod/hello
           make -C "$KDIR_RESOLVED" M="$PWD" modules
           OBJCOPY_BIN=""; for t in llvm-objcopy aarch64-linux-gnu-objcopy objcopy; do command -v $t >/dev/null 2>&1 && { OBJCOPY_BIN=$t; break; }; done
-          for k in hello hello_core; do
+          for k in hello hello_core hello_nobti hello_noscs hello_nofn; do
             "$OBJCOPY_BIN" --strip-debug $k.ko
             "$OBJCOPY_BIN" --remove-section __versions $k.ko
           done
-          ls -la hello.ko hello_core.ko
+          ls -la hello*.ko
       - name: Upload hello probes
         uses: actions/upload-artifact@v4
         with:
