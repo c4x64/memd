@@ -337,14 +337,16 @@ struct page* vaddr_to_page(struct mm_struct* mm, uintptr_t va) {
     return pfn_to_page(wuwa_phys_to_pfn(vaddr_to_phy_addr(mm, va)));
 }
 
-extern struct mm_struct init_mm;
+extern struct task_struct init_task;
 
 /* Kernel-VA translation (leaf-aware): kernel text is block-mapped
  * (PUD/PMD leaves), which the user PTE walker cannot handle. Walks
- * swapper via init_mm (plain import, no kallsyms). Used for read-only
+ * swapper via init_task.active_mm (init_mm itself is not exported;
+ * pid 0's active_mm IS init_mm and never goes away). Used for read-only
  * diagnostics and table discovery; never for writes to kernel text. */
 static uintptr_t kaddr_to_phy_addr(uintptr_t va)
 {
+    struct mm_struct *mm = init_task.active_mm;
     pgd_t *pgd;
     p4d_t *p4d;
     pud_t *pud;
@@ -352,8 +354,10 @@ static uintptr_t kaddr_to_phy_addr(uintptr_t va)
     pte_t *ptep;
     uintptr_t paddr = 0;
 
-    MM_READ_LOCK(&init_mm);
-    pgd = pgd_offset(&init_mm, va);
+    if (!mm)
+        return 0;
+    MM_READ_LOCK(mm);
+    pgd = pgd_offset(mm, va);
     if (pgd_none(*pgd) || pgd_bad(*pgd))
         goto out;
     p4d = p4d_offset(pgd, va);
@@ -378,7 +382,7 @@ static uintptr_t kaddr_to_phy_addr(uintptr_t va)
         goto out;
     paddr = (pte_pfn(*ptep) << PAGE_SHIFT) + (va & (PAGE_SIZE - 1));
 out:
-    MM_READ_UNLOCK(&init_mm);
+    MM_READ_UNLOCK(mm);
     return paddr;
 }
 
