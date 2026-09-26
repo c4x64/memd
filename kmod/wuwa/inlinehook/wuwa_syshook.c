@@ -133,33 +133,40 @@ out_put:
 
 /* Fault-safe kernel reads without imports: probe_kernel_read is not
  * exported on some vendor kernels (proven: Samsung 5.15), so use
- * exception-table-guarded loads (sorted into extable at load, standard
- * __get_user shape). No symbols needed, works everywhere. */
-static int safe_read64(const void *src, u64 *dst)
+ * exception-table-guarded loads (arm64 relative extable entries, same
+ * shape as __get_user; sorted into extable at load). No symbols needed,
+ * works everywhere. */
+static int safe_read64(const void *src, unsigned long *dst)
 {
-    u64 v;
+    unsigned long v;
     int err = -EFAULT;
     asm volatile(
         "1: ldr %1, [%2]\n"
         "   mov %0, #0\n"
         "2:\n"
-        _ASM_EXTABLE(1b, 2b)
-        : "+r" (err), "=r" (v) : "r" (src));
+        "   .pushsection __ex_table, \"a\"\n"
+        "   .balign 4\n"
+        "   .long (1b - .), (2b - .)\n"
+        "   .popsection\n"
+        : "+r" (err), "=r" (v) : "r" (src) : "memory");
     if (!err)
         *dst = v;
     return err;
 }
 
-static int safe_read32(const void *src, u32 *dst)
+static int safe_read32(const void *src, unsigned int *dst)
 {
-    u32 v;
+    unsigned int v;
     int err = -EFAULT;
     asm volatile(
         "1: ldr %w1, [%2]\n"
         "   mov %0, #0\n"
         "2:\n"
-        _ASM_EXTABLE(1b, 2b)
-        : "+r" (err), "=r" (v) : "r" (src));
+        "   .pushsection __ex_table, \"a\"\n"
+        "   .balign 4\n"
+        "   .long (1b - .), (2b - .)\n"
+        "   .popsection\n"
+        : "+r" (err), "=r" (v) : "r" (src) : "memory");
     if (!err)
         *dst = v;
     return err;
@@ -192,7 +199,7 @@ static int scan_run_score(unsigned long base, unsigned long *distinct_out)
     unsigned long v, prev = 0;
     unsigned long distinct = 0, ascents = 0;
     int ok = 0, sampled = 0, i = 0;
-    u32 w;
+    unsigned int w;
     /* base points at run start; run length already established by caller
      * (SCAN_MIN_RUN consecutive in-window pointers). Sample prologues,
      * distinctness, and order. Sorted runs (kallsyms_addresses) are
@@ -270,7 +277,7 @@ int wuwa_hide_install(void)
     unsigned long found[SYSHOOK_MAX_TABLES];
     int n, i, installed = 0;
     unsigned long flags;
-    u32 w;
+    unsigned int w;
 
     spin_lock_irqsave(&syshook_lock, flags);
     if (hook_active) {
