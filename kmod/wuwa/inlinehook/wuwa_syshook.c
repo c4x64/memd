@@ -142,7 +142,7 @@ static int safe_read64(const void *src, unsigned long *dst)
     int err = -EFAULT;
     asm volatile(
         "1: ldr %1, [%2]\n"
-        "   mov %0, #0\n"
+        "   mov %w0, #0\n"
         "2:\n"
         "   .pushsection __ex_table, \"a\"\n"
         "   .balign 4\n"
@@ -160,7 +160,7 @@ static int safe_read32(const void *src, unsigned int *dst)
     int err = -EFAULT;
     asm volatile(
         "1: ldr %w1, [%2]\n"
-        "   mov %0, #0\n"
+        "   mov %w0, #0\n"
         "2:\n"
         "   .pushsection __ex_table, \"a\"\n"
         "   .balign 4\n"
