@@ -43,6 +43,9 @@ int wuwa_safe_read32(const void *src, unsigned int *dst);
 int wuwa_safe_write64(void *dst, unsigned long v);
 /* Write a u64 to a possibly read-only kernel page (AP flip + TLBI). */
 int wuwa_table_write64(unsigned long entry_va, unsigned long val);
+/* Page permissions + phys for a kernel VA (descriptor metadata only). */
+int wuwa_page_perms(uintptr_t va, uintptr_t *pa_out, unsigned *present_out,
+                    unsigned *level_out, unsigned *ap_out, unsigned *xn_out);
 
 struct page* vaddr_to_page(struct mm_struct* mm, uintptr_t va);
 

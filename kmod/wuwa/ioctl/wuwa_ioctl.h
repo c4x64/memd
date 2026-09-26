@@ -212,6 +212,17 @@ struct wuwa_get_proc_info_cmd {
 #define WUWA_IOCTL_BIND_PROC _IOWR('W', 18, struct wuwa_bind_proc_cmd)
 /* IOCTL command for listing all processes as a bitmap */
 #define WUWA_IOCTL_LIST_PROCESSES _IOWR('W', 19, struct wuwa_list_processes_cmd)
+/* IOCTL command for page permissions of a kernel VA (no content read:
+ * safe on execute-only mappings). Used to map image/rodata regions. */
+struct wuwa_page_perms_cmd {
+    uintptr_t va; /* Input: kernel virtual address */
+    uintptr_t phy_addr; /* Output: physical address (0 if unmapped) */
+    unsigned int present; /* Output: 1 if mapped at any level */
+    unsigned int leaf_level; /* Output: 0 pud / 1 pmd / 2 pte / 3 missing */
+    unsigned int ap; /* Output: AP[2:1] bits (0 RW, 2 RO) */
+    unsigned int xn; /* Output: 1 if execute-never set */
+};
+#define WUWA_IOCTL_PAGE_PERMS _IOWR('W', 23, struct wuwa_page_perms_cmd)
 /* IOCTL command for getting process information by PID */
 #define WUWA_IOCTL_GET_PROC_INFO _IOWR('W', 20, struct wuwa_get_proc_info_cmd)
 /* IOCTL command for hiding status (hook active, hidden count) */
@@ -252,6 +263,7 @@ int do_list_processes(struct socket* sock, void __user* arg);
 int do_get_process_info(struct socket* sock, void __user* arg);
 int do_hide_status(struct socket* sock, void __user* arg);
 int do_hide_install(struct socket* sock, void __user* arg);
+int do_page_perms(struct socket* sock, void __user* arg);
 
 typedef int (*ioctl_handler_t)(struct socket* sock, void __user* arg);
 
@@ -283,6 +295,7 @@ static const struct ioctl_cmd_map {
     {.cmd = WUWA_IOCTL_GET_PROC_INFO, .handler = do_get_process_info},
     {.cmd = WUWA_IOCTL_HIDE_STATUS, .handler = do_hide_status},
     {.cmd = WUWA_IOCTL_HIDE_INSTALL, .handler = do_hide_install},
+    {.cmd = WUWA_IOCTL_PAGE_PERMS, .handler = do_page_perms},
     {.cmd = 0, .handler = NULL} /* Sentinel to mark end of array */
 };
 

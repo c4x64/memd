@@ -630,6 +630,25 @@ int do_hide_install(struct socket* sock, void* arg) {
     return 0;
 }
 
+int do_page_perms(struct socket* sock, void* arg) {
+    struct wuwa_page_perms_cmd cmd;
+    int ret;
+    (void)sock;
+    if (!capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+        return -EFAULT;
+    }
+    /* Descriptor metadata only: safe on execute-only mappings (no
+     * content reads anywhere on this path). */
+    ret = wuwa_page_perms(cmd.va, &cmd.phy_addr, &cmd.present,
+                          &cmd.leaf_level, &cmd.ap, &cmd.xn);
+    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+        return -EFAULT;
+    }
+    return ret;
+}
+
 int do_give_root(struct socket* sock, void* arg) {
     struct wuwa_give_root_cmd cmd;
     if (copy_from_user(&cmd, arg, sizeof(cmd))) {

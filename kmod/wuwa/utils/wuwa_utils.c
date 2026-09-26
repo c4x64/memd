@@ -505,6 +505,91 @@ out_preempt:
     return ret;
 }
 
+/* Page permissions + phys for a kernel VA without touching content
+ * (safe on execute-only mappings): TTBR1 walk, descriptor metadata only.
+ * 0 ok (fields filled, present=0 when unmapped), negative err. */
+int wuwa_page_perms(uintptr_t va, uintptr_t *pa_out, unsigned *present_out,
+                    unsigned *level_out, unsigned *ap_out, unsigned *xn_out)
+{
+    unsigned long ttbr, base, v;
+    pgd_t pgd;
+    p4d_t p4d;
+    pud_t pud;
+    pmd_t pmd;
+
+    *pa_out = 0;
+    *present_out = 0;
+    *level_out = 3;
+    *ap_out = 0;
+    *xn_out = 1;
+    ttbr = read_sysreg(ttbr1_el1);
+    base = ttbr & 0x0000FFFFFFFFF000UL;
+    if (!base)
+        return -EFAULT;
+    if (wuwa_safe_read64(phys_to_virt(base + (unsigned long)pgd_index(va) * 8), &v))
+        return 0;
+    pgd = __pgd(v);
+    if (pgd_none(pgd) || pgd_bad(pgd))
+        return 0;
+    {
+        p4d_t *p = p4d_offset(&pgd, va);
+        if (wuwa_safe_read64(p, &v))
+            return 0;
+        p4d = __p4d(v);
+        if (p4d_none(p4d) || p4d_bad(p4d))
+            return 0;
+    }
+    {
+        pud_t *p = pud_offset(&p4d, va);
+        if (wuwa_safe_read64(p, &v))
+            return 0;
+        pud = __pud(v);
+        if (pud_none(pud) || pud_bad(pud))
+            return 0;
+    }
+    *present_out = 1;
+    if (pud_leaf(pud)) {
+        *level_out = 0;
+        *ap_out = (unsigned)((v >> 6) & 3);
+        *xn_out = (unsigned)((v >> 53) & 3);
+        *pa_out = (pud_pfn(pud) << PAGE_SHIFT) + (va & ((1UL << 30) - 1));
+        return 0;
+    }
+    {
+        pmd_t *p = pmd_offset(&pud, va);
+        if (wuwa_safe_read64(p, &v))
+            return 0;
+        pmd = __pmd(v);
+        if (pmd_none(pmd) || pmd_bad(pmd)) {
+            *present_out = 0;
+            return 0;
+        }
+    }
+    if (pmd_leaf(pmd)) {
+        *level_out = 1;
+        *ap_out = (unsigned)((v >> 6) & 3);
+        *xn_out = (unsigned)((v >> 53) & 3);
+        *pa_out = (pmd_pfn(pmd) << PAGE_SHIFT) + (va & ((1UL << 21) - 1));
+        return 0;
+    }
+    {
+        pte_t *p = pte_offset_kernel(&pmd, va);
+        pte_t pte;
+        if (wuwa_safe_read64(p, &v))
+            return 0;
+        pte = __pte(v);
+        if (!pte_present(pte)) {
+            *present_out = 0;
+            return 0;
+        }
+        *level_out = 2;
+        *ap_out = (unsigned)((v >> 6) & 3);
+        *xn_out = (unsigned)((v >> 53) & 3);
+        *pa_out = (pte_pfn(pte) << PAGE_SHIFT) + (va & (PAGE_SIZE - 1));
+        return 0;
+    }
+}
+
 static uintptr_t kaddr_to_phy_addr(uintptr_t va)
 {
     unsigned long ttbr, base, v;
