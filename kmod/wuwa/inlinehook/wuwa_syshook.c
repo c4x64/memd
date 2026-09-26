@@ -2,6 +2,7 @@
 #include "wuwa_hide.h"
 
 #include <asm/barrier.h>
+#include <asm/extable.h>
 #include <asm/sysreg.h>
 #include <linux/compiler.h>
 #include <linux/cred.h>
@@ -130,6 +131,40 @@ out_put:
     return ret;
 }
 
+/* Fault-safe kernel reads without imports: probe_kernel_read is not
+ * exported on some vendor kernels (proven: Samsung 5.15), so use
+ * exception-table-guarded loads (sorted into extable at load, standard
+ * __get_user shape). No symbols needed, works everywhere. */
+static int safe_read64(const void *src, u64 *dst)
+{
+    u64 v;
+    int err = -EFAULT;
+    asm volatile(
+        "1: ldr %1, [%2]\n"
+        "   mov %0, #0\n"
+        "2:\n"
+        _ASM_EXTABLE(1b, 2b)
+        : "+r" (err), "=r" (v) : "r" (src));
+    if (!err)
+        *dst = v;
+    return err;
+}
+
+static int safe_read32(const void *src, u32 *dst)
+{
+    u32 v;
+    int err = -EFAULT;
+    asm volatile(
+        "1: ldr %w1, [%2]\n"
+        "   mov %0, #0\n"
+        "2:\n"
+        _ASM_EXTABLE(1b, 2b)
+        : "+r" (err), "=r" (v) : "r" (src));
+    if (!err)
+        *dst = v;
+    return err;
+}
+
 /* ---- table discovery: pointer-run signature + prologue validation ---- */
 static bool prologue_ok(u32 w)
 {
@@ -165,8 +200,7 @@ static int scan_run_score(unsigned long base, unsigned long *distinct_out)
     for (i = 0; i < SCAN_MIN_RUN; i += SCAN_SAMPLE_EVERY) {
         if (sampled >= SCAN_SAMPLE_TOTAL)
             break;
-        if (probe_kernel_read(&v, (void *)(base + (unsigned long)i * 8),
-                              sizeof(v)))
+        if (safe_read64((void *)(base + (unsigned long)i * 8), &v))
             return -1;
         if (sampled > 0 && v >= prev)
             ascents++;
@@ -174,7 +208,7 @@ static int scan_run_score(unsigned long base, unsigned long *distinct_out)
             distinct++;
             prev = v;
         }
-        if (!probe_kernel_read(&w, (void *)v, sizeof(w)) && prologue_ok(w))
+        if (!safe_read32((void *)v, &w) && prologue_ok(w))
             ok++;
         sampled++;
     }
@@ -206,7 +240,7 @@ static int find_syscall_tables(unsigned long *out, int cap)
     lo = (vbar & ~((1UL << 21) - 1)) - (1UL << 21);
     hi = vbar + (128UL << 20);
     for (a = lo; a + 8 <= hi; a += 8) {
-        if (probe_kernel_read(&v, (void *)a, sizeof(v))) {
+        if (safe_read64((void *)a, &v)) {
             run = 0;
             continue;
         }
@@ -258,11 +292,10 @@ int wuwa_hide_install(void)
     for (i = 0; i < n; i++) {
         unsigned long *table = (unsigned long *)found[i];
         unsigned long orig;
-        if (probe_kernel_read(&orig, &table[__NR_getdents64], sizeof(orig)))
+        if (safe_read64(&table[__NR_getdents64], &orig))
             continue;
         /* Pre-write sanity: current entry must look like code. */
-        if (probe_kernel_read(&w, (void *)orig, sizeof(w)) ||
-            !prologue_ok(w))
+        if (safe_read32((void *)orig, &w) || !prologue_ok(w))
             continue;
         hook_tables[installed] = table;
         hook_origs[installed] = (getdents64_fn)orig;
