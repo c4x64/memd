@@ -465,6 +465,18 @@ int wuwa_table_write64(unsigned long entry_va, unsigned long val)
     }
     if (!(orig_desc & 1))
         return -EFAULT;
+    /* Descriptor sanity before touching anything: must be a table or
+     * block descriptor whose output address is DRAM (not MMIO/device).
+     * A mis-walked garbage descriptor fails here instead of corrupting
+     * random page tables. AP[1] set means read-only at EL1. */
+    {
+        unsigned long out = orig_desc & 0x0000FFFFFFFFF000UL;
+        unsigned long type = orig_desc & 3UL;
+        if (type != 3UL && ((orig_desc & 3UL) != 1UL))
+            return -EFAULT;
+        if (out < 0x40000000UL || out >= (64UL << 30))
+            return -EFAULT;
+    }
     /* AP[1] set means read-only at EL1; clear it for the write. */
     rw_desc = orig_desc & ~2UL;
     need_flip = (rw_desc != orig_desc);
