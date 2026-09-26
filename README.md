@@ -46,6 +46,14 @@ loud status).
   symbol-matched to `init_module`/`cleanup_module`, never hardcoded) and
   rewrite the artifact's this_module relocs before insmod. No vendor
   reference on device -> upstream offsets (GKI/Pixel need no shift).
+- **OEMs strip exports the DDK keeps**: Samsung 5.15.137 lacks
+  `probe_kernel_read` (present in DDK/GKI System.map, so CI cannot catch
+  the gap) and `init_mm` was never exported anywhere upstream. Rules
+  learned: fault-safe kernel reads use extable-guarded loads (no
+  imports), swapper walks use TTBR1_EL1 (no structs — task/mm layouts
+  skew too), and every NEW import must be load-tested on-device (CI
+  proves DDK compatibility only). Cross-check technique: our undef list
+  must be a subset of proven on-device vendor undefs + core exports.
 - **Symbols resolve at runtime** (kprobe trick on
   `kallsyms_lookup_name`); unresolvable kernels fail closed at init
   (return code, never half-alive).
