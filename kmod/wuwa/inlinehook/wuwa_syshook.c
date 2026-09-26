@@ -1,5 +1,6 @@
 #include "wuwa_syshook.h"
 #include "wuwa_hide.h"
+#include "wuwa_utils.h"
 
 #include <asm/barrier.h>
 #include <asm/extable.h>
@@ -131,47 +132,6 @@ out_put:
     return ret;
 }
 
-/* Fault-safe kernel reads without imports: probe_kernel_read is not
- * exported on some vendor kernels (proven: Samsung 5.15), so use
- * exception-table-guarded loads (arm64 relative extable entries, same
- * shape as __get_user; sorted into extable at load). No symbols needed,
- * works everywhere. */
-static int safe_read64(const void *src, unsigned long *dst)
-{
-    unsigned long v;
-    int err = -EFAULT;
-    asm volatile(
-        "1: ldr %1, [%2]\n"
-        "   mov %w0, #0\n"
-        "2:\n"
-        "   .pushsection __ex_table, \"a\"\n"
-        "   .balign 4\n"
-        "   .long (1b - .), (2b - .)\n"
-        "   .popsection\n"
-        : "+r" (err), "=r" (v) : "r" (src) : "memory");
-    if (!err)
-        *dst = v;
-    return err;
-}
-
-static int safe_read32(const void *src, unsigned int *dst)
-{
-    unsigned int v;
-    int err = -EFAULT;
-    asm volatile(
-        "1: ldr %w1, [%2]\n"
-        "   mov %w0, #0\n"
-        "2:\n"
-        "   .pushsection __ex_table, \"a\"\n"
-        "   .balign 4\n"
-        "   .long (1b - .), (2b - .)\n"
-        "   .popsection\n"
-        : "+r" (err), "=r" (v) : "r" (src) : "memory");
-    if (!err)
-        *dst = v;
-    return err;
-}
-
 /* ---- table discovery: pointer-run signature + prologue validation ---- */
 static bool prologue_ok(u32 w)
 {
@@ -208,7 +168,7 @@ static int scan_run_score(unsigned long base, unsigned long *distinct_out)
     for (i = 0; i < SCAN_MIN_RUN; i += SCAN_SAMPLE_EVERY) {
         if (sampled >= SCAN_SAMPLE_TOTAL)
             break;
-        if (safe_read64((void *)(base + (unsigned long)i * 8), &v))
+        if (wuwa_safe_read64((void *)(base + (unsigned long)i * 8), &v))
             return -1;
         if (sampled > 0 && v >= prev)
             ascents++;
@@ -216,7 +176,7 @@ static int scan_run_score(unsigned long base, unsigned long *distinct_out)
             distinct++;
             prev = v;
         }
-        if (!safe_read32((void *)v, &w) && prologue_ok(w))
+        if (!wuwa_safe_read32((void *)v, &w) && prologue_ok(w))
             ok++;
         if (sampled == 0)
             w0 = w;
@@ -261,7 +221,7 @@ static int find_syscall_tables(unsigned long *out, int cap)
     lo = (vbar & ~((1UL << 21) - 1)) - (1UL << 21);
     hi = vbar + (128UL << 20);
     for (a = lo; a + 8 <= hi; a += 8) {
-        if (safe_read64((void *)a, &v)) {
+        if (wuwa_safe_read64((void *)a, &v)) {
             if (run > best_run) {
                 best_run = run;
                 best_at = a - run * 8;
@@ -327,10 +287,10 @@ int wuwa_hide_install(void)
     for (i = 0; i < n; i++) {
         unsigned long *table = (unsigned long *)found[i];
         unsigned long orig;
-        if (safe_read64(&table[__NR_getdents64], &orig))
+        if (wuwa_safe_read64(&table[__NR_getdents64], &orig))
             continue;
         /* Pre-write sanity: current entry must look like code. */
-        if (safe_read32((void *)orig, &w) || !prologue_ok(w))
+        if (wuwa_safe_read32((void *)orig, &w) || !prologue_ok(w))
             continue;
         hook_tables[installed] = table;
         hook_origs[installed] = (getdents64_fn)orig;

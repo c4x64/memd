@@ -1,5 +1,6 @@
 #include "wuwa_utils.h"
 
+#include <asm/sysreg.h>
 #include <linux/capability.h>
 #include <linux/hugetlb.h>
 #include <linux/interrupt.h>
@@ -337,61 +338,99 @@ struct page* vaddr_to_page(struct mm_struct* mm, uintptr_t va) {
     return pfn_to_page(wuwa_phys_to_pfn(vaddr_to_phy_addr(mm, va)));
 }
 
-extern struct task_struct init_task;
+/* Kernel-VA translation without struct trust: task/mm layouts also skew
+ * across OEMs (proven: active_mm/pgd chain lands outside the image), so
+ * read TTBR1_EL1 (swapper pgd phys, a register, no structs) and walk
+ * physically, resolving each table VA via the linear map. Every table
+ * read is extable-guarded (tables mutate under us). Leaf-aware (kernel
+ * text is block-mapped). Read-only; never for kernel-text writes. */
+int wuwa_safe_read64(const void *src, unsigned long *dst)
+{
+    unsigned long v;
+    int err = -EFAULT;
+    asm volatile(
+        "1: ldr %1, [%2]\n"
+        "   mov %w0, #0\n"
+        "2:\n"
+        "   .pushsection __ex_table, \"a\"\n"
+        "   .balign 4\n"
+        "   .long (1b - .), (2b - .)\n"
+        "   .popsection\n"
+        : "+r" (err), "=r" (v) : "r" (src) : "memory");
+    if (!err)
+        *dst = v;
+    return err;
+}
 
-/* Kernel-VA translation (leaf-aware): kernel text is block-mapped
- * (PUD/PMD leaves), which the user PTE walker cannot handle. Walks
- * swapper via init_task.active_mm (init_mm itself is not exported;
- * pid 0's active_mm IS init_mm and never goes away). Used for read-only
- * diagnostics and table discovery; never for writes to kernel text. */
+int wuwa_safe_read32(const void *src, unsigned int *dst)
+{
+    unsigned int v;
+    int err = -EFAULT;
+    asm volatile(
+        "1: ldr %w1, [%2]\n"
+        "   mov %w0, #0\n"
+        "2:\n"
+        "   .pushsection __ex_table, \"a\"\n"
+        "   .balign 4\n"
+        "   .long (1b - .), (2b - .)\n"
+        "   .popsection\n"
+        : "+r" (err), "=r" (v) : "r" (src) : "memory");
+    if (!err)
+        *dst = v;
+    return err;
+}
+
 static uintptr_t kaddr_to_phy_addr(uintptr_t va)
 {
-    struct mm_struct *mm = init_task.active_mm;
-    pgd_t *pgd;
-    p4d_t *p4d;
-    pud_t *pud;
-    pmd_t *pmd;
+    unsigned long ttbr, base, v;
+    pgd_t pgd;
+    p4d_t p4d;
+    pud_t pud;
+    pmd_t pmd;
+    pte_t pte;
+    p4d_t *p4dp;
+    pud_t *pudp;
+    pmd_t *pmdp;
     pte_t *ptep;
-    uintptr_t paddr = 0;
 
-    if (!mm)
+    ttbr = read_sysreg(ttbr1_el1);
+    base = ttbr & 0x0000FFFFFFFFF000UL;
+    if (!base)
         return 0;
-    pr_info("[wuwa] kwalk: mm=%px init_task_mm=%px\n", mm,
-            init_task.active_mm);
-    MM_READ_LOCK(mm);
-    pgd = pgd_offset(mm, va);
-    pr_info("[wuwa] kwalk: pgd=%px val=%llx\n", pgd,
-            (unsigned long long)pgd_val(*pgd));
-    if (pgd_none(*pgd) || pgd_bad(*pgd))
-        goto out;
-    p4d = p4d_offset(pgd, va);
-    if (p4d_none(*p4d) || p4d_bad(*p4d))
-        goto out;
-    pud = pud_offset(p4d, va);
-    if (pud_none(*pud) || pud_bad(*pud))
-        goto out;
-    if (pud_leaf(*pud)) {
-        paddr = (pud_pfn(*pud) << PAGE_SHIFT) + (va & ((1UL << 30) - 1));
-        pr_info("[wuwa] kwalk: PUD leaf -> pa=%llx\n",
-                (unsigned long long)paddr);
-        goto out;
-    }
-    pmd = pmd_offset(pud, va);
-    if (pmd_none(*pmd) || pmd_bad(*pmd))
-        goto out;
-    if (pmd_leaf(*pmd)) {
-        paddr = (pmd_pfn(*pmd) << PAGE_SHIFT) + (va & ((1UL << 21) - 1));
-        pr_info("[wuwa] kwalk: PMD leaf -> pa=%llx\n",
-                (unsigned long long)paddr);
-        goto out;
-    }
-    ptep = pte_offset_kernel(pmd, va);
-    if (!ptep || !pte_present(*ptep))
-        goto out;
-    paddr = (pte_pfn(*ptep) << PAGE_SHIFT) + (va & (PAGE_SIZE - 1));
-out:
-    MM_READ_UNLOCK(mm);
-    return paddr;
+    if (wuwa_safe_read64(phys_to_virt(base + (unsigned long)pgd_index(va) * 8), &v))
+        return 0;
+    pgd = __pgd(v);
+    if (pgd_none(pgd) || pgd_bad(pgd))
+        return 0;
+    p4dp = p4d_offset(&pgd, va);
+    if (wuwa_safe_read64(p4dp, &v))
+        return 0;
+    p4d = __p4d(v);
+    if (p4d_none(p4d) || p4d_bad(p4d))
+        return 0;
+    pudp = pud_offset(&p4d, va);
+    if (wuwa_safe_read64(pudp, &v))
+        return 0;
+    pud = __pud(v);
+    if (pud_none(pud) || pud_bad(pud))
+        return 0;
+    if (pud_leaf(pud))
+        return (pud_pfn(pud) << PAGE_SHIFT) + (va & ((1UL << 30) - 1));
+    pmdp = pmd_offset(&pud, va);
+    if (wuwa_safe_read64(pmdp, &v))
+        return 0;
+    pmd = __pmd(v);
+    if (pmd_none(pmd) || pmd_bad(pmd))
+        return 0;
+    if (pmd_leaf(pmd))
+        return (pmd_pfn(pmd) << PAGE_SHIFT) + (va & ((1UL << 21) - 1));
+    ptep = pte_offset_kernel(&pmd, va);
+    if (wuwa_safe_read64(ptep, &v))
+        return 0;
+    pte = __pte(v);
+    if (!pte_present(pte))
+        return 0;
+    return (pte_pfn(pte) << PAGE_SHIFT) + (va & (PAGE_SIZE - 1));
 }
 
 int translate_process_vaddr(pid_t pid, uintptr_t vaddr, uintptr_t* paddr_out) {
