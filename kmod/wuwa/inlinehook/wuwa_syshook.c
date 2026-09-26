@@ -133,31 +133,6 @@ out_put:
 }
 
 /* ---- table discovery: pointer-run signature + prologue validation ---- */
-static bool prologue_ok(u32 w)
-{
-    if ((w & 0xfffffc00u) == 0xd5032400u)
-        return true; /* bti / bti c / bti j */
-    if (w == 0xd50323bfu || w == 0xd50323dfu)
-        return true; /* paciasp / pacibsp */
-    if ((w & 0xffc00000u) == 0xa9800000u)
-        return true; /* stp integer (any pair/mode) */
-    if ((w & 0xff0003e0u) == 0xb80003e0u ||
-        (w & 0xff0003e0u) == 0xf80003e0u)
-        return true; /* str w/x, [sp, #-N]! */
-    if ((w & 0x9f000000u) == 0x90000000u)
-        return true; /* adrp */
-    if ((w & 0xfff00000u) == 0xd5300000u)
-        return true; /* mrs */
-    if ((w & 0xff800000u) == 0x52800000u ||
-        (w & 0xff800000u) == 0xd2800000u)
-        return true; /* movz w/x */
-    if (w == 0x910003fdu)
-        return true; /* mov x29, sp */
-    if ((w & 0xffc00000u) == 0xd1000000u)
-        return true; /* sub sp, sp, #imm */
-    return false;
-}
-
 #define SCAN_MIN_RUN 400
 #define SCAN_SAMPLE_EVERY 16
 #define SCAN_SAMPLE_NEED 20
@@ -192,33 +167,16 @@ static int run_maxdup(unsigned long base, unsigned long len)
 
 #define SCAN_DUP_NEED 8 /* ni-stub repeats across sampled slots */
 
-/* Order check without target reads: sorted runs (kallsyms) are never
- * syscall tables. True if >=22 of 24 consecutive samples ascend. */
-static bool run_is_sorted(unsigned long base)
-{
-    unsigned long prev = 0, v;
-    int asc = 0, i;
-    for (i = 0; i < 24; i++) {
-        if (wuwa_safe_read64((void *)(base + (unsigned long)i * 16), &v))
-            return false;
-        if (i > 0 && v >= prev)
-            asc++;
-        prev = v;
-    }
-    return asc >= 22;
-}
-
-static int scan_run_score(unsigned long base, unsigned long *distinct_out)
+/* Run statistics from entry VALUES only (never target contents:
+ * kernel text is execute-only on hardened kernels, so prologue checks
+ * are impossible there). Distinct + unsorted + duplicates identify
+ * syscall tables: ni_syscall stub repeats, kallsyms is sorted. */
+static int run_stats(unsigned long base, unsigned long *distinct_out,
+                     unsigned long *ascents_out)
 {
     unsigned long v, prev = 0;
     unsigned long distinct = 0, ascents = 0;
-    int ok = 0, sampled = 0, i = 0;
-    unsigned int w;
-    unsigned int w0 = 0, w1 = 0, w2 = 0, w3 = 0;
-    /* base points at run start; run length already established by caller
-     * (SCAN_MIN_RUN consecutive in-window pointers). Sample prologues,
-     * distinctness, and order. Sorted runs (kallsyms_addresses) are
-     * rejected: syscall tables are unordered. */
+    int sampled = 0, i = 0;
     for (i = 0; i < SCAN_MIN_RUN; i += SCAN_SAMPLE_EVERY) {
         if (sampled >= SCAN_SAMPLE_TOTAL)
             break;
@@ -230,28 +188,13 @@ static int scan_run_score(unsigned long base, unsigned long *distinct_out)
             distinct++;
             prev = v;
         }
-        if (!wuwa_safe_read32((void *)v, &w) && prologue_ok(w))
-            ok++;
-        if (sampled == 0)
-            w0 = w;
-        else if (sampled == 1)
-            w1 = w;
-        else if (sampled == 2)
-            w2 = w;
-        else if (sampled == 3)
-            w3 = w;
         sampled++;
     }
-    if (sampled < SCAN_SAMPLE_TOTAL || ok < SCAN_SAMPLE_NEED) {
-        /* Log every failed 400+ run (bounded: only full runs score). */
-        pr_info("[wuwa] run @%lx: sampled=%d ok=%d asc=%lu dist=%lu w=%08x %08x %08x %08x\n",
-                base, sampled, ok, ascents, distinct, w0, w1, w2, w3);
-        return 0;
-    }
-    if (ascents >= SCAN_SAMPLE_TOTAL - 2)
-        return 0; /* sorted: not a syscall table */
+    if (sampled < SCAN_SAMPLE_TOTAL)
+        return -1;
     *distinct_out = distinct;
-    return distinct >= SCAN_DISTINCT_NEED ? 1 : 0;
+    *ascents_out = ascents;
+    return 0;
 }
 
 /* Locate sys_call_table without symbols: VBAR gives a kernel-text anchor;
@@ -264,7 +207,6 @@ static int find_syscall_tables(unsigned long *out, int cap)
     unsigned long vbar, lo, hi, a, run = 0;
     unsigned long best_run = 0, best_at = 0, near = 0;
     int found = 0;
-    unsigned long distinct = 0;
     unsigned long v;
 
     if (cap <= 0)
@@ -288,38 +230,38 @@ static int find_syscall_tables(unsigned long *out, int cap)
         if (v >= lo && v <= hi && (v & 7) == 0) {
             run++;
             if (run == 100) {
-                /* Near-miss diagnostics only (acceptance needs a
-                 * full MIN_RUN): tells us how close fragments are. */
-                unsigned long dd = 0;
-                int s2 = scan_run_score(a - 99 * 8, &dd);
-                pr_info("[wuwa] near100 @%lx score=%d\n", a - 99 * 8, s2);
+                /* Near-miss diagnostics: stats only, no target reads. */
+                unsigned long dd = 0, aa = 0;
+                int s2 = run_stats(a - 99 * 8, &dd, &aa);
+                pr_info("[wuwa] near100 @%lx rc=%d dist=%lu asc=%lu\n",
+                        a - 99 * 8, s2, dd, aa);
             }
             if (run == SCAN_MIN_RUN) {
                 unsigned long base = a - (SCAN_MIN_RUN - 1) * 8;
-                int sc, dup = -1;
-                bool sorted = false;
+                unsigned long dist = 0, asc = 0;
+                int dup = -1;
+                int rc;
                 /* sys_call_table is 4K-aligned (entry.S access);
                  * unaligned 400+ runs are logged, never accepted. */
                 if (base & 4095) {
                     pr_info("[wuwa] unaligned 400+ run @%lx skipped\n", base);
                     continue;
                 }
-                sc = scan_run_score(base, &distinct);
-                if (sc <= 0) {
-                    /* Prologue-mismatched tables (OEM codegen without
-                     * frame pointers/BTI) still share one ni_syscall
-                     * stub across dozens of entries: accept on
-                     * duplicates + unsorted instead. */
-                    dup = run_maxdup(base, (unsigned long)SCAN_MIN_RUN * 8);
-                    sorted = run_is_sorted(base);
-                }
-                pr_info("[wuwa] run400 @%lx sc=%d dup=%d sorted=%d\n",
-                        base, sc, dup, (int)sorted);
-                if (sc > 0 || (dup >= SCAN_DUP_NEED && !sorted)) {
+                rc = run_stats(base, &dist, &asc);
+                if (rc == 0)
+                    dup = run_maxdup(base,
+                                     (unsigned long)SCAN_MIN_RUN * 8);
+                pr_info("[wuwa] run400 @%lx rc=%d dist=%lu asc=%lu dup=%d\n",
+                        base, rc, dist, asc, dup);
+                /* Accept: aligned 400+ in-window run, unsorted,
+                 * mostly distinct, ni-stub duplicates present.
+                 * No target reads anywhere (XOM-safe). */
+                if (rc == 0 && dist >= SCAN_DISTINCT_NEED &&
+                    asc < SCAN_SAMPLE_TOTAL - 2 && dup >= SCAN_DUP_NEED) {
                     if (found < cap)
                         out[found] = base;
                     found++;
-                } else if (sc < 0) {
+                } else if (rc < 0) {
                     run = 0;
                 }
                 /* keep scanning to prove uniqueness bound */
@@ -344,7 +286,6 @@ int wuwa_hide_install(void)
     unsigned long found[SYSHOOK_MAX_TABLES];
     int n, i, installed = 0;
     unsigned long flags;
-    unsigned int w;
     unsigned long vbar, lo, hi;
 
     spin_lock_irqsave(&syshook_lock, flags);
@@ -374,22 +315,11 @@ int wuwa_hide_install(void)
         unsigned long orig;
         if (wuwa_safe_read64(&table[__NR_getdents64], &orig))
             continue;
-        /* Pre-write sanity: entry must be an in-window text pointer
-         * (prologue match logged, not required: OEM codegen varies). */
+        /* Pre-write sanity is structural only (in-window, aligned):
+         * target contents are execute-only on hardened kernels and
+         * must never be read. The functional ls test is the proof. */
         if (orig < lo || orig > hi || (orig & 7))
             continue;
-        if (wuwa_safe_read32((void *)orig, &w) && wuwa_hide_active())
-            continue;
-        if (!prologue_ok(w))
-            pr_info("[wuwa] entry61 target %lx without known prologue (dup-accepted table)\n",
-                    orig);
-        /* Pre-write sanity: entry must be an in-window text pointer
-         * (prologue match logged, not required: OEM codegen varies). */
-        if (orig < lo || orig > hi || (orig & 7))
-            continue;
-        if (!wuwa_safe_read32((void *)orig, &w) && !prologue_ok(w))
-            pr_info("[wuwa] entry61 target %lx without known prologue (dup-accepted table)\n",
-                    orig);
         hook_tables[installed] = table;
         hook_origs[installed] = (getdents64_fn)orig;
         /* Table pages are read-only at runtime: flip AP via the
