@@ -138,6 +138,39 @@ jobs:
             kmod/rwbridge-${{ matrix.kmi }}.ko
             run.sh
 
+  # TEMPORARY pipeline probes (hello.ko + hello_core.ko): diagnose
+  # silent-init on Samsung 5.15. Remove after diagnosis.
+  hello-probe:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk:android13-5.15-20251016
+      options: --privileged
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build probes (same path as product)
+        env:
+          ARCH: arm64
+          CROSS_COMPILE: aarch64-linux-gnu-
+          LLVM: 1
+          LLVM_IAS: 1
+        run: |
+          KDIR_RESOLVED="${KERNEL_SRC:-/opt/ddk/kdir/android13-5.15}"
+          export PATH="$(echo /opt/ddk/clang/*/bin | cut -d' ' -f1):$PATH"
+          cd kmod/hello
+          make -C "$KDIR_RESOLVED" M="$PWD" modules
+          OBJCOPY_BIN=""; for t in llvm-objcopy aarch64-linux-gnu-objcopy objcopy; do command -v $t >/dev/null 2>&1 && { OBJCOPY_BIN=$t; break; }; done
+          for k in hello hello_core; do
+            "$OBJCOPY_BIN" --strip-debug $k.ko
+            "$OBJCOPY_BIN" --remove-section __versions $k.ko
+          done
+          ls -la hello.ko hello_core.ko
+      - name: Upload hello probes
+        uses: actions/upload-artifact@v4
+        with:
+          name: hello-probe
+          path: kmod/hello/hello*.ko
+
   pack:
     runs-on: ubuntu-latest
     needs: [build]
