@@ -28,7 +28,9 @@ rwbridge-y := \
     wuwa/mm/wuwa_page_walk.o \
     wuwa/mm/wuwa_bindproc.o \
     wuwa/proc/wuwa_proc.o \
-    wuwa/inlinehook/hijack_arm64.o
+    wuwa/proc/wuwa_hide.o \
+    wuwa/inlinehook/hijack_arm64.o \
+    wuwa/inlinehook/wuwa_syshook.o
 
 # hijack_arm64.o is linked ONLY for hook_write_range (CFI-disable path).
 # check_target_can_hijack and the call-redirection machinery are never

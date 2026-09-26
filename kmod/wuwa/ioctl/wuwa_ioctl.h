@@ -214,6 +214,20 @@ struct wuwa_get_proc_info_cmd {
 #define WUWA_IOCTL_LIST_PROCESSES _IOWR('W', 19, struct wuwa_list_processes_cmd)
 /* IOCTL command for getting process information by PID */
 #define WUWA_IOCTL_GET_PROC_INFO _IOWR('W', 20, struct wuwa_get_proc_info_cmd)
+/* IOCTL command for hiding status (hook active, hidden count) */
+struct wuwa_hide_status_cmd {
+    int active; /* Output: 1 if the getdents64 filter is installed */
+    int hidden_count; /* Output: pids currently in the hidden set */
+};
+#define WUWA_IOCTL_HIDE_STATUS _IOWR('W', 21, struct wuwa_hide_status_cmd)
+/* IOCTL command for installing/uninstalling the getdents64 filter.
+ * Userspace gates on CFI status first (enforcing kernels would trap on
+ * the indirect table call, so install is refused there by policy). */
+struct wuwa_hide_install_cmd {
+    int install; /* Input: 1 install, 0 uninstall */
+    int result; /* Output: 0 ok, negative errno on failure */
+};
+#define WUWA_IOCTL_HIDE_INSTALL _IOWR('W', 22, struct wuwa_hide_install_cmd)
 
 int do_vaddr_translate(struct socket* sock, void __user* arg);
 int do_debug_info(struct socket* sock, void __user* arg);
@@ -236,6 +250,8 @@ int do_read_physical_memory_ioremap(struct socket* sock, void __user* arg);
 int do_write_physical_memory_ioremap(struct socket* sock, void __user* arg);
 int do_list_processes(struct socket* sock, void __user* arg);
 int do_get_process_info(struct socket* sock, void __user* arg);
+int do_hide_status(struct socket* sock, void __user* arg);
+int do_hide_install(struct socket* sock, void __user* arg);
 
 typedef int (*ioctl_handler_t)(struct socket* sock, void __user* arg);
 
@@ -265,6 +281,8 @@ static const struct ioctl_cmd_map {
     {.cmd = WUWA_IOCTL_BIND_PROC, .handler = do_bind_proc},
     {.cmd = WUWA_IOCTL_LIST_PROCESSES, .handler = do_list_processes},
     {.cmd = WUWA_IOCTL_GET_PROC_INFO, .handler = do_get_process_info},
+    {.cmd = WUWA_IOCTL_HIDE_STATUS, .handler = do_hide_status},
+    {.cmd = WUWA_IOCTL_HIDE_INSTALL, .handler = do_hide_install},
     {.cmd = 0, .handler = NULL} /* Sentinel to mark end of array */
 };
 

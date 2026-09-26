@@ -1,6 +1,10 @@
 #include "wuwa_ioctl.h"
 
 #include <asm-generic/errno-base.h>
+#include <linux/capability.h>
+
+#include "wuwa_hide.h"
+#include "wuwa_syshook.h"
 
 #include "wuwa_page_walk.h"
 #include "wuwa_sock.h"
@@ -574,19 +578,56 @@ int do_is_process_alive(struct socket* sock, void* arg) {
 }
 
 int do_hide_process(struct socket* sock, void* arg) {
-    struct task_struct* task;
     struct wuwa_hide_proc_cmd cmd;
+    int ret;
+    (void)sock;
+    /* Root-only management: any local app could otherwise hide arbitrary
+     * pids (confusion/DoS). The overlay runs as root. */
+    if (!capable(CAP_SYS_ADMIN))
+        return -EPERM;
     if (copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
+    if (cmd.pid <= 0)
+        return -EINVAL;
+    /* Pure pid-set design: the target task is never touched (no flag
+     * games on foreign structs). Visibility is enforced by the
+     * getdents64 filter for non-root readers only. */
+    ret = cmd.hide ? wuwa_hide_add(cmd.pid) : wuwa_hide_del(cmd.pid);
+    if (ret == -ESRCH && !cmd.hide)
+        ret = 0; /* unhide of absent pid is success */
+    return ret;
+}
 
-    if ((task = find_task_by_vpid(cmd.pid)) == NULL)
-        return -ESRCH;
-    task->flags ^= PF_INVISIBLE;
+int do_hide_status(struct socket* sock, void* arg) {
+    struct wuwa_hide_status_cmd cmd;
+    (void)sock;
+    if (!capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    cmd.active = wuwa_hide_active();
+    cmd.hidden_count = wuwa_hide_count();
+    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+        return -EFAULT;
+    }
+    return 0;
+}
 
-    // todo: hook getdents64
-
-    return -EINVAL;
+int do_hide_install(struct socket* sock, void* arg) {
+    struct wuwa_hide_install_cmd cmd;
+    (void)sock;
+    if (!capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+        return -EFAULT;
+    }
+    /* Userspace gates on CFI status BEFORE calling: on enforcing
+     * kernels the indirect table call would trap, so install there is
+     * refused by policy (status stays inactive, loud NO-GO). */
+    cmd.result = cmd.install ? wuwa_hide_install() : wuwa_hide_uninstall();
+    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+        return -EFAULT;
+    }
+    return 0;
 }
 
 int do_give_root(struct socket* sock, void* arg) {
