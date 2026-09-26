@@ -137,10 +137,20 @@ static bool prologue_ok(u32 w)
 {
     if ((w & 0xfffffc00u) == 0xd5032400u)
         return true; /* bti / bti c / bti j */
-    if (w == 0xd50323bfu)
-        return true; /* paciasp */
-    if (w == 0xa9be7bfdu || w == 0xa9bf7bfdu)
-        return true; /* stp x29, x30, [sp, #-16/-32]! */
+    if (w == 0xd50323bfu || w == 0xd50323dfu)
+        return true; /* paciasp / pacibsp */
+    if ((w & 0xffc00000u) == 0xa9800000u)
+        return true; /* stp integer (any pair/mode) */
+    if ((w & 0xff0003e0u) == 0xb80003e0u ||
+        (w & 0xff0003e0u) == 0xf80003e0u)
+        return true; /* str w/x, [sp, #-N]! */
+    if ((w & 0x9f000000u) == 0x90000000u)
+        return true; /* adrp */
+    if ((w & 0xfff00000u) == 0xd5300000u)
+        return true; /* mrs */
+    if ((w & 0xff800000u) == 0x52800000u ||
+        (w & 0xff800000u) == 0xd2800000u)
+        return true; /* movz w/x */
     if (w == 0x910003fdu)
         return true; /* mov x29, sp */
     if ((w & 0xffc00000u) == 0xd1000000u)
@@ -241,11 +251,18 @@ static int find_syscall_tables(unsigned long *out, int cap)
                 pr_info("[wuwa] near100 @%lx score=%d\n", a - 99 * 8, s2);
             }
             if (run == SCAN_MIN_RUN) {
-                int sc = scan_run_score(a - (SCAN_MIN_RUN - 1) * 8,
-                                        &distinct);
+                unsigned long base = a - (SCAN_MIN_RUN - 1) * 8;
+                int sc;
+                /* sys_call_table is 4K-aligned (entry.S access);
+                 * unaligned 400+ runs are logged, never accepted. */
+                if (base & 4095) {
+                    pr_info("[wuwa] unaligned 400+ run @%lx skipped\n", base);
+                    continue;
+                }
+                sc = scan_run_score(base, &distinct);
                 if (sc > 0) {
                     if (found < cap)
-                        out[found] = a - (SCAN_MIN_RUN - 1) * 8;
+                        out[found] = base;
                     found++;
                 } else if (sc < 0) {
                     run = 0;
