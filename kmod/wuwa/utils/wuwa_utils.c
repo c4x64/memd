@@ -1,5 +1,6 @@
 #include "wuwa_utils.h"
 
+#include <linux/capability.h>
 #include <linux/hugetlb.h>
 #include <linux/interrupt.h>
 #include <linux/mm.h>
@@ -336,11 +337,70 @@ struct page* vaddr_to_page(struct mm_struct* mm, uintptr_t va) {
     return pfn_to_page(wuwa_phys_to_pfn(vaddr_to_phy_addr(mm, va)));
 }
 
+extern struct mm_struct init_mm;
+
+/* Kernel-VA translation (leaf-aware): kernel text is block-mapped
+ * (PUD/PMD leaves), which the user PTE walker cannot handle. Walks
+ * swapper via init_mm (plain import, no kallsyms). Used for read-only
+ * diagnostics and table discovery; never for writes to kernel text. */
+static uintptr_t kaddr_to_phy_addr(uintptr_t va)
+{
+    pgd_t *pgd;
+    p4d_t *p4d;
+    pud_t *pud;
+    pmd_t *pmd;
+    pte_t *ptep;
+    uintptr_t paddr = 0;
+
+    MM_READ_LOCK(&init_mm);
+    pgd = pgd_offset(&init_mm, va);
+    if (pgd_none(*pgd) || pgd_bad(*pgd))
+        goto out;
+    p4d = p4d_offset(pgd, va);
+    if (p4d_none(*p4d) || p4d_bad(*p4d))
+        goto out;
+    pud = pud_offset(p4d, va);
+    if (pud_none(*pud) || pud_bad(*pud))
+        goto out;
+    if (pud_leaf(*pud)) {
+        paddr = (pud_pfn(*pud) << PAGE_SHIFT) + (va & ((1UL << 30) - 1));
+        goto out;
+    }
+    pmd = pmd_offset(pud, va);
+    if (pmd_none(*pmd) || pmd_bad(*pmd))
+        goto out;
+    if (pmd_leaf(*pmd)) {
+        paddr = (pmd_pfn(*pmd) << PAGE_SHIFT) + (va & ((1UL << 21) - 1));
+        goto out;
+    }
+    ptep = pte_offset_kernel(pmd, va);
+    if (!ptep || !pte_present(*ptep))
+        goto out;
+    paddr = (pte_pfn(*ptep) << PAGE_SHIFT) + (va & (PAGE_SIZE - 1));
+out:
+    MM_READ_UNLOCK(&init_mm);
+    return paddr;
+}
+
 int translate_process_vaddr(pid_t pid, uintptr_t vaddr, uintptr_t* paddr_out) {
     struct pid* pid_struct;
     struct task_struct* task;
     struct mm_struct* mm;
     uintptr_t paddr;
+
+    /* Canonical-high addresses are kernel VAs on every VA_BITS config:
+     * walk swapper directly (pid is irrelevant, no task touched).
+     * Priv-gated: kernel memory reads defeat KASLR for any local
+     * process, so non-root gets nothing here (user reads unaffected). */
+    if ((long)vaddr < 0) {
+        if (!capable(CAP_SYS_ADMIN))
+            return -EPERM;
+        paddr = kaddr_to_phy_addr(vaddr);
+        if (!paddr)
+            return -EFAULT;
+        *paddr_out = paddr;
+        return 0;
+    }
 
     pid_struct = find_get_pid(pid);
     if (!pid_struct) {
