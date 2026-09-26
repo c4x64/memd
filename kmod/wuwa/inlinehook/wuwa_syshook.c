@@ -233,6 +233,13 @@ static int find_syscall_tables(unsigned long *out, int cap)
         }
         if (v >= lo && v <= hi && (v & 7) == 0) {
             run++;
+            if (run == 100) {
+                /* Near-miss diagnostics only (acceptance needs a
+                 * full MIN_RUN): tells us how close fragments are. */
+                unsigned long dd = 0;
+                int s2 = scan_run_score(a - 99 * 8, &dd);
+                pr_info("[wuwa] near100 @%lx score=%d\n", a - 99 * 8, s2);
+            }
             if (run == SCAN_MIN_RUN) {
                 int sc = scan_run_score(a - (SCAN_MIN_RUN - 1) * 8,
                                         &distinct);
