@@ -235,6 +235,7 @@ static int scan_run_score(unsigned long base, unsigned long *distinct_out)
 static int find_syscall_tables(unsigned long *out, int cap)
 {
     unsigned long vbar, lo, hi, a, run = 0;
+    unsigned long best_run = 0, best_at = 0, near = 0;
     int found = 0;
     unsigned long distinct = 0;
     unsigned long v;
@@ -248,6 +249,12 @@ static int find_syscall_tables(unsigned long *out, int cap)
     hi = vbar + (128UL << 20);
     for (a = lo; a + 8 <= hi; a += 8) {
         if (safe_read64((void *)a, &v)) {
+            if (run > best_run) {
+                best_run = run;
+                best_at = a - run * 8;
+            }
+            if (run >= 100)
+                near++;
             run = 0;
             continue;
         }
@@ -267,8 +274,16 @@ static int find_syscall_tables(unsigned long *out, int cap)
             }
             continue;
         }
+        if (run > best_run) {
+            best_run = run;
+            best_at = a - run * 8;
+        }
+        if (run >= 100)
+            near++;
         run = 0;
     }
+    pr_info("[wuwa] table scan: vbar=%lx win=[%lx,%lx] best_run=%lu at %lx near100=%lu found=%d\n",
+            vbar, lo, hi, best_run, best_at, near, found);
     return found;
 }
 
