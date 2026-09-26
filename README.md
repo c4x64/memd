@@ -33,6 +33,17 @@ transports are excluded. Process-hide is a tracked TODO, not present.
   `/proc/config.gz`; `CONFIG_CFI_CLANG=y` with a 5.x flavor is a NO-GO
   (the bypass could never run there — a load would trap on first use).
   Unknown config proceeds as before.
+- **OEM struct-module skew is fixed at install time**: some OEM kernels
+  (proven: Samsung 5.15) ship a modified `struct module` whose .init/.exit
+  sit at different offsets than upstream (Samsung +0x170/+0x348 vs
+  upstream +0x178/+0x378). With upstream offsets the loader reads a NULL
+  .init, skips init, yet reports Live — a silent, socketless module (this
+  cost a full investigation: file, loader, relocs, versions, objcopy,
+  codegen, and name were all eliminated first). SPX and run.sh learn the
+  target offsets from an on-device vendor `.ko` (ELF-parsed,
+  symbol-matched to `init_module`/`cleanup_module`, never hardcoded) and
+  rewrite the artifact's this_module relocs before insmod. No vendor
+  reference on device -> upstream offsets (GKI/Pixel need no shift).
 - **Symbols resolve at runtime** (kprobe trick on
   `kallsyms_lookup_name`); unresolvable kernels fail closed at init
   (return code, never half-alive).

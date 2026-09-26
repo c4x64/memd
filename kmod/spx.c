@@ -258,13 +258,239 @@ static int dmesg_want(char *out, int cap)
 #endif
 }
 
-/* ---- ELF helpers (pure, no deps) ---- */
+/* ---- ELF struct-layout discovery + reloc shift ----
+ * Some OEM kernels (proven: Samsung 5.15) ship a modified `struct module`
+ * whose .init/.exit sit at different offsets than upstream (Samsung:
+ * +0x170/+0x348 vs upstream +0x178/+0x378). With upstream offsets the
+ * loader reads a NULL .init, skips init, yet reports Live (silent,
+ * socketless module). Fix at install time: learn the target offsets from
+ * an on-device vendor .ko (symbol-matched, never hardcoded) and rewrite
+ * our artifact's this_module relocs to match. No vendor file available ->
+ * keep upstream offsets (GKI/Pixel need no shift). */
+static unsigned long rd64le(const unsigned char *p)
+{
+    return ((unsigned long)p[0]) | ((unsigned long)p[1] << 8) |
+           ((unsigned long)p[2] << 16) | ((unsigned long)p[3] << 24) |
+           ((unsigned long)p[4] << 32) | ((unsigned long)p[5] << 40) |
+           ((unsigned long)p[6] << 48) | ((unsigned long)p[7] << 56);
+}
 
+static unsigned rd32le(const unsigned char *p)
+{
+    return ((unsigned)p[0]) | ((unsigned)p[1] << 8) |
+           ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
+}
 
+static void wr64le(unsigned char *p, unsigned long v)
+{
+    p[0] = (unsigned char)(v & 0xff);
+    p[1] = (unsigned char)((v >> 8) & 0xff);
+    p[2] = (unsigned char)((v >> 16) & 0xff);
+    p[3] = (unsigned char)((v >> 24) & 0xff);
+    p[4] = (unsigned char)((v >> 32) & 0xff);
+    p[5] = (unsigned char)((v >> 40) & 0xff);
+    p[6] = (unsigned char)((v >> 48) & 0xff);
+    p[7] = (unsigned char)((v >> 56) & 0xff);
+}
 
-/* read current init/exit slot offsets from target's relas (symbol-matched) */
+/* section index by name in a 64-bit LE ELF image; <=0 = absent/invalid.
+ * Every read is bounds-checked; garbage in -> not found, never OOB. */
+static int elf_sec(const unsigned char *d, long n, const char *want)
+{
+    long shoff;
+    int shnum, shstr, i;
+    long str_off, str_sz;
+    if (n < 64 || memcmp(d, "\x7f" "ELF", 4) || d[4] != 2 || d[5] != 1)
+        return -1;
+    shoff = (long)rd64le(d + 40);
+    if (rd32le(d + 52) != 0 || rd32le(d + 48) != 0)
+        return -1;
+    /* e_shentsize@58(2B) must be 64, e_shnum@60, e_shstrndx@62 */
+    if (d[58] != 64 || d[59] != 0)
+        return -1;
+    shnum = d[60] | (d[61] << 8);
+    shstr = d[62] | (d[63] << 8);
+    if (shnum <= 0 || shnum > 400 || shstr <= 0 || shstr >= shnum)
+        return -1;
+    if (shoff <= 0 || shoff + (long)shnum * 64 > n)
+        return -1;
+    str_off = (long)rd64le(d + shoff + (long)shstr * 64 + 24);
+    str_sz = (long)rd64le(d + shoff + (long)shstr * 64 + 32);
+    if (str_off <= 0 || str_off + str_sz > n)
+        return -1;
+    for (i = 1; i < shnum; i++) {
+        long o = shoff + (long)i * 64;
+        unsigned nm = rd32le(d + o);
+        if ((long)nm < str_sz && !strcmp((const char *)d + str_off + nm, want))
+            return i;
+    }
+    return 0;
+}
 
-/* dispatch-slot surgery: grow this_module if needed, move relas to ref slots */
+/* r_offset of the reloc symbol-matched to symname inside
+ * .rela.gnu.linkonce.this_module; 0 ok, -1 absent/unparseable. */
+static int tm_reloc_off(const unsigned char *d, long n, const char *symname,
+                        unsigned long *off)
+{
+    long shoff;
+    int shnum, ri, li, si;
+    long roff, rsz, symoff, str_off, str_sz;
+    long e;
+    if (n < 64 || memcmp(d, "\x7f" "ELF", 4) || d[4] != 2 || d[5] != 1)
+        return -1;
+    shoff = (long)rd64le(d + 40);
+    shnum = d[60] | (d[61] << 8);
+    if (shnum <= 0 || shnum > 400 || shoff <= 0 || shoff + (long)shnum * 64 > n)
+        return -1;
+    ri = elf_sec(d, n, ".rela.gnu.linkonce.this_module");
+    if (ri <= 0)
+        return -1;
+    li = (int)rd32le(d + shoff + (long)ri * 64 + 40); /* sh_link: symtab */
+    if (li <= 0 || li >= shnum)
+        return -1;
+    si = (int)rd32le(d + shoff + (long)li * 64 + 40); /* symtab sh_link: strtab */
+    if (si <= 0 || si >= shnum)
+        return -1;
+    roff = (long)rd64le(d + shoff + (long)ri * 64 + 24);
+    rsz = (long)rd64le(d + shoff + (long)ri * 64 + 32);
+    symoff = (long)rd64le(d + shoff + (long)li * 64 + 24);
+    str_off = (long)rd64le(d + shoff + (long)si * 64 + 24);
+    str_sz = (long)rd64le(d + shoff + (long)si * 64 + 32);
+    if (roff <= 0 || roff + rsz > n || rsz % 24)
+        return -1;
+    if (symoff <= 0 || str_off <= 0 || str_off + str_sz > n)
+        return -1;
+    for (e = roff; e + 24 <= roff + rsz; e += 24) {
+        unsigned long r_off = rd64le(d + e);
+        unsigned long r_info = rd64le(d + e + 8);
+        unsigned long sidx = r_info >> 32;
+        long so = symoff + (long)sidx * 24;
+        unsigned long nm;
+        long no;
+        if (so + 24 > n)
+            continue;
+        nm = rd32le(d + so);
+        no = str_off + (long)nm;
+        if (no < str_off || no >= str_off + str_sz)
+            continue;
+        if (!strcmp((const char *)d + no, symname)) {
+            *off = r_off;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* read whole file, malloc'd; 0 ok (caller frees), -1 fail */
+static int read_file(const unsigned char **out, long *nout, const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    struct stat st;
+    unsigned char *d;
+    if (!f)
+        return -1;
+    if (fstat(fileno(f), &st) < 0) {
+        fclose(f);
+        return -1;
+    }
+    if (st.st_size <= 0 || st.st_size > (32 << 20)) {
+        fclose(f);
+        return -1;
+    }
+    d = malloc((size_t)st.st_size);
+    if (!d) {
+        fclose(f);
+        return -1;
+    }
+    if (fread(d, 1, (size_t)st.st_size, f) != (size_t)st.st_size) {
+        free(d);
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    *out = d;
+    *nout = (long)st.st_size;
+    return 0;
+}
+
+/* learn target init/exit reloc offsets from the first parseable on-device
+ * vendor .ko (symbol-matched). 0 ok, -1 none found (caller keeps upstream). */
+static int vendor_tm_offsets(unsigned long *init_off, unsigned long *exit_off)
+{
+    static const char *dirs[] = {
+        "/boot/bstmods", "/vendor_dlkm/lib/modules", "/odm_dlkm/lib/modules",
+        "/vendor/lib/modules", "/system/lib/modules", NULL
+    };
+    int i;
+    for (i = 0; dirs[i]; i++) {
+        DIR *dp = opendir(dirs[i]);
+        struct dirent *de;
+        char path[512];
+        if (!dp)
+            continue;
+        while ((de = readdir(dp))) {
+            const unsigned char *d = NULL;
+            long n = 0;
+            size_t L = strlen(de->d_name);
+            unsigned long io, eo;
+            if (L < 4 || strcmp(de->d_name + L - 3, ".ko"))
+                continue;
+            snprintf(path, sizeof(path), "%s/%s", dirs[i], de->d_name);
+            if (read_file(&d, &n, path))
+                continue;
+            if (!tm_reloc_off(d, n, "init_module", &io) &&
+                !tm_reloc_off(d, n, "cleanup_module", &eo)) {
+                *init_off = io;
+                *exit_off = eo;
+                free((void *)d);
+                closedir(dp);
+                return 0;
+            }
+            free((void *)d);
+        }
+        closedir(dp);
+    }
+    return -1;
+}
+
+/* rewrite our work buffer's init/exit reloc offsets to the target's.
+ * 0 ok (shifted or already matching), -1 our blob unparseable. */
+static int shift_tm_relocs(unsigned char *d, long n, unsigned long init_off,
+                           unsigned long exit_off)
+{
+    long shoff;
+    int shnum, ri;
+    long roff, rsz;
+    long e;
+    int found = 0;
+    if (n < 64 || memcmp(d, "\x7f" "ELF", 4) || d[4] != 2 || d[5] != 1)
+        return -1;
+    shoff = (long)rd64le(d + 40);
+    shnum = d[60] | (d[61] << 8);
+    if (shnum <= 0 || shnum > 400 || shoff <= 0 || shoff + (long)shnum * 64 > n)
+        return -1;
+    ri = elf_sec(d, n, ".rela.gnu.linkonce.this_module");
+    if (ri <= 0)
+        return -1;
+    roff = (long)rd64le(d + shoff + (long)ri * 64 + 24);
+    rsz = (long)rd64le(d + shoff + (long)ri * 64 + 32);
+    if (roff <= 0 || roff + rsz > n || rsz % 24)
+        return -1;
+    /* Our DDK builds pin init/exit relocs at upstream offsets
+     * (+0x178/+0x378, verified across the matrix); rewrite to target's.
+     * Anything else found -> leave untouched (fail closed below). */
+    for (e = roff; e + 24 <= roff + rsz; e += 24) {
+        unsigned long r_off = rd64le(d + e);
+        if (r_off == 0x178) {
+            wr64le(d + e, init_off);
+            found++;
+        } else if (r_off == 0x378) {
+            wr64le(d + e, exit_off);
+            found++;
+        }
+    }
+    return found == 2 ? 0 : -1;
+}
 
 /* vermagic in-place patch (placeholder always fits: baked 63-char UTS cap) */
 static int patch_vermagic(unsigned char *d, long n, const char *want)
@@ -283,10 +509,6 @@ static int patch_vermagic(unsigned char *d, long n, const char *want)
     }
     return -1;
 }
-
-/* read whole file; 0 ok with malloc'd *out (caller frees), -1 fail */
-
-/* dispatch slots from a reference .ko file (symbol-matched, 0 ok) */
 
 /* ---- finit_module + Live verify ---- */
 static int do_insmod(const unsigned char *d, long n, const char *args)
@@ -413,9 +635,15 @@ int main(int argc, char **argv)
     const unsigned char *bd;
     long bn;
     unsigned char *work;
-    const char *force_name = NULL;
     struct blob flavors[8];
     int order[8], norder = 0;
+    /* struct-layout discovery (once per run): OEM kernels with a modified
+     * struct module need our init/exit relocs shifted, else init is
+     * silently skipped and the module loads dead. Missing vendor
+     * reference -> upstream offsets (shift is a no-op). */
+    unsigned long layout_init = 0x178, layout_exit = 0x378;
+    int layout_known = 0;
+    const char *force_name = NULL;
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dry-run")) {
@@ -556,6 +784,15 @@ int main(int argc, char **argv)
     }
     jlog("vermagic", vm);
 
+    if (!vendor_tm_offsets(&layout_init, &layout_exit)) {
+        layout_known = 1;
+        snprintf(msg, sizeof(msg), "layout: vendor init=+0x%lx exit=+0x%lx",
+                 layout_init, layout_exit);
+        jlog("layout", msg);
+    } else {
+        jlog("layout", "no vendor reference, upstream offsets");
+    }
+
     for (i = 0; i < norder; i++) {
         int fi = order[i];
         int *tried = &st.tried[fi];
@@ -589,6 +826,13 @@ int main(int argc, char **argv)
             return 1;
         }
         memcpy(work, bd, (size_t)bn);
+        if (layout_known && !shift_tm_relocs(work, bn, layout_init,
+                                             layout_exit)) {
+            snprintf(msg, sizeof(msg),
+                     "layout: init/exit relocs shifted to +0x%lx/+0x%lx",
+                     layout_init, layout_exit);
+            jlog("layout", msg);
+        }
         if (patch_vermagic(work, bn, vm) < 0) {
             jlog("patch", "vermagic patch failed, next flavor");
             free(work);

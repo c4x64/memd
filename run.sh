@@ -131,7 +131,7 @@ esac
 # Priority: full vermagic from any on-device .ko (exact, incl. extras —
 # read via locator+read_cstr since toybox `strings` misses some files).
 TARGET_VM=""
-for d in /vendor/lib/modules /vendor_dlkm/lib/modules /system/lib/modules \
+for d in /boot/bstmods /vendor/lib/modules /vendor_dlkm/lib/modules /system/lib/modules \
          /vendor/lib/modules/*/extra; do
     [ -d "$d" ] || continue
     for k in "$d"/*.ko; do
@@ -264,6 +264,93 @@ read_cstr() {
     [ -n "$_esc" ] || return 1
     printf "$_esc"
 }
+# r16le/r32le FILE OFFSET -> print decimal (od-based, fork-light).
+r16le() {
+    dd if="$1" bs=1 skip="$2" count=2 2>/dev/null | od -A n -t u2 -v 2>/dev/null | tr -d ' '
+}
+r32le() {
+    dd if="$1" bs=1 skip="$2" count=4 2>/dev/null | od -A n -t u4 -v 2>/dev/null | tr -d ' '
+}
+# tm_sec FILE NAME -> print shdr file position, or fail. Validates ELF64LE.
+tm_sec() {
+    _em=$(dd if="$1" bs=1 count=6 2>/dev/null | od -A n -t u1 -v 2>/dev/null | tr -d ' \n')
+    [ "$_em" = "12769767021" ] || return 1
+    _es=$(r64le "$1" 40); _en=$(r16le "$1" 60); _ex=$(r16le "$1" 62)
+    [ "$_en" -gt 0 ] && [ "$_en" -le 400 ] && [ "$_ex" -gt 0 ] && [ "$_ex" -lt "$_en" ] || return 1
+    _so=$(r64le "$1" $((_es + _ex * 64 + 24))); _sz=$(r64le "$1" $((_es + _ex * 64 + 32)))
+    _i=1
+    while [ "$_i" -lt "$_en" ]; do
+        _no=$(r32le "$1" $((_es + _i * 64)))
+        if [ "$(read_cstr "$1" $((_so + _no)) 2>/dev/null)" = "$2" ]; then
+            echo $((_es + _i * 64)); return 0
+        fi
+        _i=$((_i + 1))
+    done
+    return 1
+}
+# tm_scan FILE MODE — this_module init/exit relocs.
+# MODE=ref (vendor .ko): match by SYMBOL NAME, print "INITOFF EXITOFF".
+# MODE=self (our artifact): match by upstream r_offset VALUE (376/888),
+#   print "POS1 POS2" (file positions of those r_offset fields for w64le).
+# Prints nothing + nonzero exit when unparseable.
+tm_scan() {
+    _ri=$(tm_sec "$1" .rela.gnu.linkonce.this_module) || return 1
+    _ro=$(r64le "$1" $((_ri + 24))); _rz=$(r64le "$1" $((_ri + 32)))
+    _li=$(r32le "$1" $((_ri + 40)))
+    _es=$(r64le "$1" 40); _en=$(r16le "$1" 60)
+    _sy=$(r64le "$1" $((_es + _li * 64 + 24)))
+    _si=$(r32le "$1" $((_es + _li * 64 + 40)))
+    _st=$(r64le "$1" $((_es + _si * 64 + 24)))
+    _a=""; _b=""
+    _e=0
+    while [ "$_e" -lt "$_rz" ]; do
+        _p=$((_ro + _e))
+        _r=$(r64le "$1" $_p); _hi=$(r32le "$1" $(($_p + 12)))
+        if [ "$2" = "ref" ]; then
+            _nm=$(read_cstr "$1" $(($_st + $(r32le "$1" $(($_sy + _hi * 24))))) 2>/dev/null)
+            [ "$_nm" = "init_module" ] && _a=$_r
+            [ "$_nm" = "cleanup_module" ] && _b=$_r
+        else
+            [ "$_r" = "376" ] && _a=$_p
+            [ "$_r" = "888" ] && _b=$_p
+        fi
+        _e=$((_e + 24))
+    done
+    [ -n "$_a" ] && [ -n "$_b" ] || return 1
+    echo "$_a $_b"
+}
+# learn_layout — set L_INIT/L_EXIT from the first parseable on-device
+# vendor .ko (symbol-matched, never hardcoded). Empty when none found
+# (caller keeps upstream offsets: GKI/Pixel need no shift).
+learn_layout() {
+    L_INIT=""; L_EXIT=""
+    for d in /boot/bstmods /vendor_dlkm/lib/modules /odm_dlkm/lib/modules \
+             /vendor/lib/modules /system/lib/modules; do
+        [ -d "$d" ] || continue
+        for k in "$d"/*.ko; do
+            [ -f "$k" ] || continue
+            cp -f "$k" /data/local/tmp/rwref.ko 2>/dev/null || continue
+            _lr=$(tm_scan /data/local/tmp/rwref.ko ref 2>/dev/null)
+            rm -f /data/local/tmp/rwref.ko 2>/dev/null
+            if [ -n "$_lr" ]; then
+                L_INIT=${_lr%% *}; L_EXIT=${_lr##* }
+                log "layout: vendor reference init=+0x$(printf %x "$L_INIT") exit=+0x$(printf %x "$L_EXIT")"
+                return 0
+            fi
+        done
+    done
+    log "layout: no vendor reference, upstream offsets"
+    return 1
+}
+# shift_layout KO — rewrite our artifact's init/exit reloc r_offsets
+# (upstream +0x178/+0x378) to the learned target. No-op when unparseable.
+shift_layout() {
+    [ -n "$L_INIT" ] || return 0
+    _sp=$(tm_scan "$1" self 2>/dev/null) || return 0
+    w64le "$1" ${_sp%% *} "$L_INIT" || return 1
+    w64le "$1" ${_sp##* } "$L_EXIT" || return 1
+    log "layout: init/exit relocs shifted to +0x$(printf %x "$L_INIT")/+0x$(printf %x "$L_EXIT")"
+}
 patch_vermagic() {
     _ko="$1"; _want="$2"
     if command -v python3 >/dev/null 2>&1; then
@@ -328,6 +415,13 @@ PYEOF
 patch_vermagic "$TMPKO" "$TARGET_VM" || die "vermagic patch failed"
 log "vermagic patched"
 
+# 4b. Struct-layout shift: OEM kernels with a modified struct module need
+# our init/exit relocs shifted (else init is silently skipped and the
+# module loads dead). Learned once from on-device vendor .ko files
+# (symbol-matched, never hardcoded); no reference -> no-op.
+learn_layout
+shift_layout "$TMPKO" || log "layout: shift skipped (unparseable artifact)"
+
 # 5. Module args: none. The driver takes no insmod parameters
 # (all state is runtime-derived or socket-passed).
 INSMOD_OPTS=""
@@ -342,7 +436,6 @@ try_insmod() {
     # sync first: if insmod panics the device, everything echoed so far
     # must already be on disk for post-reboot forensics (panic = no sync).
     sync 2>/dev/null
-    # Dispatch-slot surgery (6.x, CFI-off only; no-op otherwise).
     # shellcheck disable=SC2086
     eval insmod '"$TMPKO"' $INSMOD_OPTS 2>/dev/null
     return $?
@@ -365,6 +458,7 @@ if ! try_insmod; then
         cp -f "$KO" "$TMPKO" || die "cannot re-stage temp copy"
         chmod 600 "$TMPKO"
         patch_vermagic "$TMPKO" "$WANT" || die "vermagic re-patch failed"
+        shift_layout "$TMPKO" || log "layout: shift skipped on retry"
         if ! try_insmod; then
             dump_log "insmod-retry"
             die "insmod failed twice (see dmesg + $LASTLOG)"
