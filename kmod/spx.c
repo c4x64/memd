@@ -865,6 +865,8 @@ int main(int argc, char **argv)
             bn = flavors[fi].n;
             if (work) {
                 memcpy(work, flavors[fi].d, (size_t)bn);
+                if (layout_known)
+                    shift_tm_relocs(work, bn, layout_init, layout_exit);
                 if (!patch_vermagic(work, bn, vm)) {
                     jlog("insmod", "retrying same flavor (state kept)");
                     rc = do_insmod(work, bn, "");
