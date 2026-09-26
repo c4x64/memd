@@ -4,8 +4,10 @@ One packed deliverable (`rwbridge-spx`) carrying **8 per-generation
 artifacts**; the loader matches `uname -r` numerically and installs the
 right one. Driver core derived from fuqiuluo/android-wuwa (socket
 transport, page-table walk, phys R/W, kallsyms resolution, CFI-disable);
-inline hooks are never used, hide paths are compiled out, procfs/dmabuf
-transports are excluded. Process-hide is a tracked TODO, not present.
+inline hooks are permitted ONLY for the kernel display facility and
+process hiding (owner override, see below); procfs/dmabuf transports are
+excluded. Process hiding is implemented (getdents64 filter, best-effort,
+loud status).
 
 - **8 builds, 1 deliverable.** DDK matrix
   (`android12-5.10`, `android13-5.10`, `android13-5.15`,
@@ -101,11 +103,16 @@ packs all 8 + `run.sh` into `blobs.c` and links `rwbridge-spx`
 
 ## Inline hooks (allowed by explicit owner override)
 Passive R/W remains the default surface. Inline hooks are permitted ONLY
-for the kernel display facility (overlay-plane programming + vsync):
+for the kernel display facility (overlay-plane programming + vsync) and
+process hiding (getdents64 pointer-swap filter):
 - RKP/hypervisor text-protection risk is accepted by the owner; hook
   install must fail closed per-site (verify-before-patch, original-bytes
-  check, no partial hooks) and never wedge boot.
-- No hook may alter game behavior, hide state, or touch dispatch paths.
+  check, no partial hooks) and never wedge boot. The hide filter swaps a
+  WRITABLE table pointer (no kernel-text writes, ever); display hooks
+  follow the same rule where possible.
+- No hook may alter game behavior or touch dispatch paths. Hiding covers
+  OUR pids only (explicit ioctl set, never compiled in); target tasks are
+  never touched (the old PF_INVISIBLE flag stub is removed).
 - Each hook site is per-SoC backend code with its own NO-GO (unknown
   controller -> site disabled, never guessed).
 
@@ -113,9 +120,13 @@ for the kernel display facility (overlay-plane programming + vsync):
 
 `CONFIG_MODULES=n`, module-sig enforcement, kernels not exporting the
 checked import surface, kprobe-blocked kernels (symbol resolution fails
-closed at init), unparseable `uname -r`. A new NO-GO must be explicit,
-never silent. 16K/64K pages are SUPPORTED (explicit geometry in the
-address path); CFI-enforcing kernels are SUPPORTED (runtime bypass).
+closed at init), unparseable `uname -r`. Hiding adds its own: table scan
+ambiguous/unfound, CFI-enforcing kernels (install refused by policy —
+userspace gates first), >131072-byte reads (passthrough unfiltered),
+32-bit processes when no second (compat) table is found. A new NO-GO
+must be explicit, never silent. 16K/64K pages are SUPPORTED (explicit
+geometry in the address path); CFI-enforcing kernels are SUPPORTED
+(runtime bypass).
 
 ## Deviations from the previous generation (owner-ordered)
 
@@ -131,12 +142,11 @@ only); `hijack_arm64.c` stays linked SOLELY for `hook_write_range`
 
 ## TO DO
 
-- Process hide: wire `do_hide_process` (task `PF_INVISIBLE` flag infra
-  already in tree: `wuwa_proc.c`, ioctl cmd 14) behind an explicit
-  product op with allowlist semantics. NOT active: no call sites ship.
 - Re-verify the loader-contract map per release (the old 6.1 map
   described the previous driver; same method, new numbers).
 - 16K-page live proof (geometry path exercised on-device, not just CI).
+- Hide status surfacing in the overlay client (opcodes 21/22 in the
+  product client header; warn user when hiding is unavailable).
 
 ## Diagnosis
 
