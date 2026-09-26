@@ -99,6 +99,16 @@ generation's System.map, no CRCs, BTI pads, placeholder present), then
 packs all 8 + `run.sh` into `blobs.c` and links `rwbridge-spx`
 (static-PIE). Local installs are for TESTING a staged build only.
 
+## Inline hooks (allowed by explicit owner override)
+Passive R/W remains the default surface. Inline hooks are permitted ONLY
+for the kernel display facility (overlay-plane programming + vsync):
+- RKP/hypervisor text-protection risk is accepted by the owner; hook
+  install must fail closed per-site (verify-before-patch, original-bytes
+  check, no partial hooks) and never wedge boot.
+- No hook may alter game behavior, hide state, or touch dispatch paths.
+- Each hook site is per-SoC backend code with its own NO-GO (unknown
+  controller -> site disabled, never guessed).
+
 ## Explicit NO-GO list
 
 `CONFIG_MODULES=n`, module-sig enforcement, kernels not exporting the
