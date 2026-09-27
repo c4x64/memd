@@ -134,13 +134,18 @@ int wuwa_hide_install(void)
     /* Resolve the ops from a live open: no symbols, no scans, no tables,
      * no KASLR dependence. */
     f = filp_open("/proc", O_RDONLY | O_DIRECTORY, 0);
-    if (IS_ERR(f))
+    if (IS_ERR(f)) {
+        wuwa_err("hide install: filp_open /proc failed: %ld\n", PTR_ERR(f));
         return PTR_ERR(f) < 0 ? (int)PTR_ERR(f) : -ENOENT;
+    }
     ops = f->f_op;
     filp_close(f, NULL);
-    if (!ops || !ops->iterate_shared)
+    if (!ops || !ops->iterate_shared) {
+        wuwa_err("hide install: no f_op/iterate (ops=%px)\n", ops);
         return -ENOSYS;
+    }
     orig = ops->iterate_shared;
+    wuwa_err("hide install: f_op=%px iterate=%px\n", ops, orig);
 
     spin_lock_irqsave(&syshook_lock, flags);
     if (hook_active) {
@@ -150,18 +155,24 @@ int wuwa_hide_install(void)
     hooked_ops = ops;
     orig_iterate = orig;
     /* RO-safe write (guarded, verified, restored on exit/uninstall). */
-    if (wuwa_table_write64((unsigned long)&ops->iterate_shared,
-                           (unsigned long)wuwa_iterate_shared)) {
-        hooked_ops = NULL;
-        orig_iterate = NULL;
-        spin_unlock_irqrestore(&syshook_lock, flags);
-        return -EIO;
+    {
+        int wr;
+        wr = wuwa_table_write64((unsigned long)&ops->iterate_shared,
+                                (unsigned long)wuwa_iterate_shared);
+        if (wr) {
+            wuwa_err("hide install: table write failed: %d\n", wr);
+            hooked_ops = NULL;
+            orig_iterate = NULL;
+            spin_unlock_irqrestore(&syshook_lock, flags);
+            return -EIO;
+        }
     }
     {
         iterate_shared_fn back = NULL;
         if (wuwa_safe_read64(&ops->iterate_shared,
                              (unsigned long *)&back) ||
             back != wuwa_iterate_shared) {
+            wuwa_err("hide install: readback mismatch\n");
             wuwa_table_write64((unsigned long)&ops->iterate_shared,
                                (unsigned long)orig);
             hooked_ops = NULL;
