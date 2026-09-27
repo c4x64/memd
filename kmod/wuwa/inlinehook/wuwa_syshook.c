@@ -7,7 +7,17 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
-#include <linux/linkage.h>
+#include <linux/version.h>
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+typedef bool hide_filldir_ret_t;
+#define HIDE_FILLDIR_OK false
+#define HIDE_FILLDIR_FULL true
+#else
+typedef int hide_filldir_ret_t;
+#define HIDE_FILLDIR_OK 0
+#define HIDE_FILLDIR_FULL 1
+#endif
 #include <linux/module.h>
 #include <linux/spinlock.h>
 #include <linux/uidgid.h>
@@ -57,19 +67,20 @@ static bool name_is_hidden_pid(const char *name, int namlen)
     return wuwa_hide_contains((pid_t)v);
 }
 
-static int hide_filldir(struct dir_context *ctx, const char *name,
-                        int namlen, loff_t offset, u64 ino,
-                        unsigned int d_type)
+static hide_filldir_ret_t hide_filldir(struct dir_context *ctx,
+                                         const char *name, int namlen,
+                                         loff_t offset, u64 ino,
+                                         unsigned int d_type)
 {
     struct hide_ctx *hc = container_of(ctx, struct hide_ctx, base);
     filldir_t orig_actor;
-    int ret;
+    hide_filldir_ret_t ret;
 
     (void)offset;
     (void)ino;
     (void)d_type;
     if (name_is_hidden_pid(name, namlen))
-        return 0; /* skip: not emitted, iteration continues */
+        return HIDE_FILLDIR_OK; /* skip: not emitted, iteration continues */
     orig_actor = hc->orig->actor;
     ret = orig_actor(hc->orig, name, namlen, offset, ino, d_type);
     return ret;
