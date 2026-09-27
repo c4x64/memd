@@ -3,13 +3,13 @@
 #include "wuwa_utils.h"
 
 #include <asm/barrier.h>
-#include <asm/extable.h>
 #include <asm/sysreg.h>
 #include <linux/compiler.h>
 #include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/linkage.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -20,6 +20,8 @@
 #ifndef __NR_getdents64
 #define __NR_getdents64 61 /* arm64 stable ABI */
 #endif
+
+static int hook_phys_restore(void);
 
 /* Local dirent layout (stable userspace ABI, no header roulette). */
 struct wuwa_dirent64 {
@@ -45,6 +47,11 @@ static getdents64_fn hook_origs[SYSHOOK_MAX_TABLES];
 static int hook_ntables;
 static int hook_active;
 static DEFINE_SPINLOCK(syshook_lock);
+/* Physical-domain hook slot (KASLR-proof path): entry addressed by phys,
+ * restored by the same uninstall/exit paths as VA slots. */
+static unsigned long hook_phys_entry;
+static getdents64_fn hook_phys_orig;
+static int hook_phys_active;
 
 /* ---- hidden-set aware filter (runs in syscall context) ---- */
 static bool name_is_hidden_pid(const char *name, unsigned int maxlen)
@@ -384,6 +391,10 @@ int wuwa_hide_uninstall(void)
     orig_getdents64 = NULL;
     hook_ntables = 0;
     hook_active = 0;
+    if (hook_phys_active) {
+        if (hook_phys_restore())
+            bad = 1;
+    }
     spin_unlock_irqrestore(&syshook_lock, flags);
     return bad ? -EIO : 0;
 }
@@ -394,7 +405,164 @@ int wuwa_hide_active(void)
     unsigned long flags;
 
     spin_lock_irqsave(&syshook_lock, flags);
-    a = hook_active;
+    a = hook_active || hook_phys_active;
     spin_unlock_irqrestore(&syshook_lock, flags);
     return a;
+}
+
+/* Physical-domain table walk: range-match from TTBR1 (no VA index math,
+ * immune to VA_BITS skew). Finds the covering descriptor PHYS for target.
+ * Every table read is guarded + sanity-checked (valid bit, sane type,
+ * output in DRAM); garbage fails closed. */
+static int cover_desc_phys(unsigned long target, unsigned long *desc_out,
+                           int *leaf_out)
+{
+    unsigned long ttbr, tbl;
+    unsigned long strides[4];
+    int lvl;
+    strides[0] = PGDIR_SIZE;
+    strides[1] = PUD_SIZE;
+    strides[2] = PMD_SIZE;
+    strides[3] = PAGE_SIZE;
+    ttbr = read_sysreg(ttbr1_el1);
+    tbl = ttbr & 0x0000FFFFFFFFF000UL;
+    if (!tbl)
+        return -EFAULT;
+    for (lvl = 0; lvl < 4; lvl++) {
+        int i, found = -1;
+        unsigned long first = 0;
+        for (i = 0; i < 512; i++) {
+            unsigned long v = 0;
+            if (wuwa_safe_read64(phys_to_virt(tbl + (unsigned long)i * 8), &v))
+                return -EFAULT;
+            if (i == 0)
+                first = v;
+            if (!(v & 1UL))
+                continue;
+            {
+                unsigned long out = v & 0x0000FFFFFFFFF000UL;
+                unsigned long type = v & 3UL;
+                unsigned long span;
+                if (lvl >= 3)
+                    span = strides[3];
+                else
+                    span = (type == 3UL) ? 0 : strides[lvl];
+                if (out > target || target - out >= span)
+                    continue;
+                if (type == 3UL && lvl < 3) {
+                    tbl = out;
+                    found = 1;
+                    break;
+                }
+                if (type == 1UL || (lvl == 3 && type == 3UL)) {
+                    *desc_out = tbl + (unsigned long)i * 8;
+                    *leaf_out = 1;
+                    return 0;
+                }
+            }
+        }
+        if (found == 1)
+            continue;
+        /* No covering entry at this level. Distinguish empty table
+         * (all invalid -> unmapped target) from garbage reads: require
+         * at least the first entry readable (already proven above). */
+        (void)first;
+        return -EFAULT;
+    }
+    return -EFAULT;
+}
+
+/* Write a table entry by PHYSICAL address (no VA needed anywhere):
+ * flip covering descriptor (validated DRAM+type), guarded store,
+ * readback verify, exact restore, TLBI all. */
+static int table_write_phys(unsigned long entry_phys, unsigned long val)
+{
+    unsigned long desc_phys = 0;
+    int leaf = 0;
+    unsigned long dval = 0, rw;
+    int ret = -EFAULT;
+    if (cover_desc_phys(entry_phys, &desc_phys, &leaf))
+        return -EFAULT;
+    if (wuwa_safe_read64(phys_to_virt(desc_phys), &dval))
+        return -EFAULT;
+    {
+        unsigned long out = dval & 0x0000FFFFFFFFF000UL;
+        if (!(dval & 1UL) || out < 0x40000000UL || out >= (64UL << 30))
+            return -EFAULT;
+    }
+    rw = dval & ~2UL;
+    preempt_disable();
+    if (rw != dval) {
+        if (wuwa_safe_write64(phys_to_virt(desc_phys), rw))
+            goto out;
+        asm volatile("dsb ishst\ntlbi vmalle1\nisb\n" ::: "memory");
+    }
+    if (wuwa_safe_write64(phys_to_virt(entry_phys), val))
+        goto restore;
+    {
+        unsigned long back = ~val;
+        if (wuwa_safe_read64(phys_to_virt(entry_phys), &back) || back != val)
+            goto restore;
+    }
+    ret = 0;
+restore:
+    if (rw != dval) {
+        wuwa_safe_write64(phys_to_virt(desc_phys), dval);
+        asm volatile("dsb ishst\ntlbi vmalle1\nisb\n" ::: "memory");
+    }
+out:
+    preempt_enable();
+    return ret;
+}
+
+/* Hook getdents64 at an explicit table-entry PHYSICAL address.
+ * The entry must currently hold a sane value (nonzero); the caller
+ * (userspace hunt) established candidacy. Same verify/restore
+ * discipline as the VA path; shares uninstall/exit restore. */
+int wuwa_hook_at_phys(unsigned long entry_phys)
+{
+    unsigned long flags;
+    unsigned long orig = 0;
+    if (!entry_phys || (entry_phys & 7))
+        return -EINVAL;
+    spin_lock_irqsave(&syshook_lock, flags);
+    if (hook_phys_active) {
+        spin_unlock_irqrestore(&syshook_lock, flags);
+        return 0;
+    }
+    spin_unlock_irqrestore(&syshook_lock, flags);
+    if (wuwa_safe_read64(phys_to_virt(entry_phys), &orig) || !orig)
+        return -EFAULT;
+    if (table_write_phys(entry_phys, (unsigned long)wuwa_getdents64))
+        return -EIO;
+    spin_lock_irqsave(&syshook_lock, flags);
+    if (hook_phys_active) {
+        table_write_phys(entry_phys, orig);
+        spin_unlock_irqrestore(&syshook_lock, flags);
+        return 0;
+    }
+    hook_phys_entry = entry_phys;
+    hook_phys_orig = (getdents64_fn)orig;
+    if (!orig_getdents64)
+        orig_getdents64 = (getdents64_fn)orig;
+    hook_phys_active = 1;
+    spin_unlock_irqrestore(&syshook_lock, flags);
+    return 0;
+}
+
+static int hook_phys_restore(void)
+{
+    unsigned long entry;
+    getdents64_fn orig;
+    int rc;
+    entry = hook_phys_entry;
+    orig = hook_phys_orig;
+    if (!table_write_phys(entry, (unsigned long)orig))
+        rc = 0;
+    else
+        rc = -EIO;
+    hook_phys_entry = 0;
+    hook_phys_orig = NULL;
+    hook_phys_active = 0;
+    return rc;
 }

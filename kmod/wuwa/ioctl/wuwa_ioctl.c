@@ -651,6 +651,23 @@ int do_page_perms(struct socket* sock, void* arg) {
     return ret;
 }
 
+int do_hook_at(struct socket* sock, void* arg) {
+    struct wuwa_hook_at_cmd cmd;
+    (void)sock;
+    if (!capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+        return -EFAULT;
+    }
+    /* Physical-domain hook: userspace established candidacy by content
+     * hunt (KASLR-proof phys); the write path verifies + restores. */
+    cmd.result = wuwa_hook_at_phys(cmd.entry_phys);
+    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+        return -EFAULT;
+    }
+    return 0;
+}
+
 int do_give_root(struct socket* sock, void* arg) {
     struct wuwa_give_root_cmd cmd;
     if (copy_from_user(&cmd, arg, sizeof(cmd))) {
