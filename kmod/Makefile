@@ -9,8 +9,9 @@
 # loudly (no degraded operation).
 #
 # Product surface: socket (PF_DECnet) + ioctl transports. Inline hooks are
-# NEVER used (hook/ not built); hide paths are compiled out (flags below).
-# Process-hide is a tracked TODO (see README), not present in this tree.
+# permitted ONLY for the kernel display facility (display/) and process
+# hiding (VFS iterate_shared swap in wuwa_syshook.c) under explicit owner
+# override: fail-closed per-site, verify-before-patch, restore-on-exit.
 #
 # KDIR points at the prepared tree for ONE target (CI sets it per matrix
 # job: KMI=android13-5.15 etc.). KMI names the output for packing.
@@ -29,6 +30,8 @@ rwbridge-y := \
     wuwa/mm/wuwa_bindproc.o \
     wuwa/proc/wuwa_proc.o \
     wuwa/proc/wuwa_hide.o \
+    wuwa/display/wuwa_raster.o \
+    wuwa/display/soc_exynos.o \
     wuwa/inlinehook/hijack_arm64.o \
     wuwa/inlinehook/wuwa_syshook.o
 
@@ -39,7 +42,7 @@ rwbridge-y := \
 
 ccflags-y += -I$(src)/wuwa/core -I$(src)/wuwa/net -I$(src)/wuwa/ioctl
 ccflags-y += -I$(src)/wuwa/mm -I$(src)/wuwa/inlinehook -I$(src)/wuwa/proc
-ccflags-y += -I$(src)/wuwa/utils
+ccflags-y += -I$(src)/wuwa/utils -I$(src)/wuwa/display
 
 # Behavior flags (locked, not per-target): CFI-disable ON (needed on
 # enforcing kernels — was the plain loader's wall); every hide path OFF;

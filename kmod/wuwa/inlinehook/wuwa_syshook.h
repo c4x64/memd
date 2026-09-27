@@ -1,18 +1,17 @@
 #ifndef WUWA_SYSHOOK_H
 #define WUWA_SYSHOOK_H
 
-/* getdents64 pointer-swap hiding (no kernel-text writes, ever).
+/* VFS iterate_shared hook hiding (no kernel-text writes, ever).
  *
  * Install is explicit via ioctl (userspace gates on CFI status first:
- * on enforcing kernels an indirect call through the table would trap,
- * so install is refused there by policy, not attempted). Resolution is
- * fully runtime: the sys_call_table is located by scanning for its
- * pointer-run signature + prologue validation, no kallsyms, no per-build
- * data. Anything unresolved -> explicit NO-GO, feature stays inactive,
- * the module still serves R/W (hiding is never load-bearing).
+ * on enforcing kernels install is refused by policy, not attempted).
+ * The hook swaps iterate_shared on the live /proc file_operations
+ * reached via filp_open; filldir skips hidden pids. Anything
+ * unresolved -> explicit NO-GO, feature stays inactive, the module
+ * still serves R/W (hiding is never load-bearing).
  *
- * rmmod always restores the original entry first (dangling table entry
- * after unload would panic the next getdents64).
+ * rmmod always restores the original entry first (dangling pointer
+ * after unload would panic the next /proc readdir).
  */
 int wuwa_hide_install(void);
 int wuwa_hide_uninstall(void);

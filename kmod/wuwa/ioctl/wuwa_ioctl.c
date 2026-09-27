@@ -5,6 +5,7 @@
 
 #include "wuwa_hide.h"
 #include "wuwa_syshook.h"
+#include "wuwa_display.h"
 
 #include "wuwa_page_walk.h"
 #include "wuwa_sock.h"
@@ -651,6 +652,70 @@ int do_page_perms(struct socket* sock, void* arg) {
     return ret;
 }
 
+
+int do_disp_status(struct socket* sock, void* arg) {
+    struct wuwa_disp_status_cmd cmd;
+    (void)sock;
+    if (!capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (wuwa_disp_status(&cmd))
+        return -EINVAL;
+    if (copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+
+int do_disp_install(struct socket* sock, void* arg) {
+    struct wuwa_disp_install_cmd cmd;
+    int ret;
+    (void)sock;
+    if (!capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    /* Userspace gates on CFI status BEFORE calling (same policy as the
+     * hide hook: enforcing kernels are refused, never attempted). */
+    ret = wuwa_disp_install(cmd.backend, cmd.width, cmd.height);
+    cmd.rc = ret ? (unsigned int)(-ret) : 0;
+    if (copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+
+int do_disp_frame(struct socket* sock, void* arg) {
+    struct wuwa_disp_frame_cmd cmd;
+    struct wuwa_disp_op *kops = NULL;
+    unsigned int count;
+    int ret;
+    (void)sock;
+    if (!capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    count = cmd.count;
+    if (count > WUWA_DISP_MAX_OPS)
+        count = WUWA_DISP_MAX_OPS;
+    if (count == 0) {
+        cmd.rc = 0;
+        if (copy_to_user(arg, &cmd, sizeof(cmd)))
+            return -EFAULT;
+        return 0;
+    }
+    kops = kmalloc((size_t)count * sizeof(*kops), GFP_KERNEL);
+    if (!kops)
+        return -ENOMEM;
+    if (copy_from_user(kops, (void __user *)(uintptr_t)cmd.ops,
+                       (size_t)count * sizeof(*kops))) {
+        kfree(kops);
+        return -EFAULT;
+    }
+    ret = wuwa_disp_frame(kops, count);
+    kfree(kops);
+    cmd.rc = ret ? (unsigned int)(-ret) : 0;
+    if (copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
 
 int do_give_root(struct socket* sock, void* arg) {
     struct wuwa_give_root_cmd cmd;

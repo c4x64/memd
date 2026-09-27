@@ -242,6 +242,13 @@ struct wuwa_hide_install_cmd {
     int result; /* Output: 0 ok, negative errno on failure */
 };
 #define WUWA_IOCTL_HIDE_INSTALL _IOWR('W', 22, struct wuwa_hide_install_cmd)
+/* Display facility (numeric draw ops; per-SoC backend, fail-closed).
+ * Structs live in display/wuwa_display.h (single definition); opcodes:
+ * 26 = status, 27 = install/uninstall, 28 = submit frame ops. */
+#include "wuwa_display.h"
+#define WUWA_IOCTL_DISP_STATUS _IOWR('W', 26, struct wuwa_disp_status_cmd)
+#define WUWA_IOCTL_DISP_INSTALL _IOWR('W', 27, struct wuwa_disp_install_cmd)
+#define WUWA_IOCTL_DISP_FRAME _IOWR('W', 28, struct wuwa_disp_frame_cmd)
 
 int do_vaddr_translate(struct socket* sock, void __user* arg);
 int do_debug_info(struct socket* sock, void __user* arg);
@@ -267,6 +274,9 @@ int do_get_process_info(struct socket* sock, void __user* arg);
 int do_hide_status(struct socket* sock, void __user* arg);
 int do_hide_install(struct socket* sock, void __user* arg);
 int do_page_perms(struct socket* sock, void __user* arg);
+int do_disp_status(struct socket* sock, void __user* arg);
+int do_disp_install(struct socket* sock, void __user* arg);
+int do_disp_frame(struct socket* sock, void __user* arg);
 
 typedef int (*ioctl_handler_t)(struct socket* sock, void __user* arg);
 
@@ -299,6 +309,9 @@ static const struct ioctl_cmd_map {
     {.cmd = WUWA_IOCTL_HIDE_STATUS, .handler = do_hide_status},
     {.cmd = WUWA_IOCTL_HIDE_INSTALL, .handler = do_hide_install},
     {.cmd = WUWA_IOCTL_PAGE_PERMS, .handler = do_page_perms},
+    {.cmd = WUWA_IOCTL_DISP_STATUS, .handler = do_disp_status},
+    {.cmd = WUWA_IOCTL_DISP_INSTALL, .handler = do_disp_install},
+    {.cmd = WUWA_IOCTL_DISP_FRAME, .handler = do_disp_frame},
     {.cmd = 0, .handler = NULL} /* Sentinel to mark end of array */
 };
 

@@ -14,6 +14,7 @@
 #include "wuwa_protocol.h"
 #include "wuwa_sock.h"
 #include "wuwa_syshook.h"
+#include "wuwa_display.h"
 #include "wuwa_utils.h"
 #include "wuwa_region.h"
 #include "hijack_arm64.h"
@@ -86,12 +87,16 @@ out:
 static void __exit wuwa_exit(void) {
     int r;
     wuwa_info("bye!\n");
-    /* Restore the syscall table FIRST: a dangling getdents64 pointer
-     * after unload would panic the next reader. In-flight filter calls
-     * hold module refs, so rmmod already waited for them. */
+    /* Restore hooks FIRST: a dangling /proc iterate pointer or a
+     * programmed overlay plane after unload would panic/wedge the next
+     * reader. In-flight hook calls hold module refs, so rmmod already
+     * waited for them. */
     r = wuwa_hide_uninstall();
     if (r)
         wuwa_err("hide uninstall at exit failed: %d\n", r);
+    r = wuwa_disp_uninstall();
+    if (r && r != -ENODEV)
+        wuwa_err("display uninstall at exit failed: %d\n", r);
     wuwa_region_cleanup();
     wuwa_proto_cleanup();
 #if defined(BUILD_HIDE_SIGNAL)
