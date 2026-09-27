@@ -31,9 +31,6 @@
  */
 
 typedef int (*iterate_shared_fn)(struct file *filp, struct dir_context *ctx);
-typedef bool (*filldir_fn)(struct dir_context *ctx, const char *name,
-                           int namlen, loff_t offset, u64 ino,
-                           unsigned int d_type);
 
 struct hide_ctx {
     struct dir_context base;
@@ -60,20 +57,20 @@ static bool name_is_hidden_pid(const char *name, int namlen)
     return wuwa_hide_contains((pid_t)v);
 }
 
-static bool hide_filldir(struct dir_context *ctx, const char *name,
-                         int namlen, loff_t offset, u64 ino,
-                         unsigned int d_type)
+static int hide_filldir(struct dir_context *ctx, const char *name,
+                        int namlen, loff_t offset, u64 ino,
+                        unsigned int d_type)
 {
     struct hide_ctx *hc = container_of(ctx, struct hide_ctx, base);
-    filldir_fn orig_actor;
-    bool ret;
+    filldir_t orig_actor;
+    int ret;
 
     (void)offset;
     (void)ino;
     (void)d_type;
     if (name_is_hidden_pid(name, namlen))
-        return false; /* skip: not emitted, iteration continues */
-    orig_actor = (filldir_fn)hc->orig->actor;
+        return 0; /* skip: not emitted, iteration continues */
+    orig_actor = hc->orig->actor;
     ret = orig_actor(hc->orig, name, namlen, offset, ino, d_type);
     return ret;
 }
