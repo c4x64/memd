@@ -643,6 +643,8 @@ int do_page_perms(struct socket* sock, void* arg) {
      * content reads anywhere on this path). */
     ret = wuwa_page_perms(cmd.va, &cmd.phy_addr, &cmd.present,
                           &cmd.leaf_level, &cmd.ap, &cmd.xn);
+    cmd.idx0 = pgd_index(cmd.va);
+    cmd.idx1 = pud_index(cmd.va);
     if (copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
