@@ -6,8 +6,9 @@ right one. Driver core derived from fuqiuluo/android-wuwa (socket
 transport, page-table walk, phys R/W, kallsyms resolution, CFI-disable);
 inline hooks are permitted ONLY for the kernel display facility and
 process hiding (owner override, see below); procfs/dmabuf transports are
-excluded. Process hiding is implemented (getdents64 filter, best-effort,
-loud status).
+excluded. Process hiding is implemented (VFS `iterate_shared` hook on
+`/proc`, best-effort, loud status) and proven live on Samsung 5.15
+(shell-blind, root-sees, clean uninstall + rmmod).
 
 - **8 builds, 1 deliverable.** DDK matrix
   (`android12-5.10`, `android13-5.10`, `android13-5.15`,
@@ -112,12 +113,18 @@ packs all 8 + `run.sh` into `blobs.c` and links `rwbridge-spx`
 ## Inline hooks (allowed by explicit owner override)
 Passive R/W remains the default surface. Inline hooks are permitted ONLY
 for the kernel display facility (overlay-plane programming + vsync) and
-process hiding (getdents64 pointer-swap filter):
+process hiding (VFS `iterate_shared` swap on the live `/proc` file):
 - RKP/hypervisor text-protection risk is accepted by the owner; hook
   install must fail closed per-site (verify-before-patch, original-bytes
-  check, no partial hooks) and never wedge boot. The hide filter swaps a
-  WRITABLE table pointer (no kernel-text writes, ever); display hooks
-  follow the same rule where possible.
+  check, no partial hooks) and never wedge boot. The hide hook swaps a
+  function pointer in a live `file_operations` reached via `filp_open`
+  (no kernel-text writes, ever); display hooks follow the same rule
+  where possible. Hard-won rules, all proven on-device: kernel text may
+  be execute-only (XOM) so table identification is metadata-only; PTE
+  AP flips use Break-Before-Make (invalidate/TLBI/make/TLBI) or stale RO
+  TLBs survive; the RO bit is AP[1]=bit 7 (table/block/page alike);
+  `tlbi vaae1` takes the full VA (HW uses bits[55:12]); every diagnostic
+  `return` sits inside its braces.
 - No hook may alter game behavior or touch dispatch paths. Hiding covers
   OUR pids only (explicit ioctl set, never compiled in); target tasks are
   never touched (the old PF_INVISIBLE flag stub is removed).
@@ -134,7 +141,9 @@ userspace gates first), >131072-byte reads (passthrough unfiltered),
 32-bit processes when no second (compat) table is found. A new NO-GO
 must be explicit, never silent. 16K/64K pages are SUPPORTED (explicit
 geometry in the address path); CFI-enforcing kernels are SUPPORTED
-(runtime bypass).
+(runtime bypass). Hiding adds its own: `/proc` non-VFS or missing
+`iterate_shared`, CFI-enforcing kernels (install refused by policy —
+userspace gates first).
 
 ## Deviations from the previous generation (owner-ordered)
 
