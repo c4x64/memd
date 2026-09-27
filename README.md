@@ -131,19 +131,29 @@ process hiding (VFS `iterate_shared` swap on the live `/proc` file):
 - Each hook site is per-SoC backend code with its own NO-GO (unknown
   controller -> site disabled, never guessed).
 
+## Display facility (`display/`, opcodes 26/27/28)
+
+CPU raster (ARGB8888 clear/rect/line/8x8-glyph, numeric ops only) over a
+per-SoC overlay-plane backend. The Exynos DECON backend is probe-only
+until a window map is verified on real hardware: DTB match + register
+readback + coherent framebuffer alloc run, plane programming FAILS CLOSED
+(-ENODEV, empty winmap table) so a guessed offset can never wedge a
+display. Enabling a SoC = verify its window map on hardware, add the
+compatible to the table, nothing else. Frames program on submit (a
+per-SoC vsync source is a tracked TODO, never guessed).
+
 ## Explicit NO-GO list
 
 `CONFIG_MODULES=n`, module-sig enforcement, kernels not exporting the
 checked import surface, kprobe-blocked kernels (symbol resolution fails
-closed at init), unparseable `uname -r`. Hiding adds its own: table scan
-ambiguous/unfound, CFI-enforcing kernels (install refused by policy —
-userspace gates first), >131072-byte reads (passthrough unfiltered),
-32-bit processes when no second (compat) table is found. A new NO-GO
+closed at init), unparseable `uname -r`. A new NO-GO
 must be explicit, never silent. 16K/64K pages are SUPPORTED (explicit
 geometry in the address path); CFI-enforcing kernels are SUPPORTED
 (runtime bypass). Hiding adds its own: `/proc` non-VFS or missing
 `iterate_shared`, CFI-enforcing kernels (install refused by policy —
-userspace gates first).
+userspace gates first). Display adds its own: no DTB DECON node, failed
+register readback, no verified window map for the compatible (all refuse
+with -ENODEV; proven on dummy-virt: active=0 errno=19).
 
 ## Deviations from the previous generation (owner-ordered)
 
