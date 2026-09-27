@@ -619,8 +619,6 @@ static uintptr_t kaddr_to_phy_addr(uintptr_t va)
     if (wuwa_safe_read64(phys_to_virt(base + (unsigned long)pgd_index(va) * 8), &v))
         return 0;
     pgd = __pgd(v);
-    if (desc_out)
-        desc_out[0] = v;
     if (pgd_none(pgd) || pgd_bad(pgd))
         return 0;
     p4dp = p4d_offset(&pgd, va);
