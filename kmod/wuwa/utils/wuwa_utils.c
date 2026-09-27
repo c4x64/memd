@@ -501,17 +501,23 @@ int wuwa_table_write64(unsigned long entry_va, unsigned long val)
     need_flip = (rw_desc != orig_desc);
     preempt_disable();
     if (need_flip) {
-        if (wuwa_safe_write64((void *)desc_va, rw_desc))
+        if (wuwa_safe_write64((void *)desc_va, rw_desc)) {
+            wuwa_err("table_write64: flip store fail va=%lx\n", entry_va);
             goto out_preempt;
+        }
         /* Push the PTE store before invalidating: TLB must not win. */
         asm volatile("dsb ishst\ntlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va >> 12) : "memory");
     }
-    if (wuwa_safe_write64((void *)entry_va, val))
+    if (wuwa_safe_write64((void *)entry_va, val)) {
+        wuwa_err("table_write64: entry store fail va=%lx\n", entry_va);
         goto restore;
+    }
     {
         unsigned long back = 0;
-        if (wuwa_safe_read64((void *)entry_va, &back) || back != val)
+        if (wuwa_safe_read64((void *)entry_va, &back) || back != val) {
+            wuwa_err("table_write64: readback mismatch va=%lx\n", entry_va);
             goto restore;
+        }
     }
     ret = 0;
 restore:
