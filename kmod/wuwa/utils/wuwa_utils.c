@@ -532,7 +532,7 @@ int wuwa_table_write64(unsigned long entry_va, unsigned long val)
             goto out_preempt;
         }
         /* Push the PTE store before invalidating: TLB must not win. */
-        asm volatile("dsb ishst\ntlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va >> 12) : "memory");
+        asm volatile("dsb ishst\ntlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va) : "memory");
     }
     if (wuwa_safe_write64((void *)entry_va, val)) {
         wuwa_err("table_write64: entry store fail va=%lx\n", entry_va);
@@ -549,7 +549,7 @@ int wuwa_table_write64(unsigned long entry_va, unsigned long val)
 restore:
     if (need_flip) {
         wuwa_safe_write64((void *)desc_va, orig_desc);
-        asm volatile("dsb ishst\ntlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va >> 12) : "memory");
+        asm volatile("dsb ishst\ntlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va) : "memory");
     }
 out_preempt:
     preempt_enable();
