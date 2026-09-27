@@ -129,7 +129,10 @@ struct proto_ops wuwa_proto_ops = {
     .bind = wuwa_bind,
     .connect = wuwa_connect,
     .socketpair = wuwa_socketpair,
-    .accept = wuwa_accept,
+    /* Explicit cast: 6.12 headers type this field with the new wrapper
+     * struct; the stub ignores its args, so the old signature is
+     * behaviorally identical on every kernel (see wuwa_accept). */
+    .accept = (void *)wuwa_accept,
     .getname = wuwa_getname,
     .poll = wuwa_poll,
     .ioctl = wuwa_ioctl,
