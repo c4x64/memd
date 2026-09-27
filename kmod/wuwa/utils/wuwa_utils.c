@@ -509,7 +509,8 @@ out_preempt:
  * (safe on execute-only mappings): TTBR1 walk, descriptor metadata only.
  * 0 ok (fields filled, present=0 when unmapped), negative err. */
 int wuwa_page_perms(uintptr_t va, uintptr_t *pa_out, unsigned *present_out,
-                    unsigned *level_out, unsigned *ap_out, unsigned *xn_out)
+                    unsigned *level_out, unsigned *ap_out, unsigned *xn_out,
+                    unsigned long *desc_out)
 {
     unsigned long ttbr, base, v;
     pgd_t pgd;
@@ -529,6 +530,8 @@ int wuwa_page_perms(uintptr_t va, uintptr_t *pa_out, unsigned *present_out,
     if (wuwa_safe_read64(phys_to_virt(base + (unsigned long)pgd_index(va) * 8), &v))
         return 0;
     pgd = __pgd(v);
+    if (desc_out)
+        desc_out[0] = v;
     if (pgd_none(pgd) || pgd_bad(pgd))
         return 0;
     {
@@ -544,6 +547,8 @@ int wuwa_page_perms(uintptr_t va, uintptr_t *pa_out, unsigned *present_out,
         if (wuwa_safe_read64(p, &v))
             return 0;
         pud = __pud(v);
+        if (desc_out)
+            desc_out[1] = v;
         if (pud_none(pud) || pud_bad(pud))
             return 0;
     }
@@ -560,6 +565,8 @@ int wuwa_page_perms(uintptr_t va, uintptr_t *pa_out, unsigned *present_out,
         if (wuwa_safe_read64(p, &v))
             return 0;
         pmd = __pmd(v);
+        if (desc_out)
+            desc_out[2] = v;
         if (pmd_none(pmd) || pmd_bad(pmd)) {
             *present_out = 0;
             return 0;
@@ -578,6 +585,8 @@ int wuwa_page_perms(uintptr_t va, uintptr_t *pa_out, unsigned *present_out,
         if (wuwa_safe_read64(p, &v))
             return 0;
         pte = __pte(v);
+        if (desc_out)
+            desc_out[3] = v;
         if (!pte_present(pte)) {
             *present_out = 0;
             return 0;
@@ -610,6 +619,8 @@ static uintptr_t kaddr_to_phy_addr(uintptr_t va)
     if (wuwa_safe_read64(phys_to_virt(base + (unsigned long)pgd_index(va) * 8), &v))
         return 0;
     pgd = __pgd(v);
+    if (desc_out)
+        desc_out[0] = v;
     if (pgd_none(pgd) || pgd_bad(pgd))
         return 0;
     p4dp = p4d_offset(&pgd, va);

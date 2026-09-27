@@ -45,7 +45,8 @@ int wuwa_safe_write64(void *dst, unsigned long v);
 int wuwa_table_write64(unsigned long entry_va, unsigned long val);
 /* Page permissions + phys for a kernel VA (descriptor metadata only). */
 int wuwa_page_perms(uintptr_t va, uintptr_t *pa_out, unsigned *present_out,
-                    unsigned *level_out, unsigned *ap_out, unsigned *xn_out);
+                    unsigned *level_out, unsigned *ap_out, unsigned *xn_out,
+                    unsigned long *desc_out);
 
 struct page* vaddr_to_page(struct mm_struct* mm, uintptr_t va);
 

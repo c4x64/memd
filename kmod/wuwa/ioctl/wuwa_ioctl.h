@@ -223,6 +223,7 @@ struct wuwa_page_perms_cmd {
     unsigned int xn; /* Output: 1 if execute-never set */
     unsigned int idx0; /* Output: pgd index used by the walk */
     unsigned int idx1; /* Output: pud index used by the walk */
+    unsigned long desc[4]; /* Output: raw pgd/pud/pmd/pte values seen */
 };
 #define WUWA_IOCTL_PAGE_PERMS _IOWR('W', 23, struct wuwa_page_perms_cmd)
 /* IOCTL command for getting process information by PID */
