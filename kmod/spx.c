@@ -42,6 +42,8 @@
 #endif
 
 /* blobs.c provides these (generated, never committed) */
+extern const unsigned char _binary_rwbridge_universal_ko_start[];
+extern const unsigned long _binary_rwbridge_universal_ko_len;
 extern const unsigned char _binary_rwbridge_a12_5_10_ko_start[];
 extern const unsigned long _binary_rwbridge_a12_5_10_ko_len;
 extern const unsigned char _binary_rwbridge_a13_5_10_ko_start[];
@@ -67,6 +69,7 @@ extern const unsigned long _binary_runsh_len;
 
 static FILE *jfp;
 static int dry;
+static int g_kmaj, g_kmin; /* running kernel, parsed once at selection */
 
 static void jlog(const char *op, const char *msg)
 {
@@ -82,7 +85,7 @@ static void jlog(const char *op, const char *msg)
 
 /* ---- state: attempt counting across reboots ---- */
 struct state {
-    int tried[8];
+    int tried[9];
 };
 
 static void state_load(struct state *s)
@@ -92,9 +95,9 @@ static void state_load(struct state *s)
     f = fopen(STATE_PATH, "r");
     if (!f)
         return;
-    if (fscanf(f, "%d %d %d %d %d %d %d %d", &s->tried[0], &s->tried[1],
+    if (fscanf(f, "%d %d %d %d %d %d %d %d %d", &s->tried[0], &s->tried[1],
                 &s->tried[2], &s->tried[3], &s->tried[4], &s->tried[5],
-                &s->tried[6], &s->tried[7]) != 8) {
+                &s->tried[6], &s->tried[7], &s->tried[8]) != 9) {
         memset(s->tried, 0, sizeof(s->tried));
     }
     fclose(f);
@@ -105,9 +108,9 @@ static void state_save(const struct state *s)
     FILE *f = fopen(STATE_PATH, "w");
     if (!f)
         return;
-    fprintf(f, "%d %d %d %d %d %d %d %d\n", s->tried[0], s->tried[1],
+    fprintf(f, "%d %d %d %d %d %d %d %d %d\n", s->tried[0], s->tried[1],
             s->tried[2], s->tried[3], s->tried[4], s->tried[5],
-            s->tried[6], s->tried[7]);
+            s->tried[6], s->tried[7], s->tried[8]);
     fflush(f);
     fsync(fileno(f));
     fclose(f);
@@ -509,7 +512,16 @@ static int patch_vermagic(unsigned char *d, long n, const char *want)
 }
 
 /* ---- finit_module + Live verify ---- */
-static int do_insmod(const unsigned char *d, long n, const char *args)
+/* finit_module flags (kernel UAPI, stable): version-magic overrides only.
+ * Signatures are NOT overridable (sig-enforcing kernels stay NO-GO). */
+#ifndef MODULE_INIT_IGNORE_MODVERSIONS
+#define MODULE_INIT_IGNORE_MODVERSIONS 0x0001
+#endif
+#ifndef MODULE_INIT_IGNORE_VERMAGIC
+#define MODULE_INIT_IGNORE_VERMAGIC 0x0002
+#endif
+static int do_insmod(const unsigned char *d, long n, const char *args,
+                     int force)
 {
     int fd;
     long r;
@@ -526,7 +538,9 @@ static int do_insmod(const unsigned char *d, long n, const char *args)
     fd = open(TMPKO_PATH, O_RDONLY);
     if (fd < 0)
         return -1;
-    r = syscall(__NR_finit_module, fd, args ? args : "", 0);
+    r = syscall(__NR_finit_module, fd, args ? args : "",
+                (long)(force ? (MODULE_INIT_IGNORE_MODVERSIONS |
+                                MODULE_INIT_IGNORE_VERMAGIC) : 0));
     {
         int e = errno;
         close(fd);
@@ -552,11 +566,13 @@ static int is_live(void)
     return found;
 }
 
-/* CFI-enforcement pre-check: 5.10/5.15 artifacts carry no kallsyms path
- * (WUWA_NO_KPROBE_TRICK), so on an enforcing kernel the CFI bypass could
- * never run and the first kernel->module call would trap. Refuse those
- * flavors outright (NO-GO, never a panic). Unknown config (no config.gz)
- * means proceed: absence of proof is not proof of enforcement. Cached. */
+/* CFI-enforcement pre-check: 5.10/5.15 + CFI is refused outright (NO-GO,
+ * never a panic). The bypass writes kernel text, which is unverified on
+ * 5.x and panics under text-protection (RKP/KDP); kallsyms availability
+ * does not change that. 6.x CFI loads normally (bypass runs when
+ * kallsyms is readable, fails soft per-op otherwise). Unknown config
+ * (no config.gz) means proceed: absence of proof is not proof of
+ * enforcement. Cached. */
 static int kernel_is_cfi(void)
 {
     static int cached = -1;
@@ -633,8 +649,11 @@ int main(int argc, char **argv)
     const unsigned char *bd;
     long bn;
     unsigned char *work;
-    struct blob flavors[8];
-    int order[8], norder = 0;
+    struct blob flavors[9];
+    int order[9], norder = 0;
+    int force_ok[9] = {0}; /* finit_module force allowed (version-magic
+        only): universal always; matrix only on exact kver+gen matches
+        (a wrong generation forced past vermagic could mis-walk). */
     /* struct-layout discovery (once per run): OEM kernels with a modified
      * struct module need our init/exit relocs shifted, else init is
      * silently skipped and the module loads dead. Missing vendor
@@ -691,6 +710,9 @@ int main(int argc, char **argv)
     flavors[7].name = "a16-6.12"; flavors[7].kver = "6.12"; flavors[7].gen = "android16";
     flavors[7].d = _binary_rwbridge_a16_6_12_ko_start;
     flavors[7].n = (long)_binary_rwbridge_a16_6_12_ko_len;
+    flavors[8].name = "universal"; flavors[8].kver = "any"; flavors[8].gen = "any";
+    flavors[8].d = _binary_rwbridge_universal_ko_start;
+    flavors[8].n = (long)_binary_rwbridge_universal_ko_len;
 
     major = kernel_major();
     snprintf(msg, sizeof(msg), "kernel major=%d", major);
@@ -716,11 +738,17 @@ int main(int argc, char **argv)
         }
         snprintf(msg, sizeof(msg), "release=%s", rel[0] ? rel : "?");
         jlog("detect", msg);
+        if (sscanf(rel, "%d.%d", &g_kmaj, &g_kmin) != 2) {
+            g_kmaj = 0;
+            g_kmin = 0;
+        }
         for (pass = 0; pass < 2 && norder < 8; pass++) {
             for (f = 0; f < 8 && norder < 8; f++) {
                 int kvmaj = 0, kvmin = 0, ok = 0;
                 if (f == 4)
                     continue; /* -dbg forensics: explicit --ko only */
+                if (f == 8)
+                    continue; /* universal ordered separately below */
                 if (!rel[0]) continue;
                 if (sscanf(rel, "%d.%d", &kvmaj, &kvmin) != 2) continue;
                 {
@@ -743,6 +771,8 @@ int main(int argc, char **argv)
                         if (order[k] == f) dup = 1;
                     if (!dup) {
                         order[norder++] = f;
+                        if (pass == 0)
+                            force_ok[norder - 1] = 1; /* exact */
                         snprintf(msg, sizeof(msg), "match pass %d: %s",
                                  pass, flavors[f].name);
                         jlog("select", msg);
@@ -753,7 +783,7 @@ int main(int argc, char **argv)
     }
     if (force_name) {
         norder = 0;
-        for (i = 0; i < 8; i++) {
+        for (i = 0; i < 9; i++) {
             if (!strcmp(flavors[i].name, force_name)) {
                 order[norder++] = i;
                 break;
@@ -766,6 +796,8 @@ int main(int argc, char **argv)
                 fclose(jfp);
             return 1;
         }
+        if (!strcmp(flavors[order[0]].name, "universal"))
+            force_ok[0] = 1;
         snprintf(msg, sizeof(msg), "forced flavor: %s", force_name);
         jlog("select", msg);
     }
@@ -774,6 +806,20 @@ int main(int argc, char **argv)
         if (jfp)
             fclose(jfp);
         return 1;
+    }
+    if (!force_name) {
+        /* Universal first (KPM-grade): one runtime-adapting image for all
+         * of 5.10-6.12; the matrix stays as fallback. Shift right, slot 0. */
+        int k;
+        for (k = norder; k > 0 && k < 9; k--) {
+            order[k] = order[k - 1];
+            force_ok[k] = force_ok[k - 1];
+        }
+        if (norder < 9)
+            norder++;
+        order[0] = 8;
+        force_ok[0] = 1;
+        jlog("select", "universal ordered first, matrix fallback after");
     }
 
     if (target_vermagic(vm, sizeof(vm)) < 0) {
@@ -801,10 +847,12 @@ int main(int argc, char **argv)
             continue;
         }
         if ((!strcmp(flavors[fi].kver, "5.10") ||
-             !strcmp(flavors[fi].kver, "5.15")) && kernel_is_cfi()) {
+             !strcmp(flavors[fi].kver, "5.15") ||
+             (!strcmp(flavors[fi].kver, "any") && g_kmaj == 5 &&
+              (g_kmin == 10 || g_kmin == 15))) && kernel_is_cfi()) {
             snprintf(msg, sizeof(msg),
-                     "%s skipped: CFI-enforcing kernel + no kallsyms path "
-                     "in 5.x builds (refusing: a load here would trap)",
+                     "%s skipped: CFI-enforcing 5.x kernel (bypass writes "
+                     "kernel text: unverified there, panics under RKP/KDP)",
                      flavors[fi].name);
             jlog("select", msg);
             continue;
@@ -839,7 +887,7 @@ int main(int argc, char **argv)
         (*tried)++;
         state_save(&st);
         jlog("insmod", "attempting (state saved + synced)");
-        rc = do_insmod(work, bn, "");
+        rc = do_insmod(work, bn, "", 0);
         free(work);
         work = NULL;
         if (rc == 0 && is_live() && proto_live()) {
@@ -869,7 +917,7 @@ int main(int argc, char **argv)
                     shift_tm_relocs(work, bn, layout_init, layout_exit);
                 if (!patch_vermagic(work, bn, vm)) {
                     jlog("insmod", "retrying same flavor (state kept)");
-                    rc = do_insmod(work, bn, "");
+                    rc = do_insmod(work, bn, "", 0);
                     free(work);
                     work = NULL;
                     if (rc == 0 && is_live() && proto_live()) {
@@ -878,6 +926,36 @@ int main(int argc, char **argv)
                             fclose(jfp);
                         return 0;
                     }
+                }
+            }
+        }
+        /* Last resort: finit_module version-magic override (modversions +
+         * vermagic only; signatures never overridable). Allowed for the
+         * universal image (runtime-adapted structs) and exact-generation
+         * matrix matches (right structs, quirky loader) — never for
+         * guessed siblings. Live+proto verify still gates: a wrong load
+         * fails closed here, never mis-walks. */
+        if (force_ok[i]) {
+            jlog("insmod", "last resort: version-magic override");
+            work = malloc((size_t)flavors[fi].n);
+            bn = flavors[fi].n;
+            if (work) {
+                memcpy(work, flavors[fi].d, (size_t)bn);
+                if (layout_known)
+                    shift_tm_relocs(work, bn, layout_init, layout_exit);
+                if (!patch_vermagic(work, bn, vm)) {
+                    rc = do_insmod(work, bn, "", 1);
+                    free(work);
+                    work = NULL;
+                    if (rc == 0 && is_live() && proto_live()) {
+                        jlog("verify", "Live confirmed on override");
+                        if (jfp)
+                            fclose(jfp);
+                        return 0;
+                    }
+                } else {
+                    free(work);
+                    work = NULL;
                 }
             }
         }

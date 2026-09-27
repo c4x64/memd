@@ -1,36 +1,19 @@
 #ifndef WUWA_KALLSYMS_H
 #define WUWA_KALLSYMS_H
 
-#include <linux/errno.h>
-#include <linux/kernel.h>
-#include <linux/sched.h>
-#include "wuwa_common.h"
-#include "wuwa_utils.h"
+/* Runtime kallsyms via /proc/kallsyms self-parse (KPM-grade universality).
+ *
+ * No kprobe imports (weak or otherwise): vendor loaders reject GOT-page
+ * relocs against even weak kprobe references, so the kprobe trick can
+ * never be in a universal image. Instead we read /proc/kallsyms with our
+ * directly-imported filp_open + kernel_read and match the fixed wanted
+ * list by exact name. No headers beyond stable file APIs, no per-version
+ * code: the same binary resolves on 5.10 through 6.12.
+ *
+ * kptr_restrict hiding addresses (%pK -> 0) is the fail-soft boundary:
+ * parse succeeds with zero addresses and every caller degrades to
+ * "not found" (R/W + hide + display-probe need no kallsyms at all).
+ */
+unsigned long wuwa_kallsyms(const char *name);
 
-#define DECLARE_KSYM_RAW(name)                                                                                         \
-    static void* _wuwa_sym_##name __section(".data");                                                                  \
-    static void* __maybe_unused get_##name(void) { return _wuwa_sym_##name; }                                          \
-    static int __maybe_unused ksym_find_##name(void) {                                                                 \
-        _wuwa_sym_##name = (void*)kallsyms_lookup_name_ex(#name);                                                         \
-        if (!_wuwa_sym_##name) {                                                                                       \
-            ovo_err("Failed to find symbol: %s\n", #name);                                                             \
-            return -ENOENT;                                                                                            \
-        }                                                                                                              \
-        return 0;                                                                                                      \
-    }
-
-#define DECLARE_KSYM_FUN(name, ret, args)                                                                              \
-    static ret(*wuwa_##name) args = NULL;                                                                              \
-    static int __maybe_unused ksym_find_##name(void) {                                                                 \
-        if (wuwa_##name) {                                                                                             \
-            return 0;                                                                                                  \
-        }                                                                                                              \
-        wuwa_##name = (typeof(wuwa_##name))kallsyms_lookup_name_ex(#name);                                                \
-        if (!wuwa_##name) {                                                                                            \
-            ovo_err("Failed to find symbol: %s\n", #name);                                                             \
-            return -ENOENT;                                                                                            \
-        }                                                                                                              \
-        return 0;                                                                                                      \
-    }
-
-#endif // WUWA_KALLSYMS_H
+#endif /* WUWA_KALLSYMS_H */

@@ -1,4 +1,5 @@
 #include "wuwa_utils.h"
+#include "wuwa_kallsyms.h"
 
 #include <asm/sysreg.h>
 #include <linux/capability.h>
@@ -20,11 +21,9 @@
 #define NO_CFI
 #endif
 
+/* Floor is 5.10 (single universal image): filp_open is namespace-gated
+ * there and up, so always resolve it at runtime. */
 static int wuwa_flip_open(const char* filename, int flags, umode_t mode, struct file** f) {
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0))
-    *f = filp_open(filename, flags, mode);
-    return *f == NULL ? -2 : 0;
-#else
     static struct file* (*reserve_flip_open)(const char* filename, int flags, umode_t mode) = NULL;
 
     if (reserve_flip_open == NULL) {
@@ -37,14 +36,9 @@ static int wuwa_flip_open(const char* filename, int flags, umode_t mode, struct 
 
     *f = reserve_flip_open(filename, flags, mode);
     return *f == NULL ? -2 : 0;
-#endif
 }
 
 static int wuwa_flip_close(struct file** f, fl_owner_t id) {
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0))
-    filp_close(*f, id);
-    return 0;
-#else
     static struct file* (*reserve_flip_close)(struct file** f, fl_owner_t id) = NULL;
 
     if (reserve_flip_close == NULL) {
@@ -56,7 +50,6 @@ static int wuwa_flip_close(struct file** f, fl_owner_t id) {
 
     reserve_flip_close(f, id);
     return 0;
-#endif
 }
 
 bool is_file_exist(const char* filename) {
@@ -158,56 +151,14 @@ uintptr_t vaddr_to_phy_addr(struct mm_struct* mm, uintptr_t va) {
 
 typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
 
-#ifdef WUWA_NO_KPROBE_TRICK
-/* Vendor 5.x kernels (Samsung etc.): kprobes are unexported AND the strict
- * loader rejects GOT-page relocs (311/312) against even weak kprobe
- * references, so the trick is compiled out entirely here. kallsyms stays
- * unresolved; init_arch/cfi_bypass already fail soft per-op, and plain
- * memory R/W needs no kallsyms. CFI-enforcing 5.x is refused
- * userspace-side (SPX /proc/config.gz guard) rather than trapped. */
+/* Universal resolution: /proc/kallsyms self-parse (wuwa_kallsyms.c). No
+ * kprobe imports of any kind — vendor loaders reject GOT-page relocs
+ * against even weak kprobe references, so the kprobe trick can never be
+ * in a universal image. kptr_restrict hiding addresses is the fail-soft
+ * boundary (callers already degrade to "not found"). */
 unsigned long kallsyms_lookup_name_ex(const char* name) {
-    (void)name;
-    return 0;
+    return wuwa_kallsyms(name);
 }
-#else
-static unsigned long NO_CFI call_kln(kallsyms_lookup_name_t f, const char *n) {
-    return f(n);
-}
-
-/* Weak kprobe imports: hardened/vendor kernels that do not export them
- * still load (references resolve NULL); resolution below degrades to
- * "not found" instead of failing insmod. Plain memory R/W needs no
- * kallsyms at all, so this is the correct fail-soft boundary. */
-__weak int register_kprobe(struct kprobe *p);
-__weak void unregister_kprobe(struct kprobe *p);
-
-unsigned long kallsyms_lookup_name_ex(const char* name) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
-    static kallsyms_lookup_name_t lookup_name = NULL;
-    if (lookup_name == NULL) {
-        struct kprobe kp = {.symbol_name = "kallsyms_lookup_name"};
-
-        if (!register_kprobe || register_kprobe(&kp) < 0) {
-            return 0;
-        }
-
-        lookup_name = (kallsyms_lookup_name_t)kp.addr;
-        if (unregister_kprobe)
-            unregister_kprobe(&kp);
-
-        if (lookup_name == NULL) {
-            wuwa_err("kallsyms_lookup_name not found\n");
-            return 0;
-        }
-        wuwa_info("kallsyms_lookup_name_ex found at %p\n", lookup_name);
-    }
-
-    return call_kln(lookup_name, name);
-#else
-    return kallsyms_lookup_name(name);
-#endif
-}
-#endif /* WUWA_NO_KPROBE_TRICK */
 
 struct task_struct* get_target_task(pid_t pid) {
     struct pid* pid_struct = find_get_pid(pid);
@@ -222,35 +173,6 @@ struct task_struct* get_target_task(pid_t pid) {
     }
 
     return task;
-}
-
-int disable_kprobe_blacklist(void) {
-#ifdef WUWA_NO_KPROBE_TRICK
-    /* We install no kprobes: nothing to unblacklist. Success, so init
-     * never fails on kernels where kallsyms is unresolvable. */
-    return 0;
-#else
-    struct kprobe_blacklist_entry* ent;
-    struct list_head* kprobe_blacklist = (struct list_head*)kallsyms_lookup_name_ex("kprobe_blacklist");
-    if (!kprobe_blacklist) {
-        wuwa_err("kprobe_blacklist not found\n");
-        return -ENOENT;
-    }
-
-    int count = 0;
-    list_for_each_entry(ent, kprobe_blacklist, list) {
-        if (!ent || ent->start_addr == 0 || ent->end_addr == 0) {
-            continue;
-        }
-        count++;
-        ent->start_addr = 0;
-        ent->end_addr = 0;
-    }
-
-    wuwa_info("Disabled %d kprobe blacklist entries\n", count);
-
-    return 0;
-#endif /* WUWA_NO_KPROBE_TRICK */
 }
 
 void compare_pt_regs(struct pt_regs* regs1, struct pt_regs* regs2) {
@@ -792,9 +714,7 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
     struct task_struct* task;
     struct mm_struct* mm;
     struct vm_area_struct* vma;
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
-    struct vma_iterator vmi;
-#endif
+    unsigned long addr;
     uintptr_t result;
     struct dentry* dentry;
     size_t name_len, dname_len;
@@ -829,13 +749,12 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
 
     MM_READ_LOCK(mm)
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
-    vma_iter_init(&vmi, mm, 0);
-    for_each_vma(vmi, vma)
-#else
-    for (vma = mm->mmap; vma; vma = vma->vm_next)
-#endif
-    {
+    /* find_vma() is stable + exported on 5.10 through 6.12 (list walk
+     * below, maple walk above): mm->mmap / vma_iterator would pin the
+     * image to one side of 6.1. */
+    for (addr = 0; (vma = find_vma(mm, addr)) != NULL; addr = vma->vm_end) {
+        if (addr >= vma->vm_end)
+            break; /* wrapped or stuck: never spin */
         if (vma->vm_file) {
             if (vm_flag && !(vma->vm_flags & vm_flag)) {
                 continue;
@@ -871,7 +790,9 @@ int is_pid_alive(pid_t pid) {
     return pid_alive(task);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+/* Single find_process_by_name: get_cmdline via runtime kallsyms
+ * (6.1+ kernels), transparent fallback to get_cmdline_ex below. */
+int get_cmdline_ex(struct task_struct *task, char *buffer, int buflen);
 pid_t find_process_by_name(const char* name) {
     struct task_struct* task;
     char cmdline[256];
@@ -888,6 +809,10 @@ pid_t find_process_by_name(const char* name) {
     static int (*my_get_cmdline)(struct task_struct* task, char* buffer, int buflen) = NULL;
     if (my_get_cmdline == NULL) {
         my_get_cmdline = (void*)kallsyms_lookup_name_ex("get_cmdline");
+    }
+    if (my_get_cmdline == NULL) {
+        /* pre-6.1 (or restricted) kernels: read argv the slow way */
+        my_get_cmdline = get_cmdline_ex;
     }
 
     rcu_read_lock();
@@ -933,7 +858,6 @@ pid_t find_process_by_name(const char* name) {
     return 0;
 }
 
-#else
 int get_cmdline_ex(struct task_struct* task, char* buffer, int buflen) {
     int res = 0;
     unsigned int len;
@@ -980,58 +904,6 @@ out:
     return res;
 }
 
-pid_t find_process_by_name(const char* name) {
-    struct task_struct* task;
-    char cmdline[256];
-    char* prog_name;
-    size_t name_len;
-    int ret;
-
-    name_len = strlen(name);
-    if (name_len == 0) {
-        pr_err("process name is empty\n");
-        return -2;
-    }
-
-    rcu_read_lock();
-    for_each_process(task) {
-        if (task->mm == NULL) {
-            continue;
-        }
-
-        cmdline[0] = '\0';
-        ret = get_cmdline_ex(task, cmdline, sizeof(cmdline));
-
-        if (ret < 0) {
-            // 回退到task->comm，确保完全匹配
-            if (strlen(task->comm) == name_len && strncmp(task->comm, name, name_len) == 0) {
-                rcu_read_unlock();
-                return task->pid;
-            }
-        } else {
-            // 提取程序名（第一个空格之前的部分）
-            prog_name = cmdline;
-            char* space = strchr(cmdline, ' ');
-            if (space) {
-                *space = '\0';
-            }
-
-            // 提取路径中的文件名部分
-            char* slash = strrchr(prog_name, '/');
-            if (slash) {
-                prog_name = slash + 1;
-            }
-
-            if (strlen(prog_name) == name_len && strncmp(prog_name, name, name_len) == 0) {
-                rcu_read_unlock();
-                return task->pid;
-            }
-        }
-    }
-    rcu_read_unlock();
-    return 0;
-}
-#endif
 
 static struct list_head* module_previous;
 static struct list_head* module_kobj_previous;
@@ -1141,31 +1013,29 @@ void __iomem* wuwa_ioremap_prot(uintptr_t phys_addr, size_t size, pgprot_t prot)
         }
     }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
-    static struct vm_struct *(*my__get_vm_area_caller)(unsigned long size,
-                    unsigned long flags,
-                    unsigned long start, unsigned long end,
-                    const void *caller) = NULL;
-    if (my__get_vm_area_caller == NULL) {
-        my__get_vm_area_caller = (struct vm_struct * (*)(unsigned long, unsigned long, unsigned long, unsigned long, const void *))kallsyms_lookup_name_ex("__get_vm_area_caller");
-        if (my__get_vm_area_caller == NULL) {
-            wuwa_err("cannot find __get_vm_area_caller\n");
+    /* __get_vm_area_caller (6.6+) first, get_vm_area_caller (5.10+) as
+     * fallback: both resolved by name at runtime, one image either way. */
+    {
+        static struct vm_struct *(*area4)(unsigned long, unsigned long,
+                unsigned long, unsigned long, const void *) = NULL;
+        static struct vm_struct *(*area3)(unsigned long, unsigned long,
+                const void *) = NULL;
+        static bool probed = false;
+        if (!probed) {
+            probed = true;
+            area4 = (void *)kallsyms_lookup_name_ex("__get_vm_area_caller");
+            area3 = (void *)kallsyms_lookup_name_ex("get_vm_area_caller");
+        }
+        if (area4)
+            area = area4(size, VM_IOREMAP, VMALLOC_START, VMALLOC_END,
+                         __builtin_return_address(0));
+        else if (area3)
+            area = area3(size, VM_IOREMAP, __builtin_return_address(0));
+        else {
+            wuwa_err("cannot find vm area allocator\n");
             return NULL;
         }
     }
-    area = my__get_vm_area_caller(size, VM_IOREMAP, VMALLOC_START, VMALLOC_END, __builtin_return_address(0));
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
-    static struct vm_struct* (*my_get_vm_area_caller)(unsigned long, unsigned long, const void*) = NULL;
-    if (my_get_vm_area_caller == NULL) {
-        my_get_vm_area_caller =
-            (struct vm_struct * (*)(unsigned long, unsigned long, const void*))kallsyms_lookup_name_ex("get_vm_area_caller");
-        if (my_get_vm_area_caller == NULL) {
-            wuwa_err("cannot find get_vm_area_caller\n");
-            return NULL;
-        }
-    }
-    area = my_get_vm_area_caller(size, VM_IOREMAP, __builtin_return_address(0));
-#endif
 
     if (!area)
         return NULL;

@@ -23,6 +23,7 @@ rwbridge-y := \
     wuwa/net/wuwa_sock.o \
     wuwa/net/wuwa_protocol.o \
     wuwa/utils/wuwa_utils.o \
+    wuwa/utils/wuwa_kallsyms.o \
     wuwa/utils/karray_list.o \
     wuwa/utils/wuwa_region.o \
     wuwa/ioctl/wuwa_ioctl.o \
@@ -72,14 +73,10 @@ ccflags-y += -fno-stack-protector -fno-stack-check
 # clang emits no kcfi traps for this codebase — no indirect-call typeids —
 # so the variant was byte-identical to plain; not worth a matrix slot).
 ccflags-remove-y += -fsanitize=cfi -fsanitize=kcfi -fsanitize-cfi-cross-dso
-# Vendor 5.x kernels (Samsung etc.): strict loaders reject GOT-page relocs
-# against weak kprobe symbols, and kprobes are unexported there anyway, so
-# the kprobe kallsyms trick is compiled out of 5.10/5.15 artifacts (plain
-# R/W needs no kallsyms; init fails soft per-op). 6.x keeps the trick: GKI
-# exports kprobes and upstream loaders tolerate the weak refs.
-ifneq ($(filter %-5.10 %-5.15,$(KMI)),)
-ccflags-y += -DWUWA_NO_KPROBE_TRICK
-endif
+# kallsyms comes from /proc/kallsyms self-parse (wuwa_kallsyms.c): no
+# kprobe imports of any kind, so no loader-rejected GOT relocs on any
+# target and no per-generation trick filter. The old WUWA_NO_KPROBE_TRICK
+# filter is deleted; every artifact resolves the same way.
 # DBG variant (DBG=1, android14-6.1-dbg job): full debug info kept for
 # crash forensics (pstore/dmesg decoding). Never auto-selected by the
 # loader (explicit --ko only); identical code to the plain artifact.
@@ -98,13 +95,15 @@ clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
 
 # Static gate: fails the build if the module drifted off the checked
-# surface. Import rule (owner-amended for the matrix architecture): GKI
-# trees always export printk + the socket/mm/process APIs used here, and
-# each artifact is verified against ITS OWN generation's System.map by
-# check_universal.py (exact ELF parsing). kallsyms_lookup_name is never
-# imported (kprobe-trick runtime resolution only). No procfs (sysfs-free:
-# socket/ioctl transport). No CR0/WP games. BTI pads + vermagic
-# placeholder stay inline below.
+# surface. Import rule (owner-amended for the universal architecture):
+# GKI trees always export printk + the socket/mm/process APIs used here,
+# and each artifact is verified against ITS OWN generation's System.map
+# by check_universal.py (exact ELF parsing). kallsyms_lookup_name is
+# never imported (the /proc self-parse in wuwa_kallsyms.c resolves every
+# name at runtime — no kprobe imports of any kind, so no loader-rejected
+# GOT relocs on any target). No procfs (sysfs-free: socket/ioctl
+# transport). No CR0/WP games. BTI pads + vermagic placeholder stay
+# inline below.
 check-universal: all
 	@echo "== versions/imports via check_universal.py =="
 	@NM_BIN="$(NM)"; [ -n "$$NM_BIN" ] || NM_BIN="$(CROSS_COMPILE)nm"; \

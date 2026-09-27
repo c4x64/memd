@@ -9,15 +9,12 @@
 #include <linux/kernel.h>
 #include <linux/version.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-typedef bool hide_filldir_ret_t;
-#define HIDE_FILLDIR_OK false
-#define HIDE_FILLDIR_FULL true
-#else
+/* One filldir actor for every kernel: int (pre-6.1) vs bool (6.1+) only
+ * differ in type, not ABI — 0/continue and 1/stop share the same w0
+ * values, and the wrapped kernel actor only ever returns 0/1. */
 typedef int hide_filldir_ret_t;
 #define HIDE_FILLDIR_OK 0
 #define HIDE_FILLDIR_FULL 1
-#endif
 #include <linux/module.h>
 #include <linux/spinlock.h>
 #include <linux/uidgid.h>

@@ -939,20 +939,18 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
     // Try to get full command line
     cmdline[0] = '\0';
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+    /* get_cmdline via runtime kallsyms (6.1+), argv fallback below it:
+     * one image either way, comm fallback after that. */
     static int (*my_get_cmdline)(struct task_struct* task, char* buffer, int buflen) = NULL;
-    if (my_get_cmdline == NULL) {
+    static bool cmdline_probed = false;
+    if (!cmdline_probed) {
+        cmdline_probed = true;
         my_get_cmdline = (void*)kallsyms_lookup_name_ex("get_cmdline");
     }
 
     if (my_get_cmdline != NULL && task->mm != NULL) {
         ret = my_get_cmdline(task, cmdline, sizeof(cmdline));
-    } else {
-        ret = -1;
-    }
-#else
-    // Use fallback for older kernels
-    if (task->mm != NULL) {
+    } else if (task->mm != NULL) {
         struct mm_struct* mm = get_task_mm(task);
         if (mm) {
             unsigned long arg_start, arg_end;
@@ -975,7 +973,6 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
     } else {
         ret = -1;
     }
-#endif
 
     // Fallback to task->comm if cmdline retrieval failed
     if (ret < 0 || cmdline[0] == '\0') {

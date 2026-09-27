@@ -23,13 +23,9 @@ static int __init wuwa_init(void) {
     int ret;
     wuwa_info("helo!\n");
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
-    ret = disable_kprobe_blacklist();
-    if (ret) {
-        wuwa_err("disable_kprobe_blacklist failed: %d\n", ret);
-        return ret;
-    }
-#endif
+    /* No kprobe-blacklist handling: this image installs no kprobes (all
+     * kallsyms comes from /proc self-parse), so there is nothing to
+     * unblacklist on any kernel. */
 
     ret = init_arch();
     if (ret) {

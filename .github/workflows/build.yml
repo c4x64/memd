@@ -1,10 +1,13 @@
 name: build-matrix-kmod
 
-# rwbridge is built once PER KMI GENERATION (8 DDK targets). Each artifact
-# matches its own generation's headers/layouts; vendor variance inside a
-# generation (UTS suffixes) is absorbed at install by the vermagic
-# placeholder + run.sh/SPX patch. The single deliverable stays ONE packed
-# binary (rwbridge-spx, all 8 artifacts inside) + one shell bundle.
+# rwbridge is built once PER KMI GENERATION (8 DDK targets) PLUS ONE
+# UNIVERSAL image (5.10-baseline build of the same source: no kprobe
+# imports, no version-conditional behavior — runtime adaptation only).
+# Each matrix artifact matches its own generation's headers/layouts (and
+# proves the source is header-agnostic on all 8); vendor variance inside
+# a generation (UTS suffixes) is absorbed at install by the vermagic
+# placeholder + run.sh/SPX patch. Deliverables: ONE packed binary
+# (rwbridge-spx, universal + 8 artifacts inside) + one shell bundle.
 #
 # DDK provides containerized kernel trees per KMI (no source on any
 # device, never in this repo). ddk_release is pinned; bumping it is a
@@ -25,6 +28,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - kmi: universal
+            img: android12-5.10
           - kmi: android12-5.10
             img: android12-5.10
           - kmi: android13-5.10
@@ -170,6 +175,7 @@ jobs:
         run: |
           ls dl/kmod/ 2>/dev/null || ls dl/ 2>/dev/null
           python3 - \
+            dl/kmod/rwbridge-universal.ko \
             dl/kmod/rwbridge-android12-5.10.ko \
             dl/kmod/rwbridge-android13-5.10.ko \
             dl/kmod/rwbridge-android13-5.15.ko \
@@ -190,8 +196,9 @@ jobs:
               L.append('const unsigned long %s_len = %d;' % (sym, len(d)))
               return '\n'.join(L)
           *kos, sh, out = sys.argv[1:]
-          assert len(kos) == 8, "need exactly 8 KMI artifacts, got %d" % len(kos)
-          short = {'android12-5.10': 'a12_5_10', 'android13-5.10': 'a13_5_10',
+          assert len(kos) == 9, "need 8 KMI artifacts + universal, got %d" % len(kos)
+          short = {'universal': 'universal',
+                   'android12-5.10': 'a12_5_10', 'android13-5.10': 'a13_5_10',
                    'android13-5.15': 'a13_5_15', 'android14-5.15': 'a14_5_15',
                     'android14-6.1': 'a14_6_1', 'android14-6.1-dbg': 'a14_6_1_dbg',
                    'android15-6.6': 'a15_6_6', 'android16-6.12': 'a16_6_12'}
@@ -199,7 +206,7 @@ jobs:
                    for k in kos]
           parts.append(emit('_binary_runsh', sh))
           open(out, 'w').write('\n'.join(parts) + '\n')
-          print('blobs written: 8 artifacts + run.sh')
+          print('blobs written: universal + 8 artifacts + run.sh')
           PYEOF
           grep -c "_binary_rwbridge_.*_start" blobs.c
           aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o rwbridge-spx kmod/spx.c blobs.c

@@ -56,8 +56,6 @@ unsigned long kallsyms_lookup_name_ex(const char* symbol_name);
 
 struct task_struct* get_target_task(pid_t pid);
 
-int disable_kprobe_blacklist(void);
-
 void compare_pt_regs(struct pt_regs* regs1, struct pt_regs* regs2);
 void compare_task_struct(struct task_struct* task1, struct task_struct* task2);
 

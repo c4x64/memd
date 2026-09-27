@@ -1,13 +1,14 @@
 #!/system/bin/sh
-# rwbridge run.sh — install the per-KMI matched .ko on 5.10+ arm64 kernels.
+# rwbridge run.sh — install the universal image first, per-KMI match after.
 #
-# Eight DDK-built artifacts (one per KMI generation); selection matches
-# uname -r numerically (kver) + android generation, exact first, kver-only
-# siblings after. Two things that used to be compile-time are resolved
-# here, at runtime:
+# One runtime-adapting .ko (rwbridge-universal.ko, 5.10-baseline build: no
+# kprobe imports, no version-conditional behavior) loads on 5.10–6.12; the
+# eight DDK-built per-KMI artifacts stay as fallback. Two things that used
+# to be compile-time are resolved here, at runtime:
 #   1. vermagic — the baked placeholder is patched in a temp copy to match
 #      the running kernel (dmesg-feedback retry if extras differ), then
-#      insmod runs clean (no --force, ever).
+#      insmod runs clean; finit_module version-magic override is the LAST
+#      resort only (modversions + vermagic, never signatures).
 #   2. CFI — enforcing kernels are handled inside the driver (cfi_bypass
 #      patches the check functions at init); no separate artifact, no
 #      flavor switch.
@@ -71,13 +72,19 @@ if grep -q "^${MODNAME} " /proc/modules 2>/dev/null; then
     exit 0
 fi
 
-# 1. Locate the universal .ko: explicit $1 wins, else side by side.
+# 1. Locate the .ko: explicit $1 wins, else the universal image, else
+# side by side, else the per-KMI matrix pick below.
 if [ -n "$1" ] && [ -f "$1" ]; then
     KO="$1"
 else
-    for c in "${SCRIPT_DIR}/rwbridge.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge.ko"; do
+    for c in "${SCRIPT_DIR}/rwbridge-universal.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge-universal.ko"; do
         if [ -f "$c" ]; then KO="$c"; break; fi
     done
+    if [ -z "$KO" ]; then
+        for c in "${SCRIPT_DIR}/rwbridge.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge.ko"; do
+            if [ -f "$c" ]; then KO="$c"; break; fi
+        done
+    fi
 fi
 [ -n "$KO" ] || die "rwbridge.ko not found (pass path as \$1 or place next to run.sh)"
 KVER=$(uname -r 2>/dev/null)
@@ -427,10 +434,15 @@ shift_layout "$TMPKO" || log "layout: shift skipped (unparseable artifact)"
 INSMOD_OPTS=""
 
 
-# 8. Load (never --force) + verify, with dmesg-feedback vermagic retry.
+# 8. Load (clean, then dmesg retry, then version-magic override) + verify,
+# with dmesg-feedback vermagic retry.
 # If the kernel rejects our extras guess (e.g. it expects a `modversions`
 # token we didn't bake), dmesg names the exact string it wants
 # ("should be '...'") — re-patch the temp copy to that and retry once.
+# Last resort is insmod -f (version-magic override ONLY: modversions +
+# vermagic; signatures are never overridable — sig-enforcing kernels stay
+# NO-GO). Allowed here because the universal image adapts at runtime
+# (matrix fallbacks via explicit $1 stay clean-only).
 # This keeps vermagic fully runtime: no build matrix, no guessing.
 try_insmod() {
     # sync first: if insmod panics the device, everything echoed so far
@@ -460,12 +472,40 @@ if ! try_insmod; then
         patch_vermagic "$TMPKO" "$WANT" || die "vermagic re-patch failed"
         shift_layout "$TMPKO" || log "layout: shift skipped on retry"
         if ! try_insmod; then
-            dump_log "insmod-retry"
-            die "insmod failed twice (see dmesg + $LASTLOG)"
+            # Last resort: version-magic override, universal image only
+            # (runtime-adapted structs; matrix paths stay clean-only).
+            case "$KO" in
+                *universal*)
+                    log "last resort: insmod -f (version-magic only)"
+                    sync 2>/dev/null
+                    if ! eval insmod -f '"$TMPKO"' 2>/dev/null; then
+                        dump_log "insmod-force"
+                        die "insmod failed even forced (see dmesg + $LASTLOG)"
+                    fi
+                    ;;
+                *)
+                    dump_log "insmod-retry"
+                    die "insmod failed twice (see dmesg + $LASTLOG)"
+                    ;;
+            esac
         fi
     else
-        dump_log "insmod"
-        die "insmod failed (see dmesg + $LASTLOG)"
+        # No vermagic hint in dmesg: universal gets one forced attempt
+        # (often modversions without a tell); matrix dies clean.
+        case "$KO" in
+            *universal*)
+                log "no vermagic hint; last resort: insmod -f (version-magic only)"
+                sync 2>/dev/null
+                if ! eval insmod -f '"$TMPKO"' 2>/dev/null; then
+                    dump_log "insmod-force"
+                    die "insmod failed even forced (see dmesg + $LASTLOG)"
+                fi
+                ;;
+            *)
+                dump_log "insmod"
+                die "insmod failed (see dmesg + $LASTLOG)"
+                ;;
+        esac
     fi
 fi
 rm -f "$TMPKO"

@@ -97,19 +97,14 @@ static int wuwa_socketpair(struct socket *sock1, struct socket *sock2)
 	return -EOPNOTSUPP;
 }
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0))
-static int wuwa_accept(struct socket *sock, struct socket *newsock,
-		   struct proto_accept_arg *arg)
-{
-	return -EOPNOTSUPP;
-}
-#else
+/* Old proto_ops.accept signature on all builds: this stub ignores its
+ * args and returns -EOPNOTSUPP, so the 6.12 signature change (extra
+ * wrapper struct) is behaviorally irrelevant — one image either way. */
 static int wuwa_accept(struct socket *sock, struct socket *newsock, int flags,
 		   bool kern)
 {
 	return -EOPNOTSUPP;
 }
-#endif
 
 static int wuwa_listen(struct socket *sock, int backlog)
 {
