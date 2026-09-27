@@ -419,57 +419,78 @@ int wuwa_table_write64(unsigned long entry_va, unsigned long val)
 
     ttbr = read_sysreg(ttbr1_el1);
     base = ttbr & 0x0000FFFFFFFFF000UL;
-    if (!base)
+    if (!base) {
             wuwa_err("table_write64: stage 0 fail va=%lx\n", entry_va);
         return -EFAULT;
-    if (wuwa_safe_read64(phys_to_virt(base + (unsigned long)pgd_index(entry_va) * 8), &v))
+    }
+    if (wuwa_safe_read64(phys_to_virt(base + (unsigned long)pgd_index(entry_va) * 8), &v)) {
             wuwa_err("table_write64: stage 1 fail va=%lx\n", entry_va);
         return -EFAULT;
+    }
     pgd = __pgd(v);
-    if (pgd_none(pgd) || pgd_bad(pgd))
+    if (pgd_none(pgd) || pgd_bad(pgd)) {
             wuwa_err("table_write64: stage 2 fail va=%lx\n", entry_va);
         return -EFAULT;
+    }
     {
         p4d_t *p = p4d_offset(&pgd, entry_va);
         if (wuwa_safe_read64(p, &v))
-            wuwa_err("table_write64: stage 3 fail va=%lx\n", entry_va);
-            return -EFAULT;
+            {
+                wuwa_err("table_write64: stage 3 fail va=%lx\n", entry_va);
+                return -EFAULT;
+        }
         p4d = __p4d(v);
         if (p4d_none(p4d) || p4d_bad(p4d))
-            wuwa_err("table_write64: stage 4 fail va=%lx\n", entry_va);
-            return -EFAULT;
+            {
+                wuwa_err("table_write64: stage 4 fail va=%lx\n", entry_va);
+                return -EFAULT;
+        }
     }
     {
         pud_t *p = pud_offset(&p4d, entry_va);
         if (wuwa_safe_read64(p, &v))
-            wuwa_err("table_write64: stage 5 fail va=%lx\n", entry_va);
-            return -EFAULT;
+            {
+                wuwa_err("table_write64: stage 5 fail va=%lx\n", entry_va);
+                return -EFAULT;
+        }
         pud = __pud(v);
         if (pud_none(pud))
-            wuwa_err("table_write64: stage 6 fail va=%lx\n", entry_va);
-            return -EFAULT;
+            {
+                wuwa_err("table_write64: stage 6 fail va=%lx\n", entry_va);
+                return -EFAULT;
+        }
     }
     if (!pud_leaf(pud)) {
         if (pud_bad(pud))
-            wuwa_err("table_write64: stage 7 fail va=%lx\n", entry_va);
-            return -EFAULT;
+            {
+                wuwa_err("table_write64: stage 7 fail va=%lx\n", entry_va);
+                return -EFAULT;
+        }
         pmd_t *p = pmd_offset(&pud, entry_va);
         if (wuwa_safe_read64(p, &v))
-            wuwa_err("table_write64: stage 8 fail va=%lx\n", entry_va);
-            return -EFAULT;
+            {
+                wuwa_err("table_write64: stage 8 fail va=%lx\n", entry_va);
+                return -EFAULT;
+        }
         pmd = __pmd(v);
         if (pmd_none(pmd))
-            wuwa_err("table_write64: stage 9 fail va=%lx\n", entry_va);
-            return -EFAULT;
+            {
+                wuwa_err("table_write64: stage 9 fail va=%lx\n", entry_va);
+                return -EFAULT;
+        }
         if (pmd_bad(pmd) && !pmd_leaf(pmd))
-            wuwa_err("table_write64: stage 10 fail va=%lx\n", entry_va);
-            return -EFAULT;
+            {
+                wuwa_err("table_write64: stage 10 fail va=%lx\n", entry_va);
+                return -EFAULT;
+        }
         if (!pmd_leaf(pmd)) {
             pte_t *p = pte_offset_kernel(&pmd, entry_va);
             desc_va = (unsigned long)p;
             if (wuwa_safe_read64(p, &v))
-            wuwa_err("table_write64: stage 11 fail va=%lx\n", entry_va);
-                return -EFAULT;
+            {
+                wuwa_err("table_write64: stage 11 fail va=%lx\n", entry_va);
+                    return -EFAULT;
+        }
             orig_desc = v;
         } else {
             desc_va = (unsigned long)pmd_offset(&pud, entry_va);
@@ -479,9 +500,10 @@ int wuwa_table_write64(unsigned long entry_va, unsigned long val)
         desc_va = (unsigned long)pud_offset(&p4d, entry_va);
         orig_desc = v;
     }
-    if (!(orig_desc & 1))
+    if (!(orig_desc & 1)) {
             wuwa_err("table_write64: stage 12 fail va=%lx\n", entry_va);
         return -EFAULT;
+    }
     /* Descriptor sanity before touching anything: must be a table or
      * block descriptor whose output address is DRAM (not MMIO/device).
      * A mis-walked garbage descriptor fails here instead of corrupting
@@ -490,11 +512,15 @@ int wuwa_table_write64(unsigned long entry_va, unsigned long val)
         unsigned long out = orig_desc & 0x0000FFFFFFFFF000UL;
         unsigned long type = orig_desc & 3UL;
         if (type != 3UL && ((orig_desc & 3UL) != 1UL))
-            wuwa_err("table_write64: stage 13 fail va=%lx\n", entry_va);
-            return -EFAULT;
+            {
+                wuwa_err("table_write64: stage 13 fail va=%lx\n", entry_va);
+                return -EFAULT;
+        }
         if (out < 0x40000000UL || out >= (64UL << 30))
-            wuwa_err("table_write64: stage 14 fail va=%lx\n", entry_va);
-            return -EFAULT;
+            {
+                wuwa_err("table_write64: stage 14 fail va=%lx\n", entry_va);
+                return -EFAULT;
+        }
     }
     /* AP[1] set means read-only at EL1; clear it for the write. */
     rw_desc = orig_desc & ~2UL;
