@@ -522,8 +522,9 @@ int wuwa_table_write64(unsigned long entry_va, unsigned long val)
                 return -EFAULT;
         }
     }
-    /* AP[1] set means read-only at EL1; clear it for the write. */
-    rw_desc = orig_desc & ~2UL;
+    /* AP[1] (bit 7) set means read-only at EL1; clear it for the write.
+     * Bit 7 is the RO bit for table, block and page descriptors alike. */
+    rw_desc = orig_desc & ~0x80UL;
     need_flip = (rw_desc != orig_desc);
     preempt_disable();
     if (need_flip) {
