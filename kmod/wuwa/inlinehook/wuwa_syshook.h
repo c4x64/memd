@@ -17,7 +17,5 @@
 int wuwa_hide_install(void);
 int wuwa_hide_uninstall(void);
 int wuwa_hide_active(void);
-/* Hook getdents64 at an explicit table-entry PHYSICAL address. */
-int wuwa_hook_at_phys(unsigned long entry_phys);
 
 #endif /* WUWA_SYSHOOK_H */

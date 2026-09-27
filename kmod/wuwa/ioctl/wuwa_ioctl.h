@@ -242,14 +242,6 @@ struct wuwa_hide_install_cmd {
     int result; /* Output: 0 ok, negative errno on failure */
 };
 #define WUWA_IOCTL_HIDE_INSTALL _IOWR('W', 22, struct wuwa_hide_install_cmd)
-/* IOCTL command for hooking getdents64 at an explicit table-entry
- * PHYSICAL address (found by userspace physical hunt; KASLR-proof).
- * Same verify/restore discipline as HIDE_INSTALL. */
-struct wuwa_hook_at_cmd {
-    uintptr_t entry_phys; /* Input: phys addr of table[__NR_getdents64] */
-    int result; /* Output: 0 ok, negative errno */
-};
-#define WUWA_IOCTL_HOOK_AT _IOWR('W', 25, struct wuwa_hook_at_cmd)
 
 int do_vaddr_translate(struct socket* sock, void __user* arg);
 int do_debug_info(struct socket* sock, void __user* arg);
@@ -275,7 +267,6 @@ int do_get_process_info(struct socket* sock, void __user* arg);
 int do_hide_status(struct socket* sock, void __user* arg);
 int do_hide_install(struct socket* sock, void __user* arg);
 int do_page_perms(struct socket* sock, void __user* arg);
-int do_hook_at(struct socket* sock, void __user* arg);
 
 typedef int (*ioctl_handler_t)(struct socket* sock, void __user* arg);
 
@@ -308,7 +299,6 @@ static const struct ioctl_cmd_map {
     {.cmd = WUWA_IOCTL_HIDE_STATUS, .handler = do_hide_status},
     {.cmd = WUWA_IOCTL_HIDE_INSTALL, .handler = do_hide_install},
     {.cmd = WUWA_IOCTL_PAGE_PERMS, .handler = do_page_perms},
-    {.cmd = WUWA_IOCTL_HOOK_AT, .handler = do_hook_at},
     {.cmd = 0, .handler = NULL} /* Sentinel to mark end of array */
 };
 
