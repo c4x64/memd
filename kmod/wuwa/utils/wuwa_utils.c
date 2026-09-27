@@ -439,15 +439,19 @@ int wuwa_table_write64(unsigned long entry_va, unsigned long val)
         if (wuwa_safe_read64(p, &v))
             return -EFAULT;
         pud = __pud(v);
-        if (pud_none(pud) || pud_bad(pud))
+        if (pud_none(pud))
             return -EFAULT;
     }
     if (!pud_leaf(pud)) {
+        if (pud_bad(pud))
+            return -EFAULT;
         pmd_t *p = pmd_offset(&pud, entry_va);
         if (wuwa_safe_read64(p, &v))
             return -EFAULT;
         pmd = __pmd(v);
-        if (pmd_none(pmd) || pmd_bad(pmd))
+        if (pmd_none(pmd))
+            return -EFAULT;
+        if (pmd_bad(pmd) && !pmd_leaf(pmd))
             return -EFAULT;
         if (!pmd_leaf(pmd)) {
             pte_t *p = pte_offset_kernel(&pmd, entry_va);
@@ -549,7 +553,7 @@ int wuwa_page_perms(uintptr_t va, uintptr_t *pa_out, unsigned *present_out,
         pud = __pud(v);
         if (desc_out)
             desc_out[1] = v;
-        if (pud_none(pud) || pud_bad(pud))
+        if (pud_none(pud))
             return 0;
     }
     *present_out = 1;
@@ -560,6 +564,10 @@ int wuwa_page_perms(uintptr_t va, uintptr_t *pa_out, unsigned *present_out,
         *pa_out = (pud_pfn(pud) << PAGE_SHIFT) + (va & ((1UL << 30) - 1));
         return 0;
     }
+    if (pud_bad(pud)) {
+        *present_out = 0;
+        return 0;
+    }
     {
         pmd_t *p = pmd_offset(&pud, va);
         if (wuwa_safe_read64(p, &v))
@@ -567,7 +575,7 @@ int wuwa_page_perms(uintptr_t va, uintptr_t *pa_out, unsigned *present_out,
         pmd = __pmd(v);
         if (desc_out)
             desc_out[2] = v;
-        if (pmd_none(pmd) || pmd_bad(pmd)) {
+        if (pmd_none(pmd)) {
             *present_out = 0;
             return 0;
         }
@@ -577,6 +585,10 @@ int wuwa_page_perms(uintptr_t va, uintptr_t *pa_out, unsigned *present_out,
         *ap_out = (unsigned)((v >> 6) & 3);
         *xn_out = (unsigned)((v >> 53) & 3);
         *pa_out = (pmd_pfn(pmd) << PAGE_SHIFT) + (va & ((1UL << 21) - 1));
+        return 0;
+    }
+    if (pmd_bad(pmd)) {
+        *present_out = 0;
         return 0;
     }
     {
@@ -631,18 +643,22 @@ static uintptr_t kaddr_to_phy_addr(uintptr_t va)
     if (wuwa_safe_read64(pudp, &v))
         return 0;
     pud = __pud(v);
-    if (pud_none(pud) || pud_bad(pud))
+    if (pud_none(pud))
         return 0;
     if (pud_leaf(pud))
         return (pud_pfn(pud) << PAGE_SHIFT) + (va & ((1UL << 30) - 1));
+    if (pud_bad(pud))
+        return 0;
     pmdp = pmd_offset(&pud, va);
     if (wuwa_safe_read64(pmdp, &v))
         return 0;
     pmd = __pmd(v);
-    if (pmd_none(pmd) || pmd_bad(pmd))
+    if (pmd_none(pmd))
         return 0;
     if (pmd_leaf(pmd))
         return (pmd_pfn(pmd) << PAGE_SHIFT) + (va & ((1UL << 21) - 1));
+    if (pmd_bad(pmd))
+        return 0;
     ptep = pte_offset_kernel(&pmd, va);
     if (wuwa_safe_read64(ptep, &v))
         return 0;
