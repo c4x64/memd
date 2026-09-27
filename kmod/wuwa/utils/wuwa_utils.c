@@ -528,12 +528,19 @@ int wuwa_table_write64(unsigned long entry_va, unsigned long val)
     need_flip = (rw_desc != orig_desc);
     preempt_disable();
     if (need_flip) {
+        /* Break-Before-Make: changing AP on a live descriptor without a
+         * break step leaves stale TLB entries (still RO) behind. Break
+         * (invalidate), invalidate TLB, then make (RW), invalidate again. */
+        if (wuwa_safe_write64((void *)desc_va, orig_desc & ~1UL)) {
+            wuwa_err("table_write64: break store fail va=%lx\n", entry_va);
+            goto out_preempt;
+        }
+        asm volatile("dsb ish\ntlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va) : "memory");
         if (wuwa_safe_write64((void *)desc_va, rw_desc)) {
             wuwa_err("table_write64: flip store fail va=%lx\n", entry_va);
             goto out_preempt;
         }
-        /* Push the PTE store before invalidating: TLB must not win. */
-        asm volatile("dsb ishst\ntlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va) : "memory");
+        asm volatile("dsb ish\ntlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va) : "memory");
     }
     if (wuwa_safe_write64((void *)entry_va, val)) {
         wuwa_err("table_write64: entry store fail va=%lx\n", entry_va);
@@ -549,8 +556,11 @@ int wuwa_table_write64(unsigned long entry_va, unsigned long val)
     ret = 0;
 restore:
     if (need_flip) {
+        /* BBM restore: break, invalidate, remake original, invalidate. */
+        wuwa_safe_write64((void *)desc_va, orig_desc & ~1UL);
+        asm volatile("dsb ish\ntlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va) : "memory");
         wuwa_safe_write64((void *)desc_va, orig_desc);
-        asm volatile("dsb ishst\ntlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va) : "memory");
+        asm volatile("dsb ish\ntlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va) : "memory");
     }
 out_preempt:
     preempt_enable();
