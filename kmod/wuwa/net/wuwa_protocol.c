@@ -41,10 +41,12 @@ static int register_free_family(void) {
 
 int wuwa_proto_init(void) {
     int err = proto_register(&wuwa_proto, 1);
+    wuwa_info("proto_register -> %d\n", err);
     if (err)
         goto out;
 
     err = register_free_family();
+    wuwa_info("register_free_family -> %d\n", err);
     if (err)
         goto out_proto;
 
