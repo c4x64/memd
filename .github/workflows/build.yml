@@ -78,9 +78,15 @@ jobs:
             echo 'X(struct net_proto_family, family); X(struct net_proto_family, create); X(struct net_proto_family, owner);';
             echo 'X(struct dir_context, actor); X(struct dir_context, pos);';
           } > ./wuwa_offexp.c
-          KINC="-D__KERNEL__ -I$KDIR_RESOLVED/include -I$KDIR_RESOLVED/arch/arm64/include"
-          for KC in "$KDIR_RESOLVED/include/generated/autoconf.h" "$KDIR_RESOLVED/include/linux/kconfig.h"; do
-            [ -f "$KC" ] && KINC="$KINC -include $KC" && break
+          KINC=""
+          for HDR in "/opt/ddk/src/$IMG" "$KDIR_RESOLVED"; do
+            if [ -f "$HDR/include/net/sock.h" ]; then
+              KINC="-D__KERNEL__ -I$HDR/include -I$HDR/arch/arm64/include"
+              for KC in "$HDR/include/generated/autoconf.h" "$HDR/include/linux/kconfig.h"; do
+                [ -f "$KC" ] && KINC="$KINC -include $KC" && break
+              done
+              break
+            fi
           done
           (clang --target=aarch64-linux-gnu $KINC -c -o /tmp/wuwa_offexp.o wuwa_offexp.c || \
            aarch64-linux-gnu-gcc $KINC -c -o /tmp/wuwa_offexp.o wuwa_offexp.c) && \
