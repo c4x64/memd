@@ -171,6 +171,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu file
 
+      - name: Build finit-force helper (run.sh last-resort loader)
+        run: |
+          # -static-pie (NOT -static: non-PIE aborts on Android 12+).
+          aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o finit-force kmod/finit-force.c
+          file finit-force
+          cp finit-force dl/kmod/finit-force
+          ls -la dl/kmod/finit-force
+
       - name: Generate blobs + build packed binary
         run: |
           ls dl/kmod/ 2>/dev/null || ls dl/ 2>/dev/null
@@ -225,4 +233,5 @@ jobs:
           name: shell-bundle
           path: |
             dl/kmod/rwbridge-*.ko
+            dl/kmod/finit-force
             run.sh

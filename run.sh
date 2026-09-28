@@ -111,6 +111,12 @@ if [ -z "$KO" ]; then
 fi
 [ -n "$KO" ] || die "no artifact matches $KVER (need per-KMI build; see README)"
 log "artifact selected: $KO"
+# finit-force helper (version-magic override via raw finit_module: device
+# insmods have no -f). Side by side with this script when bundled.
+FFORCE=""
+for f in "${SCRIPT_DIR}/finit-force" "${SCRIPT_DIR}/kmod_bin/finit-force"; do
+    if [ -x "$f" ]; then FFORCE="$f"; break; fi
+done
 
 # CFI note: enforcing kernels are handled at runtime (cfi_bypass patches
 # the check functions after load). No separate artifact, no flavor switch.
@@ -476,12 +482,21 @@ if ! try_insmod; then
             # (runtime-adapted structs; matrix paths stay clean-only).
             case "$KO" in
                 *universal*)
-                    log "last resort: insmod -f (version-magic only)"
-                    sync 2>/dev/null
-                    if ! eval insmod -f '"$TMPKO"' 2>/dev/null; then
-                        dump_log "insmod-force"
-                        die "insmod failed even forced (see dmesg + $LASTLOG)"
+                    if [ -z "$FFORCE" ]; then
+                        dump_log "insmod-retry"
+                        die "insmod failed twice; no finit-force helper bundled (see README)"
                     fi
+                    log "last resort: finit-force (version-magic only)"
+                    sync 2>/dev/null
+                    FR=$($FFORCE "$TMPKO" 2>/dev/null)
+                    log "finit-force: $FR"
+                    case "$FR" in
+                        rc=0) ;;
+                        *)
+                            dump_log "insmod-force"
+                            die "insmod failed even forced ($FR; see dmesg + $LASTLOG)"
+                            ;;
+                    esac
                     ;;
                 *)
                     dump_log "insmod-retry"
@@ -494,12 +509,21 @@ if ! try_insmod; then
         # (often modversions without a tell); matrix dies clean.
         case "$KO" in
             *universal*)
-                log "no vermagic hint; last resort: insmod -f (version-magic only)"
-                sync 2>/dev/null
-                if ! eval insmod -f '"$TMPKO"' 2>/dev/null; then
-                    dump_log "insmod-force"
-                    die "insmod failed even forced (see dmesg + $LASTLOG)"
+                if [ -z "$FFORCE" ]; then
+                    dump_log "insmod"
+                    die "insmod failed; no finit-force helper bundled (see README)"
                 fi
+                log "no vermagic hint; last resort: finit-force (version-magic only)"
+                sync 2>/dev/null
+                FR=$($FFORCE "$TMPKO" 2>/dev/null)
+                log "finit-force: $FR"
+                case "$FR" in
+                    rc=0) ;;
+                    *)
+                        dump_log "insmod-force"
+                        die "insmod failed even forced ($FR; see dmesg + $LASTLOG)"
+                        ;;
+                esac
                 ;;
             *)
                 dump_log "insmod"

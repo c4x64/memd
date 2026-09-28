@@ -1,41 +1,42 @@
-# rwbridge — per-KMI memory R/W driver (ARM64 Android, 5.10+)
+# rwbridge — universal memory R/W driver (ARM64 Android, 5.10+)
 
-One packed deliverable (`rwbridge-spx`) carrying **8 per-generation
-artifacts**; the loader matches `uname -r` numerically and installs the
-right one. Driver core derived from fuqiuluo/android-wuwa (socket
-transport, page-table walk, phys R/W, kallsyms resolution, CFI-disable);
-inline hooks are permitted ONLY for the kernel display facility and
-process hiding (owner override, see below); procfs/dmabuf transports are
-excluded. Process hiding is implemented (VFS `iterate_shared` hook on
-`/proc`, best-effort, loud status) and proven live on Samsung 5.15
-(shell-blind, root-sees, clean uninstall + rmmod).
+One packed deliverable (`rwbridge-spx`) carrying **one universal image
+first, 8 per-generation artifacts as fallback**; the loader tries the
+universal image on every 5.10–6.12 kernel and falls back to the
+numerically matched per-KMI artifact. Driver core derived from
+fuqiuluo/android-wuwa (socket transport, page-table walk, phys R/W,
+kallsyms resolution, CFI-disable); inline hooks are permitted ONLY for
+the kernel display facility and process hiding (owner override, see
+below); procfs/dmabuf transports are excluded. Process hiding is
+implemented (VFS `iterate_shared` hook on `/proc`, best-effort, loud
+status) and proven live on Samsung 5.15 (shell-blind, root-sees, clean
+uninstall + rmmod).
 
-- **8 builds, 1 deliverable.** DDK matrix
-  (`android12-5.10`, `android13-5.10`, `android13-5.15`,
-  `android14-5.15`, `android14-6.1`, `android14-6.1-dbg`,
-  `android15-6.6`, `android16-6.12`); each artifact matches its own
-  generation's headers. The `-dbg` variant is a forensics build of the
-  6.1 artifact (debug info kept): never auto-selected, loaded only by
-  explicit `--ko a14-6.1-dbg` (SPX) or explicit path (run.sh).
+- **1 universal image, 8 fallback builds, 1 deliverable.** The universal
+  image is a 5.10-baseline build with zero version-conditional behavior:
+  no kprobe imports of any kind (vendor loaders reject GOT-page relocs
+  311/312 outright — the universal image has 0 such relocs by
+  construction), kallsyms via `/proc/kallsyms` self-parse, VMA walks via
+  `find_vma`, and the int/bool `filldir` ABIs coinciding. The DDK matrix
+  (`android12-5.10` … `android16-6.12`) builds the identical source per
+  generation — proving header-agnosticity on all 8 — and stays as
+  fallback. The `-dbg` variant is a forensics build of the 6.1 artifact
+  (debug info kept): never auto-selected, loaded only by explicit
+  `--ko a14-6.1-dbg` (SPX) or explicit path (run.sh).
   Vendor variance inside a generation (UTS suffixes) is absorbed by the
-  vermagic placeholder + install-time patch (dmesg-feedback retry).
-  Cross-generation attempts are refused outright (wrong structs would
-  mis-walk — strictly worse than not loading). No `--force`, ever.
+  vermagic placeholder + install-time patch (dmesg-feedback retry), with
+  finit_module version-magic override as last resort (universal + exact
+  matches only; signatures never overridable; Live+proto verify gates).
+  Cross-generation forced loads are refused outright (wrong structs
+  would mis-walk — strictly worse than not loading).
 - **CFI is handled at runtime**: `cfi_bypass()` patches the CFI check
-  functions after load (kallsyms-resolved, RET fill). No separate CFI
+  functions after load (/proc-resolved, RET fill). No separate CFI
   artifact, no flavor switch, no dispatch-slot surgery (matched builds
   need none).
-- **5.10/5.15 builds carry no kprobe trick** (`WUWA_NO_KPROBE_TRICK`):
-  vendor 5.x kernels neither export kprobes nor tolerate the weak
-  references (their loaders reject GOT-page relocs 311/312 outright —
-  proven on Samsung 5.15: `unsupported RELA relocation`). Plain R/W
-  needs no kallsyms and init fails soft per-op, so these load Live
-  where resolution is impossible. 6.x keeps the trick (GKI exports
-  kprobes; upstream loaders tolerate weak refs).
 - **Enforcing + 5.x is refused, never trapped**: SPX and run.sh read
-  `/proc/config.gz`; `CONFIG_CFI_CLANG=y` with a 5.x flavor is a NO-GO
-  (the bypass could never run there — a load would trap on first use).
-  Unknown config proceeds as before.
+  `/proc/config.gz`; `CONFIG_CFI_CLANG=y` with a 5.x kernel is a NO-GO
+  (the bypass writes kernel text: unverified on 5.x, panics under
+  RKP/KDP). Unknown config proceeds as before.
 - **OEM struct-module skew is fixed at install time**: some OEM kernels
   (proven: Samsung 5.15) ship a modified `struct module` whose .init/.exit
   sit at different offsets than upstream (Samsung +0x170/+0x348 vs
