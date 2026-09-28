@@ -11,7 +11,7 @@
 
 struct wuwa_sock;
 
-extern struct proto_ops wuwa_proto_ops;
+/* proto_ops is runtime-built (wuwa_netlayout.h); no static instance. */
 
 #define SOCK_OPT_SET_MODULE_VISIBLE 100
 

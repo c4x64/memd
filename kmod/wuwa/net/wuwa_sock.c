@@ -1,4 +1,7 @@
 #include "wuwa_sock.h"
+#include "wuwa_netlayout.h"
+
+#include <linux/string.h>
 #include "wuwa_region.h"
 #include <asm/pgalloc.h>
 #include <asm/pgtable-hwdef.h>
@@ -99,7 +102,8 @@ static int wuwa_socketpair(struct socket *sock1, struct socket *sock2)
 
 /* Old proto_ops.accept signature on all builds: this stub ignores its
  * args and returns -EOPNOTSUPP, so the 6.12 signature change (extra
- * wrapper struct) is behaviorally irrelevant — one image either way. */
+ * wrapper struct) is behaviorally irrelevant — one image either way.
+ * Stored as a raw pointer (no C-level conversion involved). */
 static int wuwa_accept(struct socket *sock, struct socket *newsock, int flags,
 		   bool kern)
 {
@@ -122,25 +126,54 @@ static int wuwa_mmap(struct file *file, struct socket *sock, struct vm_area_stru
 	return -ENODEV;
 }
 
-struct proto_ops wuwa_proto_ops = {
-    .family = PF_DECnet,
-    .owner = THIS_MODULE,
-    .release = wuwa_release,
-    .bind = wuwa_bind,
-    .connect = wuwa_connect,
-    .socketpair = wuwa_socketpair,
-    /* Explicit cast: 6.12 headers type this field with the new wrapper
-     * struct; the stub ignores its args, so the old signature is
-     * behaviorally identical on every kernel (see wuwa_accept). */
-    .accept = (void *)wuwa_accept,
-    .getname = wuwa_getname,
-    .poll = wuwa_poll,
-    .ioctl = wuwa_ioctl,
-    .listen = wuwa_listen,
-    .shutdown = wuwa_shutdown,
-    .setsockopt = wuwa_setsockopt,
-    .getsockopt = wuwa_getsockopt,
-    .sendmsg = wuwa_sendmsg,
-    .recvmsg = wuwa_recvmsg,
-    .mmap = wuwa_mmap,
-};
+/* Runtime-built struct proto_ops (see wuwa_netlayout.h): per-gen slot
+ * layouts differ (5.10 lacks owner; 6.12 retypes accept), so the 15
+ * callbacks + owner are stored at the RUNNING kernel's offsets into a
+ * max-size zeroed buffer. family (offset 0 everywhere, asserted) is set
+ * separately once the free family is known. */
+static unsigned char wuwa_ops_buf[WUWA_OPS_BUF];
+
+struct proto_ops *wuwa_ops_ptr(void)
+{
+    return (struct proto_ops *)wuwa_ops_buf;
+}
+
+static void wuwa_put64(int off, unsigned long v)
+{
+    unsigned long x = v;
+    memcpy(wuwa_ops_buf + off, &x, 8);
+}
+
+int wuwa_build_ops(void)
+{
+    int g = wuwa_net_gen();
+    const struct wuwa_ops_off *o;
+    if (g < 0)
+        return -1;
+    o = &wuwa_ops_offs[g];
+    memset(wuwa_ops_buf, 0, sizeof(wuwa_ops_buf));
+    if (o->owner >= 0)
+        wuwa_put64(o->owner, (unsigned long)THIS_MODULE);
+    wuwa_put64(o->release, (unsigned long)wuwa_release);
+    wuwa_put64(o->bind, (unsigned long)wuwa_bind);
+    wuwa_put64(o->connect, (unsigned long)wuwa_connect);
+    wuwa_put64(o->socketpair, (unsigned long)wuwa_socketpair);
+    wuwa_put64(o->accept, (unsigned long)wuwa_accept);
+    wuwa_put64(o->getname, (unsigned long)wuwa_getname);
+    wuwa_put64(o->poll, (unsigned long)wuwa_poll);
+    wuwa_put64(o->ioctl, (unsigned long)wuwa_ioctl);
+    wuwa_put64(o->listen, (unsigned long)wuwa_listen);
+    wuwa_put64(o->shutdown, (unsigned long)wuwa_shutdown);
+    wuwa_put64(o->setsockopt, (unsigned long)wuwa_setsockopt);
+    wuwa_put64(o->getsockopt, (unsigned long)wuwa_getsockopt);
+    wuwa_put64(o->sendmsg, (unsigned long)wuwa_sendmsg);
+    wuwa_put64(o->recvmsg, (unsigned long)wuwa_recvmsg);
+    wuwa_put64(o->mmap, (unsigned long)wuwa_mmap);
+    return 0;
+}
+
+void wuwa_ops_set_family(int family)
+{
+    int f = family;
+    memcpy(wuwa_ops_buf, &f, 4);
+}
