@@ -67,17 +67,17 @@ jobs:
           ls "$KDIR_RESOLVED" | head -20
           # Exact layout export: compile a TU whose array sizes ARE the
           # offsetof values, then read them with nm. No header parsing.
-          cat > ./wuwa_offexp.c <<'EOF'
-#include <net/sock.h>
-#include <linux/net.h>
-#include <linux/fs.h>
-#define X(s, m) char _w_##m[(unsigned)__builtin_offsetof(s, m) + 1]
-X(struct proto, obj_size); X(struct proto, slab); X(struct proto, name);
-X(struct proto, slab_flags); X(struct proto, max_header); X(struct proto, no_autobind);
-X(struct proto_ops, release); X(struct proto_ops, mmap);
-X(struct net_proto_family, family); X(struct net_proto_family, create); X(struct net_proto_family, owner);
-X(struct dir_context, actor); X(struct dir_context, pos);
-EOF
+          {
+            echo '#include <net/sock.h>';
+            echo '#include <linux/net.h>';
+            echo '#include <linux/fs.h>';
+            echo '#define X(s, m) char _w_##m[(unsigned)__builtin_offsetof(s, m) + 1]';
+            echo 'X(struct proto, obj_size); X(struct proto, slab); X(struct proto, name);';
+            echo 'X(struct proto, slab_flags); X(struct proto, max_header); X(struct proto, no_autobind);';
+            echo 'X(struct proto_ops, release); X(struct proto_ops, mmap);';
+            echo 'X(struct net_proto_family, family); X(struct net_proto_family, create); X(struct net_proto_family, owner);';
+            echo 'X(struct dir_context, actor); X(struct dir_context, pos);';
+          } > ./wuwa_offexp.c
           KINC="-D__KERNEL__ -I$KDIR_RESOLVED/include -I$KDIR_RESOLVED/arch/arm64/include -include $KDIR_RESOLVED/include/linux/kconfig.h"
           (clang --target=aarch64-linux-gnu $KINC -c -o /tmp/wuwa_offexp.o wuwa_offexp.c 2>/dev/null || \
            aarch64-linux-gnu-gcc $KINC -c -o /tmp/wuwa_offexp.o wuwa_offexp.c 2>/dev/null) && \
