@@ -9,11 +9,14 @@
 
 /* printk ABI pin: 5.10-baseline headers emit a direct printk reference,
  * but some vendor kernels (proven: Samsung 5.15) export only _printk
- * (5.15+ headers emit that form). Redirect every printk call site to
- * _printk: present in the 5.10 baseline map (CI-gated above) and on all
- * newer targets (proven by the matrix builds, which already import it).
- * Same signature family — behavior-identical. */
+ * (5.15+ headers emit that form via their own macro, skipped here).
+ * Redirect every printk call site to _printk: present in the 5.10
+ * baseline map (CI-gated above) and on all newer targets (proven by
+ * the matrix builds, which already import it). Same signature family
+ * — behavior-identical. */
+#ifndef printk
 #define printk _printk
+#endif
 
 #define WUWA_LOG_PREFIX "[wuwa] "
 #define wuwa_info(fmt, ...) pr_info(WUWA_LOG_PREFIX fmt, ##__VA_ARGS__)
