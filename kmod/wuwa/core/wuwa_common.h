@@ -7,6 +7,14 @@
 #include <net/sock.h>
 #include "wuwa_utils.h"
 
+/* printk ABI pin: 5.10-baseline headers emit a direct printk reference,
+ * but some vendor kernels (proven: Samsung 5.15) export only _printk
+ * (5.15+ headers emit that form). Redirect every printk call site to
+ * _printk: present in the 5.10 baseline map (CI-gated above) and on all
+ * newer targets (proven by the matrix builds, which already import it).
+ * Same signature family — behavior-identical. */
+#define printk _printk
+
 #define WUWA_LOG_PREFIX "[wuwa] "
 #define wuwa_info(fmt, ...) pr_info(WUWA_LOG_PREFIX fmt, ##__VA_ARGS__)
 #define wuwa_warn(fmt, ...) pr_warn(WUWA_LOG_PREFIX fmt, ##__VA_ARGS__)

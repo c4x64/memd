@@ -57,6 +57,10 @@ def main():
             exported.add(m.group(1))
     if not exported:
         die("empty System.map?")
+    # Universal image only: _printk must exist in the BASELINE map (all
+    # printk calls redirect to it — Samsung 5.15 strips printk itself).
+    if kmi == "universal" and "_printk" not in exported:
+        die("baseline map lacks _printk (printk redirect unsafe)")
     # vermagic placeholder must fit the longest real targets: UTS part
     # (after 'vermagic=' up to first space) needs room (~55+ chars).
     # Baked short + runtime-long target = unpatchable = NO-GO at install.

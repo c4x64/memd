@@ -776,10 +776,27 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
 
     /* find_vma() is stable + exported on 5.10 through 6.12 (list walk
      * below, maple walk above): mm->mmap / vma_iterator would pin the
-     * image to one side of 6.1. */
-    for (addr = 0; (vma = find_vma(mm, addr)) != NULL; addr = vma->vm_end) {
-        if (addr >= vma->vm_end)
-            break; /* wrapped or stuck: never spin */
+     * image to one side of 6.1. The name differs by generation
+     * (find_vma vs __find_vma): resolve both at runtime. */
+    {
+        static struct vm_area_struct *(*vma_find)(struct mm_struct *,
+                                                  unsigned long) = NULL;
+        static bool vma_probed = false;
+        if (!vma_probed) {
+            vma_probed = true;
+            vma_find = (void *)kallsyms_lookup_name_ex("find_vma");
+            if (!vma_find)
+                vma_find = (void *)kallsyms_lookup_name_ex("__find_vma");
+        }
+        if (!vma_find) {
+            MM_READ_UNLOCK(mm);
+            mmput(mm);
+            return 0;
+        }
+        for (addr = 0; (vma = vma_find(mm, addr)) != NULL;
+             addr = vma->vm_end) {
+            if (addr >= vma->vm_end)
+                break; /* wrapped or stuck: never spin */
         if (vma->vm_file) {
             if (vm_flag && !(vma->vm_flags & vm_flag)) {
                 continue;
@@ -790,6 +807,7 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
                 result = vma->vm_start;
                 goto ret;
             }
+        }
         }
     }
 
