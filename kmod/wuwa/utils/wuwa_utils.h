@@ -54,6 +54,9 @@ int translate_process_vaddr(pid_t pid, uintptr_t vaddr, uintptr_t* paddr_out);
 
 unsigned long kallsyms_lookup_name_ex(const char* symbol_name);
 
+/* pfn_valid without the import (see wuwa_utils.c for the chain). */
+int wuwa_pfn_ok(unsigned long pfn);
+
 struct task_struct* get_target_task(pid_t pid);
 
 void compare_pt_regs(struct pt_regs* regs1, struct pt_regs* regs2);

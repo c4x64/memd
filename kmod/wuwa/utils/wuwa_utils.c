@@ -160,6 +160,31 @@ unsigned long kallsyms_lookup_name_ex(const char* name) {
     return wuwa_kallsyms(name);
 }
 
+/* wuwa_pfn_ok: pfn_valid without the import. 5.10-baseline headers emit a
+ * real pfn_valid call, but some vendor kernels (proven: Samsung 5.15) do
+ * not export it. Chain: the kernel's own function via runtime parse
+ * (exact semantics) -> max_pfn variable via parse (bound) -> top bound
+ * (callers additionally enforce DRAM-range + page-walk validation, so
+ * the bound can only over-approximate holes, never grant bad access). */
+static int (*wuwa_pfn_valid_fn)(unsigned long) = NULL;
+static unsigned long *wuwa_max_pfn_ptr;
+static bool wuwa_pfn_probed;
+
+int wuwa_pfn_ok(unsigned long pfn) {
+    if (!wuwa_pfn_probed) {
+        wuwa_pfn_probed = true;
+        wuwa_pfn_valid_fn =
+            (int (*)(unsigned long))wuwa_kallsyms("pfn_valid");
+        wuwa_max_pfn_ptr =
+            (unsigned long *)wuwa_kallsyms("max_pfn");
+    }
+    if (wuwa_pfn_valid_fn)
+        return wuwa_pfn_valid_fn(pfn);
+    if (wuwa_max_pfn_ptr)
+        return pfn < READ_ONCE(*wuwa_max_pfn_ptr);
+    return pfn < ((64UL << 30) >> PAGE_SHIFT);
+}
+
 struct task_struct* get_target_task(pid_t pid) {
     struct pid* pid_struct = find_get_pid(pid);
     if (!pid_struct) {

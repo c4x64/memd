@@ -37,6 +37,8 @@ static const char *wuwa_wanted[] = {
     "__ubsan_handle_cfi_check_fail_abort",
     "__ubsan_handle_cfi_check_fail",
     "kallsyms_lookup_name",
+    "pfn_valid",
+    "max_pfn",
 };
 
 #define WUWA_NWANT (sizeof(wuwa_wanted) / sizeof(wuwa_wanted[0]))

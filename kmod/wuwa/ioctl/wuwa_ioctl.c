@@ -474,7 +474,7 @@ int do_read_physical_memory(struct socket* sock, void __user* arg) {
     }
 
     pa = cmd.phy_addr;
-    if (!pa || !pfn_valid(__phys_to_pfn(pa)) || !IS_VALID_PHYS_ADDR_RANGE(pa, cmd.size)) {
+    if (!pa || !wuwa_pfn_ok(__phys_to_pfn(pa)) || !IS_VALID_PHYS_ADDR_RANGE(pa, cmd.size)) {
         return -EFAULT;
     }
 
@@ -547,7 +547,7 @@ int do_write_physical_memory(struct socket* sock, void __user* arg) {
     }
 
     pa = cmd.phy_addr;
-    if (!pa || !pfn_valid(__phys_to_pfn(pa)) || !IS_VALID_PHYS_ADDR_RANGE(pa, cmd.size)) {
+    if (!pa || !wuwa_pfn_ok(__phys_to_pfn(pa)) || !IS_VALID_PHYS_ADDR_RANGE(pa, cmd.size)) {
         return -EFAULT;
     }
 
@@ -771,7 +771,7 @@ int do_read_physical_memory_ioremap(struct socket* sock, void* arg) {
 
     // Map and read physical memory
     pa = cmd.phy_addr;
-    if (!pa || !pfn_valid(__phys_to_pfn(pa))) {
+    if (!pa || !wuwa_pfn_ok(__phys_to_pfn(pa))) {
         return -EFAULT;
     }
 
@@ -826,7 +826,7 @@ int do_write_physical_memory_ioremap(struct socket* sock, void* arg) {
 
     // Map and read physical memory
     pa = cmd.phy_addr;
-    if (!pa || !pfn_valid(__phys_to_pfn(pa))) {
+    if (!pa || !wuwa_pfn_ok(__phys_to_pfn(pa))) {
         return -EFAULT;
     }
 

@@ -95,8 +95,12 @@ int wuwa_decon_probe(void)
 
     /* Readback sanity: two words must be neither all-0 nor all-1
      * (wrong mapping or gated controller). */
-    probe0 = readl(g_decon.regs);
-    probe1 = readl(g_decon.regs + 4);
+    /* __raw_readl (not readl): the traced MMIO wrappers pull
+     * version-specific trace imports (__log_read_mmio on some baselines,
+     * log_read_mmio on others). Raw access + explicit barriers is stable
+     * on every baseline and correct for probe reads. */
+    probe0 = __raw_readl(g_decon.regs);
+    probe1 = __raw_readl(g_decon.regs + 4);
     if ((probe0 == 0 && probe1 == 0) ||
         (probe0 == 0xFFFFFFFFu && probe1 == 0xFFFFFFFFu)) {
         iounmap(g_decon.regs);
