@@ -65,6 +65,13 @@ jobs:
           [ -d "$KDIR_RESOLVED" ] || { echo "FATAL: no kdir for $IMG (KERNEL_SRC=$KERNEL_SRC)"; ls /opt/ddk/kdir/; exit 1; }
           echo "kdir=$KDIR_RESOLVED"
           ls "$KDIR_RESOLVED" | head -20
+          # Header forensics (universal investigation): dump struct proto /
+          # proto_ops / net_proto_family field order per generation so
+          # layout deltas across baselines are visible in CI logs.
+          echo "=== struct proto fields ($IMG) ==="
+          awk '/^struct proto {/,/^};/' "$KDIR_RESOLVED/include/net/sock.h" | grep -E "^\s+(__u8|__u16|__u32|unsigned|int|bool|void|char|struct|const|size_t|refcount_t|atomic_t|spinlock_t|rwlock_t|struct mutex|possible_net_t)" | head -50
+          echo "=== struct proto_ops accept field ($IMG) ==="
+          grep -n "accept" "$KDIR_RESOLVED/include/linux/net.h" | head -5
           NM_BIN=""; for t in llvm-nm aarch64-linux-gnu-nm nm; do command -v $t >/dev/null 2>&1 && { NM_BIN=$t; break; }; done
           OBJCOPY_BIN=""; for t in llvm-objcopy aarch64-linux-gnu-objcopy objcopy; do command -v $t >/dev/null 2>&1 && { OBJCOPY_BIN=$t; break; }; done
           echo "$OBJCOPY_BIN" > "$GITHUB_WORKSPACE/.objcopy"
