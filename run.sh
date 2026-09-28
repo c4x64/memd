@@ -301,10 +301,11 @@ tm_sec() {
     done
     return 1
 }
-# tm_scan FILE MODE — this_module init/exit relocs.
-# MODE=ref (vendor .ko): match by SYMBOL NAME, print "INITOFF EXITOFF".
-# MODE=self (our artifact): match by upstream r_offset VALUE (376/888),
-#   print "POS1 POS2" (file positions of those r_offset fields for w64le).
+# tm_scan FILE — this_module init/exit relocs, matched by SYMBOL NAME
+# (init_module/cleanup_module via symtab+strtab, never by hardcoded
+# offset value: baseline layouts differ, and value-matching rewrites
+# unrelated relocs on non-matching images — a wild init jump panics).
+# Prints "POS1 POS2" (file positions of those r_offset fields for w64le).
 # Prints nothing + nonzero exit when unparseable.
 tm_scan() {
     _ri=$(tm_sec "$1" .rela.gnu.linkonce.this_module) || return 1
@@ -314,23 +315,18 @@ tm_scan() {
     _sy=$(r64le "$1" $((_es + _li * 64 + 24)))
     _si=$(r32le "$1" $((_es + _li * 64 + 40)))
     _st=$(r64le "$1" $((_es + _si * 64 + 24)))
-    _a=""; _b=""
+    _ip=""; _iv=""; _ep=""; _ev=""
     _e=0
     while [ "$_e" -lt "$_rz" ]; do
         _p=$((_ro + _e))
         _r=$(r64le "$1" $_p); _hi=$(r32le "$1" $(($_p + 12)))
-        if [ "$2" = "ref" ]; then
-            _nm=$(read_cstr "$1" $(($_st + $(r32le "$1" $(($_sy + _hi * 24))))) 2>/dev/null)
-            [ "$_nm" = "init_module" ] && _a=$_r
-            [ "$_nm" = "cleanup_module" ] && _b=$_r
-        else
-            [ "$_r" = "376" ] && _a=$_p
-            [ "$_r" = "888" ] && _b=$_p
-        fi
+        _nm=$(read_cstr "$1" $(($_st + $(r32le "$1" $(($_sy + _hi * 24))))) 2>/dev/null)
+        if [ "$_nm" = "init_module" ]; then _ip=$_p; _iv=$_r; fi
+        if [ "$_nm" = "cleanup_module" ]; then _ep=$_p; _ev=$_r; fi
         _e=$((_e + 24))
     done
-    [ -n "$_a" ] && [ -n "$_b" ] || return 1
-    echo "$_a $_b"
+    [ -n "$_ip" ] && [ -n "$_ep" ] || return 1
+    echo "$_ip $_iv $_ep $_ev"
 }
 # learn_layout — set L_INIT/L_EXIT from the first parseable on-device
 # vendor .ko (symbol-matched, never hardcoded). Empty when none found
@@ -343,10 +339,10 @@ learn_layout() {
         for k in "$d"/*.ko; do
             [ -f "$k" ] || continue
             cp -f "$k" /data/local/tmp/rwref.ko 2>/dev/null || continue
-            _lr=$(tm_scan /data/local/tmp/rwref.ko ref 2>/dev/null)
+            _lr=$(tm_scan /data/local/tmp/rwref.ko 2>/dev/null)
             rm -f /data/local/tmp/rwref.ko 2>/dev/null
             if [ -n "$_lr" ]; then
-                L_INIT=${_lr%% *}; L_EXIT=${_lr##* }
+                L_INIT=$(echo "$_lr" | cut -d" " -f2); L_EXIT=$(echo "$_lr" | cut -d" " -f4)
                 log "layout: vendor reference init=+0x$(printf %x "$L_INIT") exit=+0x$(printf %x "$L_EXIT")"
                 return 0
             fi
@@ -359,9 +355,9 @@ learn_layout() {
 # (upstream +0x178/+0x378) to the learned target. No-op when unparseable.
 shift_layout() {
     [ -n "$L_INIT" ] || return 0
-    _sp=$(tm_scan "$1" self 2>/dev/null) || return 0
-    w64le "$1" ${_sp%% *} "$L_INIT" || return 1
-    w64le "$1" ${_sp##* } "$L_EXIT" || return 1
+    _sp=$(tm_scan "$1" 2>/dev/null) || return 0
+    w64le "$1" $(echo "$_sp" | cut -d" " -f1) "$L_INIT" || return 1
+    w64le "$1" $(echo "$_sp" | cut -d" " -f3) "$L_EXIT" || return 1
     log "layout: init/exit relocs shifted to +0x$(printf %x "$L_INIT")/+0x$(printf %x "$L_EXIT")"
 }
 patch_vermagic() {

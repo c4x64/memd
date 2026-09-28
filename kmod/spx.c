@@ -455,7 +455,11 @@ static int vendor_tm_offsets(unsigned long *init_off, unsigned long *exit_off)
 }
 
 /* rewrite our work buffer's init/exit reloc offsets to the target's.
- * 0 ok (shifted or already matching), -1 our blob unparseable. */
+ * Relocs are matched by SYMBOL NAME (init_module/cleanup_module via
+ * symtab+strtab), never by hardcoded offset value: baseline layouts
+ * differ, and value-matching rewrites unrelated relocs on non-matching
+ * images (a wild init jump panics). 0 ok (shifted or already matching),
+ * -1 our blob unparseable. */
 static int shift_tm_relocs(unsigned char *d, long n, unsigned long init_off,
                            unsigned long exit_off)
 {
@@ -464,6 +468,7 @@ static int shift_tm_relocs(unsigned char *d, long n, unsigned long init_off,
     long roff, rsz;
     long e;
     int found = 0;
+    long symoff = 0, stroff = 0;
     if (n < 64 || memcmp(d, "\x7f" "ELF", 4) || d[4] != 2 || d[5] != 1)
         return -1;
     shoff = (long)rd64le(d + 40);
@@ -477,15 +482,42 @@ static int shift_tm_relocs(unsigned char *d, long n, unsigned long init_off,
     rsz = (long)rd64le(d + shoff + (long)ri * 64 + 32);
     if (roff <= 0 || roff + rsz > n || rsz % 24)
         return -1;
-    /* Our DDK builds pin init/exit relocs at upstream offsets
-     * (+0x178/+0x378, verified across the matrix); rewrite to target's.
-     * Anything else found -> leave untouched (fail closed below). */
+    {
+        /* rela sh_link = symtab; symtab sh_link = strtab */
+        long li = (long)(d[shoff + (long)ri * 64 + 40] |
+                         ((long)d[shoff + (long)ri * 64 + 41] << 8) |
+                         ((long)d[shoff + (long)ri * 64 + 42] << 16) |
+                         ((long)d[shoff + (long)ri * 64 + 43] << 24));
+        long stri;
+        if (li <= 0 || li >= shnum)
+            return -1;
+        symoff = (long)rd64le(d + shoff + li * 64 + 24);
+        if (symoff <= 0 || symoff > n)
+            return -1;
+        stri = (long)(d[shoff + li * 64 + 40] |
+                      ((long)d[shoff + li * 64 + 41] << 8) |
+                      ((long)d[shoff + li * 64 + 42] << 16) |
+                      ((long)d[shoff + li * 64 + 43] << 24));
+        if (stri <= 0 || stri >= shnum)
+            return -1;
+        stroff = (long)rd64le(d + shoff + stri * 64 + 24);
+        if (stroff <= 0 || stroff > n)
+            return -1;
+    }
     for (e = roff; e + 24 <= roff + rsz; e += 24) {
-        unsigned long r_off = rd64le(d + e);
-        if (r_off == 0x178) {
+        unsigned long sym = (unsigned long)(rd64le(d + e + 8) >> 32);
+        unsigned long noff;
+        const char *name;
+        if (sym > 1000000 || symoff + (long)sym * 24 + 24 > n)
+            continue;
+        noff = (unsigned long)rd64le(d + symoff + (long)sym * 24);
+        if (noff > 1000000 || stroff + (long)noff >= n)
+            continue;
+        name = (const char *)(d + stroff + (long)noff);
+        if (!strcmp(name, "init_module")) {
             wr64le(d + e, init_off);
             found++;
-        } else if (r_off == 0x378) {
+        } else if (!strcmp(name, "cleanup_module")) {
             wr64le(d + e, exit_off);
             found++;
         }
