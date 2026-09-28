@@ -79,8 +79,8 @@ jobs:
             echo 'X(struct dir_context, actor); X(struct dir_context, pos);';
           } > ./wuwa_offexp.c
           KINC="-D__KERNEL__ -I$KDIR_RESOLVED/include -I$KDIR_RESOLVED/arch/arm64/include -include $KDIR_RESOLVED/include/linux/kconfig.h"
-          (clang --target=aarch64-linux-gnu $KINC -c -o /tmp/wuwa_offexp.o wuwa_offexp.c 2>/dev/null || \
-           aarch64-linux-gnu-gcc $KINC -c -o /tmp/wuwa_offexp.o wuwa_offexp.c 2>/dev/null) && \
+          (clang --target=aarch64-linux-gnu $KINC -c -o /tmp/wuwa_offexp.o wuwa_offexp.c || \
+           aarch64-linux-gnu-gcc $KINC -c -o /tmp/wuwa_offexp.o wuwa_offexp.c) && \
             $NM_BIN -S /tmp/wuwa_offexp.o 2>/dev/null | grep _w_ | head -20 || \
             echo "offexp compile unavailable"
           rm -f wuwa_offexp.c /tmp/wuwa_offexp.o
