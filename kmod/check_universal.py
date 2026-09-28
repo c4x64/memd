@@ -94,6 +94,24 @@ def main():
             cfi_bad.append(sym)
     if cfi_bad:
         die("CFI imports in artifact: " + " ".join(sorted(set(cfi_bad))))
+    # Universal image only: deny imports that vendor kernels strip even
+    # when GKI exports them (proven on Samsung 5.15). pfn_valid goes
+    # through wuwa_pfn_ok (runtime chain); MMIO uses volatile access;
+    # kprobes must never appear (loader-rejected GOT relocs).
+    if kmi == "universal":
+        denied = {"pfn_valid", "__log_read_mmio", "__log_post_read_mmio",
+                  "register_kprobe", "unregister_kprobe",
+                  "kallsyms_lookup_name"}
+        found = []
+        for line in open(undef_path):
+            sym = line.split()
+            if not sym:
+                continue
+            sym = sym[-1].split('.')[0]
+            if sym in denied:
+                found.append(sym)
+        if found:
+            die("universal-denied imports: " + " ".join(sorted(set(found))))
     print("KMI %s checks passed" % kmi)
 
 

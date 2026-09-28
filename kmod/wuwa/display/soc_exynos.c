@@ -19,6 +19,7 @@
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/types.h>
 #include <linux/io.h>
 #include <linux/string.h>
 #include <linux/dma-mapping.h>
@@ -95,12 +96,15 @@ int wuwa_decon_probe(void)
 
     /* Readback sanity: two words must be neither all-0 nor all-1
      * (wrong mapping or gated controller). */
-    /* __raw_readl (not readl): the traced MMIO wrappers pull
+    /* Volatile dereference (not readl/__raw_readl): MMIO wrappers pull
      * version-specific trace imports (__log_read_mmio on some baselines,
-     * log_read_mmio on others). Raw access + explicit barriers is stable
-     * on every baseline and correct for probe reads. */
-    probe0 = __raw_readl(g_decon.regs);
-    probe1 = __raw_readl(g_decon.regs + 4);
+     * log_read_mmio on others) that vendor kernels may not export. A
+     * volatile load + dsb is stable on every baseline and correct for
+     * probe reads. */
+    probe0 = *(volatile __u32 *)g_decon.regs;
+    asm volatile("dsb ish" ::: "memory");
+    probe1 = *(volatile __u32 *)(g_decon.regs + 4);
+    asm volatile("dsb ish" ::: "memory");
     if ((probe0 == 0 && probe1 == 0) ||
         (probe0 == 0xFFFFFFFFu && probe1 == 0xFFFFFFFFu)) {
         iounmap(g_decon.regs);
