@@ -65,16 +65,21 @@ jobs:
           [ -d "$KDIR_RESOLVED" ] || { echo "FATAL: no kdir for $IMG (KERNEL_SRC=$KERNEL_SRC)"; ls /opt/ddk/kdir/; exit 1; }
           echo "kdir=$KDIR_RESOLVED"
           ls "$KDIR_RESOLVED" | head -20
-          # Header forensics (universal investigation): dump struct proto /
-          # proto_ops / net_proto_family field order per generation so
-          # layout deltas across baselines are visible in CI logs.
-          # (Sources live under /opt/ddk/src, not the kdir build link.)
+          # Header forensics (universal runtime-build tables): dump the
+          # kernel-consumed struct layouts per generation so field offsets
+          # can be computed for the runtime-constructed tables. Full
+          # structs, no truncation. (Sources live under /opt/ddk/src,
+          # not the kdir build link.)
           for HDR in "/opt/ddk/src/$IMG" "$KDIR_RESOLVED"; do
             if [ -f "$HDR/include/net/sock.h" ]; then
-              echo "=== struct proto fields ($IMG <- $HDR) ==="
-              awk '/^struct proto {/,/^};/' "$HDR/include/net/sock.h" | grep -E "^\s+[A-Za-z_]" | head -60
-              echo "=== accept field ($IMG) ==="
-              grep -n "accept" "$HDR/include/linux/net.h" | head -5
+              echo "=== FULL struct proto ($IMG) ==="
+              awk '/^struct proto {/,/^};/' "$HDR/include/net/sock.h"
+              echo "=== FULL struct proto_ops ($IMG) ==="
+              awk '/^struct proto_ops {/,/^};/' "$HDR/include/linux/net.h"
+              echo "=== FULL struct net_proto_family ($IMG) ==="
+              awk '/^struct net_proto_family {/,/^};/' "$HDR/include/linux/net.h"
+              echo "=== FULL struct dir_context ($IMG) ==="
+              awk '/^struct dir_context {/,/^};/' "$HDR/include/linux/fs.h"
               break
             fi
           done
