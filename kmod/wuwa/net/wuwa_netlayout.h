@@ -224,10 +224,10 @@ static const struct wuwa_ops_off wuwa_ops_offs[WUWA_GEN_N] = {
 /* Resolve the running kernel to a generation index, or -1. */
 int wuwa_net_gen(void);
 
-/* Build registration structs into the given zeroed buffers.
+/* Build registration structs into the internal static buffers.
  * Returns 0 ok, -1 unknown generation (caller refuses init). */
-int wuwa_build_proto(void *buf);
-int wuwa_build_ops(void *buf);
+int wuwa_build_proto(void);
+int wuwa_build_ops(void);
 void wuwa_ops_set_family(int family);
 struct proto_ops *wuwa_ops_ptr(void);
 struct proto *wuwa_proto_ptr(void);
