@@ -65,6 +65,25 @@ jobs:
           [ -d "$KDIR_RESOLVED" ] || { echo "FATAL: no kdir for $IMG (KERNEL_SRC=$KERNEL_SRC)"; ls /opt/ddk/kdir/; exit 1; }
           echo "kdir=$KDIR_RESOLVED"
           ls "$KDIR_RESOLVED" | head -20
+          # Exact layout export: compile a TU whose array sizes ARE the
+          # offsetof values, then read them with nm. No header parsing.
+          cat > ./wuwa_offexp.c <<'EOF'
+#include <net/sock.h>
+#include <linux/net.h>
+#include <linux/fs.h>
+#define X(s, m) char _w_##m[(unsigned)__builtin_offsetof(s, m) + 1]
+X(struct proto, obj_size); X(struct proto, slab); X(struct proto, name);
+X(struct proto, slab_flags); X(struct proto, max_header); X(struct proto, no_autobind);
+X(struct proto_ops, release); X(struct proto_ops, mmap);
+X(struct net_proto_family, family); X(struct net_proto_family, create); X(struct net_proto_family, owner);
+X(struct dir_context, actor); X(struct dir_context, pos);
+EOF
+          KINC="-D__KERNEL__ -I$KDIR_RESOLVED/include -I$KDIR_RESOLVED/arch/arm64/include -include $KDIR_RESOLVED/include/linux/kconfig.h"
+          (clang --target=aarch64-linux-gnu $KINC -c -o /tmp/wuwa_offexp.o wuwa_offexp.c 2>/dev/null || \
+           aarch64-linux-gnu-gcc $KINC -c -o /tmp/wuwa_offexp.o wuwa_offexp.c 2>/dev/null) && \
+            $NM_BIN -S /tmp/wuwa_offexp.o 2>/dev/null | grep _w_ | head -20 || \
+            echo "offexp compile unavailable"
+          rm -f wuwa_offexp.c /tmp/wuwa_offexp.o
           # Header forensics (universal runtime-build tables): dump the
           # kernel-consumed struct layouts per generation so field offsets
           # can be computed for the runtime-constructed tables. Full

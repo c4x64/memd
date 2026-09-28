@@ -38,9 +38,10 @@ int wuwa_build_proto(void)
     o = &wuwa_proto_offs[g];
     memset(wuwa_proto_buf, 0, sizeof(wuwa_proto_buf));
     memcpy(wuwa_proto_buf + o->name, "NFC_LLCP", 9);
-    if (o->has_owner)
-        memcpy(wuwa_proto_buf + o->owner, &THIS_MODULE,
-               sizeof(THIS_MODULE));
+    if (o->has_owner) {
+        struct module *owner = THIS_MODULE;
+        memcpy(wuwa_proto_buf + o->owner, &owner, sizeof(owner));
+    }
     obj_size = (unsigned int)sizeof(struct wuwa_sock);
     memcpy(wuwa_proto_buf + o->obj_size, &obj_size, sizeof(obj_size));
     return 0;
