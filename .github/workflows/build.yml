@@ -72,6 +72,11 @@ jobs:
             echo '#include <net/sock.h>';
             echo '#include <linux/net.h>';
             echo '#include <linux/fs.h>';
+            echo '#include <linux/sched.h>';
+            echo '#include <linux/mm.h>';
+            echo '#include <linux/dcache.h>';
+            echo '#include <linux/cred.h>';
+            echo '#include <linux/utsname.h>';
             echo '#define X(p, s, m) __attribute__((used, retain)) char _w_##p##_##m[(unsigned)__builtin_offsetof(s, m) + 1]';
             echo 'X(p, struct proto, obj_size); X(p, struct proto, slab); X(p, struct proto, name); X(p, struct proto, owner); X(p, struct proto, slab_flags); X(p, struct proto, max_header);';
             echo 'X(p, struct proto, useroffset); X(p, struct proto, usersize); X(p, struct proto, orphan_count); X(p, struct proto, rsk_prot); X(p, struct proto, twsk_prot); X(p, struct proto, node); X(p, struct proto, diag_destroy);';
@@ -82,6 +87,14 @@ jobs:
             echo 'X(o, struct proto_ops, release); X(o, struct proto_ops, mmap); X(o, struct proto_ops, accept); X(o, struct proto_ops, owner); X(o, struct proto_ops, family);';
             echo 'X(f, struct net_proto_family, family); X(f, struct net_proto_family, create); X(f, struct net_proto_family, owner);';
             echo 'X(d, struct dir_context, actor); X(d, struct dir_context, pos);';
+            echo 'X(u, struct new_utsname, sysname); X(u, struct new_utsname, nodename); X(u, struct new_utsname, release); X(u, struct new_utsname, machine);';
+            echo 'X(t, struct task_struct, mm); X(t, struct task_struct, comm); X(t, struct task_struct, pid); X(t, struct task_struct, tgid); X(t, struct task_struct, cred); X(t, struct task_struct, real_parent); X(t, struct task_struct, prio);';
+            echo 'X(c, struct cred, uid);';
+            echo 'X(m, struct mm_struct, pgd); X(m, struct mm_struct, arg_start); X(m, struct mm_struct, arg_end); X(m, struct mm_struct, mmap);';
+            echo 'X(v, struct vm_area_struct, vm_start); X(v, struct vm_area_struct, vm_end); X(v, struct vm_area_struct, vm_file); X(v, struct vm_area_struct, vm_flags); X(v, struct vm_area_struct, vm_next);';
+            echo 'X(e, struct dentry, d_name);';
+            echo 'X(fl, struct file, f_op); X(fl, struct file, f_path);';
+            echo 'X(fo, struct file_operations, iterate_shared); X(fo, struct file_operations, owner);';
             echo 'MODULE_LICENSE("GPL");';
           } > /tmp/wuwa_offexp.c
           mkdir -p /tmp/expmod && cp /tmp/wuwa_offexp.c /tmp/expmod/ && printf 'obj-m += wuwa_offexp.o\n' > /tmp/expmod/Makefile
