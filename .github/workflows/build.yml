@@ -132,6 +132,8 @@ jobs:
               awk '/^struct file {/,/^};/' "$HDR/include/linux/fs.h"
               echo "=== FULL struct file_operations ($IMG) ==="
               awk '/^struct file_operations {/,/^};/' "$HDR/include/linux/fs.h"
+              echo "=== FULL struct thread_struct ($IMG) ==="
+              awk '/^struct thread_struct {/,/^};/' "$HDR/arch/arm64/include/asm/processor.h"
               echo "=== struct task_struct head ($IMG) ==="
               grep -n "struct mm_struct\s*\*mm;\|char comm\[TASK_COMM_LEN\]\|pid_t pid;\|pid_t tgid;\|const struct cred __rcu \*cred;\|struct task_struct __rcu \*real_parent;\|int prio;" "$HDR/include/linux/sched.h" | head -10
               echo "=== mm_struct fields ($IMG) ==="
