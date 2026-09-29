@@ -111,7 +111,7 @@ jobs:
             echo 'X(fo, struct file_operations, iterate_shared); X(fo, struct file_operations, owner);';
             echo 'MODULE_LICENSE("GPL");';
           } > /tmp/wuwa_offexp-$IMG.c
-          mkdir -p /tmp/expmod-$IMG && cp /tmp/wuwa_offexp-$IMG.c /tmp/expmod-$IMG/ && printf 'obj-m += wuwa_offexp.o\nCFLAGS_wuwa_offexp.o += -fno-lto -fno-fat-lto-objects\n' > /tmp/expmod-$IMG/Makefile
+          mkdir -p /tmp/expmod-$IMG && cp /tmp/wuwa_offexp-$IMG.c /tmp/expmod-$IMG/ && printf 'obj-m += wuwa_offexp.o\nCFLAGS_REMOVE_wuwa_offexp.o += -flto=thin -flto -flto=full -fsplit-lto-unit\nCFLAGS_wuwa_offexp.o += -fno-lto\n' > /tmp/expmod-$IMG/Makefile
           make -C "$KDIR_RESOLVED" M=/tmp/expmod-$IMG modules 2>&1 | tail -5; echo "MAKE-RC=$?"; ls -la /tmp/expmod-$IMG/ 2>&1 | head -8
           (NMX=""; for t in llvm-nm aarch64-linux-gnu-nm nm; do command -v $t >/dev/null 2>&1 && { NMX=$t; break; }; done; \
            $NMX --format=posix -S /tmp/expmod-$IMG/wuwa_offexp.o 2>/dev/null | grep _w_ | head -30) || \
