@@ -96,13 +96,13 @@ jobs:
             echo 'X(fl, struct file, f_op); X(fl, struct file, f_path);';
             echo 'X(fo, struct file_operations, iterate_shared); X(fo, struct file_operations, owner);';
             echo 'MODULE_LICENSE("GPL");';
-          } > /tmp/wuwa_offexp.c
-          mkdir -p /tmp/expmod && cp /tmp/wuwa_offexp.c /tmp/expmod/ && printf 'obj-m += wuwa_offexp.o\nCFLAGS_wuwa_offexp.o += -fno-lto -fno-fat-lto-objects\n' > /tmp/expmod/Makefile
-          make -C "$KDIR_RESOLVED" M=/tmp/expmod modules 2>&1 | tail -5
+          } > /tmp/wuwa_offexp-$IMG.c
+          mkdir -p /tmp/expmod-$IMG && cp /tmp/wuwa_offexp-$IMG.c /tmp/expmod-$IMG/ && printf 'obj-m += wuwa_offexp.o\nCFLAGS_wuwa_offexp.o += -fno-lto -fno-fat-lto-objects\n' > /tmp/expmod-$IMG/Makefile
+          make -C "$KDIR_RESOLVED" M=/tmp/expmod-$IMG modules 2>&1 | tail -5
           (NMX=""; for t in llvm-nm aarch64-linux-gnu-nm nm; do command -v $t >/dev/null 2>&1 && { NMX=$t; break; }; done; \
-           $NMX --format=posix -S /tmp/expmod/wuwa_offexp.o 2>/dev/null | grep _w_ | head -30) || \
+           $NMX --format=posix -S /tmp/expmod-$IMG/wuwa_offexp.o 2>/dev/null | grep _w_ | head -30) || \
             echo "offexp kbuild unavailable"
-          rm -rf /tmp/expmod /tmp/wuwa_offexp.c
+          rm -rf /tmp/expmod-$IMG /tmp/wuwa_offexp-$IMG.c
           # Header forensics (universal runtime-build tables): dump the
           # kernel-consumed struct layouts per generation so field offsets
           # can be computed for the runtime-constructed tables. Full
