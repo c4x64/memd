@@ -82,12 +82,10 @@ jobs:
           for HDR in "/opt/ddk/src/$IMG" "$KDIR_RESOLVED"; do
             if [ -f "$HDR/include/net/sock.h" ]; then
               KINC="-D__KERNEL__ -I$HDR/include -I$HDR/arch/arm64/include -I$KDIR_RESOLVED/include -I$KDIR_RESOLVED/arch/arm64/include"
-              for GD in "$KDIR_RESOLVED/arch/arm64/include/generated" "$HDR/arch/arm64/include/generated" "$KDIR_RESOLVED/include/generated" "$HDR/include/generated"; do
-                [ -d "$GD" ] && KINC="$KINC -I$GD"
-              done
-              for KC in "$KDIR_RESOLVED/include/generated/autoconf.h" "$HDR/include/generated/autoconf.h" "$HDR/include/linux/kconfig.h"; do
-                [ -f "$KC" ] && KINC="$KINC -include $KC" && break
-              done
+              ASMGEN=$(find /opt/ddk -path "*arch/arm64/include/generated/asm/types.h" 2>/dev/null | head -1)
+              [ -n "$ASMGEN" ] && KINC="$KINC -I$(dirname $(dirname $ASMGEN))"
+              AUTOCONF=$(find /opt/ddk -name autoconf.h -path "*generated*" 2>/dev/null | head -1)
+              [ -n "$AUTOCONF" ] && KINC="$KINC -include $AUTOCONF"
               break
             fi
           done
