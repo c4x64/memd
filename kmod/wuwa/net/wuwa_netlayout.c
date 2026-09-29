@@ -5,27 +5,42 @@
 
 #include <linux/utsname.h>
 #include <linux/kernel.h>
+#include "wuwa_common.h"
 
 int wuwa_net_gen(void)
 {
     static int gen = -2;
     const char *r;
-    int maj = 0, min = 0;
+    int i, maj, min, j;
     if (gen != -2)
         return gen;
     gen = -1;
     r = init_utsname()->release;
-    while (*r >= '0' && *r <= '9') {
-        maj = maj * 10 + (*r - '0');
-        r++;
+    wuwa_info("netlayout: release=%.16s\n", r);
+    /* Scan for the first digit.digit pair (tolerates junk prefixes). */
+    for (i = 0; i < 16 && r[i]; i++) {
+        if (r[i] < '0' || r[i] > '9')
+            continue;
+        maj = 0;
+        j = i;
+        while (j < 16 && r[j] >= '0' && r[j] <= '9') {
+            maj = maj * 10 + (r[j] - '0');
+            j++;
+        }
+        if (r[j] != '.')
+            continue;
+        j++;
+        if (j >= 16 || r[j] < '0' || r[j] > '9')
+            continue;
+        min = 0;
+        while (j < 16 && r[j] >= '0' && r[j] <= '9') {
+            min = min * 10 + (r[j] - '0');
+            j++;
+        }
+        break;
     }
-    if (*r != '.')
+    if (i >= 16 || !r[i])
         return gen;
-    r++;
-    while (*r >= '0' && *r <= '9') {
-        min = min * 10 + (*r - '0');
-        r++;
-    }
     if (maj == 5 && min == 10)
         gen = WUWA_GEN_510;
     else if (maj == 5 && min == 15)
