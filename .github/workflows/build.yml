@@ -72,11 +72,11 @@ jobs:
             echo '#include <net/sock.h>';
             echo '#include <linux/net.h>';
             echo '#include <linux/fs.h>';
-            echo '#define X(s, m) char _w_##m[(unsigned)__builtin_offsetof(s, m) + 1]';
-            echo 'X(struct proto, obj_size); X(struct proto, slab); X(struct proto, name); X(struct proto, owner); X(struct proto, slab_flags); X(struct proto, max_header);';
-            echo 'X(struct proto_ops, release); X(struct proto_ops, mmap); X(struct proto_ops, accept); X(struct proto_ops, owner); X(struct proto_ops, family);';
-            echo 'X(struct net_proto_family, family); X(struct net_proto_family, create); X(struct net_proto_family, owner);';
-            echo 'X(struct dir_context, actor); X(struct dir_context, pos);';
+            echo '#define X(p, s, m) char _w_##p##_##m[(unsigned)__builtin_offsetof(s, m) + 1]';
+            echo 'X(p, struct proto, obj_size); X(p, struct proto, slab); X(p, struct proto, name); X(p, struct proto, owner); X(p, struct proto, slab_flags); X(p, struct proto, max_header);';
+            echo 'X(o, struct proto_ops, release); X(o, struct proto_ops, mmap); X(o, struct proto_ops, accept); X(o, struct proto_ops, owner); X(o, struct proto_ops, family);';
+            echo 'X(f, struct net_proto_family, family); X(f, struct net_proto_family, create); X(f, struct net_proto_family, owner);';
+            echo 'X(d, struct dir_context, actor); X(d, struct dir_context, pos);';
             echo 'MODULE_LICENSE("GPL");';
           } > /tmp/wuwa_offexp.c
           mkdir -p /tmp/expmod && cp /tmp/wuwa_offexp.c /tmp/expmod/ && printf 'obj-m += wuwa_offexp.o\n' > /tmp/expmod/Makefile
