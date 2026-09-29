@@ -81,7 +81,8 @@ jobs:
           } > /tmp/wuwa_offexp.c
           mkdir -p /tmp/expmod && cp /tmp/wuwa_offexp.c /tmp/expmod/ && printf 'obj-m += wuwa_offexp.o\n' > /tmp/expmod/Makefile
           make -C "$KDIR_RESOLVED" M=/tmp/expmod modules >/dev/null 2>&1 && \
-            $NM_BIN -S /tmp/expmod/wuwa_offexp.o 2>/dev/null | grep _w_ | head -25 || \
+            (NMX=""; for t in llvm-nm aarch64-linux-gnu-nm nm; do command -v $t >/dev/null 2>&1 && { NMX=$t; break; }; done; \
+             $NMX -S /tmp/expmod/wuwa_offexp.o 2>/dev/null | grep _w_ | head -25) || \
             echo "offexp kbuild unavailable"
           rm -rf /tmp/expmod /tmp/wuwa_offexp.c
           # Header forensics (universal runtime-build tables): dump the
