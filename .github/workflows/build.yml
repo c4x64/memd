@@ -65,6 +65,20 @@ jobs:
           [ -d "$KDIR_RESOLVED" ] || { echo "FATAL: no kdir for $IMG (KERNEL_SRC=$KERNEL_SRC)"; ls /opt/ddk/kdir/; exit 1; }
           echo "kdir=$KDIR_RESOLVED"
           ls "$KDIR_RESOLVED" | head -20
+          # pahole on vmlinux gives exact layouts (decisive where the
+          # text parser is uncertain). vmlinux + debuginfo live in kdir.
+          if command -v pahole >/dev/null 2>&1 && [ -f "$KDIR_RESOLVED/vmlinux" ]; then
+            echo "=== pahole task_struct ($IMG) ==="
+            pahole -C task_struct "$KDIR_RESOLVED/vmlinux" 2>/dev/null | grep -E "mm;|comm\[|pid;|tgid;|cred;|real_parent;|prio;|thread;" | head -12
+            echo "=== pahole mm_struct ($IMG) ==="
+            pahole -C mm_struct "$KDIR_RESOLVED/vmlinux" 2>/dev/null | grep -E "pgd;|arg_start;|arg_end;|mmap;" | head -6
+            echo "=== pahole vm_area_struct ($IMG) ==="
+            pahole -C vm_area_struct "$KDIR_RESOLVED/vmlinux" 2>/dev/null | grep -E "vm_start;|vm_end;|vm_file;|vm_flags;" | head -6
+            echo "=== pahole file_operations iterate ($IMG) ==="
+            pahole -C file_operations "$KDIR_RESOLVED/vmlinux" 2>/dev/null | grep -E "iterate_shared;" | head -2
+          else
+            echo "pahole/vmlinux unavailable ($IMG)"
+          fi
           # Exact layout export through kbuild itself (raw clang can't
           # replicate kbuild's include architecture): a TU whose array
           # sizes ARE the offsetof values, then read them with nm.
