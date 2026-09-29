@@ -114,6 +114,8 @@ jobs:
               awk '/^struct proto {/,/^};/' "$HDR/include/net/sock.h"
               echo "=== FULL struct proto_ops ($IMG) ==="
               awk '/^struct proto_ops {/,/^};/' "$HDR/include/linux/net.h"
+              echo "=== struct new_utsname ($IMG) ==="
+              grep -n -A12 "struct new_utsname" "$HDR/include/uapi/linux/utsname.h" | head -16
               echo "=== FULL struct net_proto_family ($IMG) ==="
               awk '/^struct net_proto_family {/,/^};/' "$HDR/include/linux/net.h"
               echo "=== FULL struct dir_context ($IMG) ==="

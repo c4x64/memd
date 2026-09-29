@@ -5,41 +5,80 @@
 
 #include <linux/utsname.h>
 #include <linux/kernel.h>
+#include <linux/fcntl.h>
+#include <linux/err.h>
+#include <linux/fs.h>
+#include <linux/string.h>
 #include "wuwa_common.h"
+
+/* Read /proc/sys/kernel/osrelease content (exact string, no struct
+ * offsets). Returns 0 ok, negative otherwise. */
+static int wuwa_read_osrelease(char *out, size_t cap)
+{
+    struct file *f;
+    loff_t pos = 0;
+    ssize_t n;
+    size_t i;
+    if (cap < 8)
+        return -1;
+    f = filp_open("/proc/sys/kernel/osrelease", O_RDONLY, 0);
+    if (IS_ERR(f))
+        return -1;
+    n = kernel_read(f, out, cap - 1, &pos);
+    filp_close(f, NULL);
+    if (n <= 0)
+        return -1;
+    out[n] = '\0';
+    for (i = 0; i < (size_t)n; i++) {
+        if (out[i] == '\n' || out[i] == '\r' || out[i] == ' ') {
+            out[i] = '\0';
+            break;
+        }
+    }
+    if (!out[0])
+        return -1;
+    return 0;
+}
 
 int wuwa_net_gen(void)
 {
     static int gen = -2;
-    const char *r;
+    char rel[72];
     int i, maj, min, j;
     if (gen != -2)
         return gen;
     gen = -1;
-    r = init_utsname()->release;
-    wuwa_info("netlayout: release=%.16s\n", r);
+    /* Primary: /proc/sys/kernel/osrelease content (exact string, no
+     * struct offsets involved). Fallback: init_utsname scan. */
+    if (!wuwa_read_osrelease(rel, sizeof(rel)))
+        wuwa_info("netlayout: release=%.16s\n", rel);
+    else {
+        snprintf(rel, sizeof(rel), "%s", init_utsname()->release);
+        wuwa_info("netlayout: release=%.16s (uts)\n", rel);
+    }
     /* Scan for the first digit.digit pair (tolerates junk prefixes). */
-    for (i = 0; i < 16 && r[i]; i++) {
-        if (r[i] < '0' || r[i] > '9')
+    for (i = 0; i < 64 && rel[i]; i++) {
+        if (rel[i] < '0' || rel[i] > '9')
             continue;
         maj = 0;
         j = i;
-        while (j < 16 && r[j] >= '0' && r[j] <= '9') {
-            maj = maj * 10 + (r[j] - '0');
+        while (j < 64 && rel[j] >= '0' && rel[j] <= '9') {
+            maj = maj * 10 + (rel[j] - '0');
             j++;
         }
-        if (r[j] != '.')
+        if (rel[j] != '.')
             continue;
         j++;
-        if (j >= 16 || r[j] < '0' || r[j] > '9')
+        if (j >= 64 || rel[j] < '0' || rel[j] > '9')
             continue;
         min = 0;
-        while (j < 16 && r[j] >= '0' && r[j] <= '9') {
-            min = min * 10 + (r[j] - '0');
+        while (j < 64 && rel[j] >= '0' && rel[j] <= '9') {
+            min = min * 10 + (rel[j] - '0');
             j++;
         }
         break;
     }
-    if (i >= 16 || !r[i])
+    if (i >= 64 || !rel[i])
         return gen;
     if (maj == 5 && min == 10)
         gen = WUWA_GEN_510;
