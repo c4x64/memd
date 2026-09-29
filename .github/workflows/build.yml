@@ -98,7 +98,7 @@ jobs:
             echo 'MODULE_LICENSE("GPL");';
           } > /tmp/wuwa_offexp.c
           mkdir -p /tmp/expmod && cp /tmp/wuwa_offexp.c /tmp/expmod/ && printf 'obj-m += wuwa_offexp.o\nCFLAGS_wuwa_offexp.o += -fno-lto -fno-fat-lto-objects\n' > /tmp/expmod/Makefile
-          make -C "$KDIR_RESOLVED" M=/tmp/expmod modules 2>&1 | grep -iE "error" | head -5
+          make -C "$KDIR_RESOLVED" M=/tmp/expmod modules 2>&1 | tail -5
           (NMX=""; for t in llvm-nm aarch64-linux-gnu-nm nm; do command -v $t >/dev/null 2>&1 && { NMX=$t; break; }; done; \
            $NMX --format=posix -S /tmp/expmod/wuwa_offexp.o 2>/dev/null | grep _w_ | head -30) || \
             echo "offexp kbuild unavailable"
