@@ -81,8 +81,8 @@ jobs:
           KINC=""
           for HDR in "/opt/ddk/src/$IMG" "$KDIR_RESOLVED"; do
             if [ -f "$HDR/include/net/sock.h" ]; then
-              KINC="-D__KERNEL__ -I$HDR/include -I$HDR/arch/arm64/include"
-              for KC in "$HDR/include/generated/autoconf.h" "$HDR/include/linux/kconfig.h"; do
+              KINC="-D__KERNEL__ -I$HDR/include -I$HDR/arch/arm64/include -I$KDIR_RESOLVED/include -I$KDIR_RESOLVED/arch/arm64/include"
+              for KC in "$KDIR_RESOLVED/include/generated/autoconf.h" "$HDR/include/generated/autoconf.h" "$HDR/include/linux/kconfig.h"; do
                 [ -f "$KC" ] && KINC="$KINC -include $KC" && break
               done
               break
