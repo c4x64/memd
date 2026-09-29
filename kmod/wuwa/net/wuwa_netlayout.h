@@ -51,29 +51,29 @@
 
 /* struct proto field offsets per generation. Owner is a reserved hole
  * on 5.10 (WUWA_P_510_HAS_OWNER 0): do not write it there. */
-#define WUWA_P_510_NAME 384
+#define WUWA_P_510_NAME 360
 #define WUWA_P_510_HAS_OWNER 1
-#define WUWA_P_510_OWNER 376
+#define WUWA_P_510_OWNER 352
 #define WUWA_P_510_OBJ 304
 #define WUWA_P_510_SLAB 296
-#define WUWA_P_515_NAME 400
+#define WUWA_P_515_NAME 376
 #define WUWA_P_515_HAS_OWNER 1
-#define WUWA_P_515_OWNER 392
+#define WUWA_P_515_OWNER 368
 #define WUWA_P_515_OBJ 320
 #define WUWA_P_515_SLAB 312
-#define WUWA_P_61_NAME 416
+#define WUWA_P_61_NAME 392
 #define WUWA_P_61_HAS_OWNER 1
-#define WUWA_P_61_OWNER 408
+#define WUWA_P_61_OWNER 384
 #define WUWA_P_61_OBJ 336
 #define WUWA_P_61_SLAB 328
-#define WUWA_P_66_NAME 424
+#define WUWA_P_66_NAME 400
 #define WUWA_P_66_HAS_OWNER 1
-#define WUWA_P_66_OWNER 416
+#define WUWA_P_66_OWNER 392
 #define WUWA_P_66_OBJ 336
 #define WUWA_P_66_SLAB 328
-#define WUWA_P_612_NAME 424
+#define WUWA_P_612_NAME 400
 #define WUWA_P_612_HAS_OWNER 1
-#define WUWA_P_612_OWNER 416
+#define WUWA_P_612_OWNER 392
 #define WUWA_P_612_OBJ 336
 #define WUWA_P_612_SLAB 328
 
