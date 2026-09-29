@@ -72,8 +72,13 @@ jobs:
             echo '#include <net/sock.h>';
             echo '#include <linux/net.h>';
             echo '#include <linux/fs.h>';
-            echo '#define X(p, s, m) char _w_##p##_##m[(unsigned)__builtin_offsetof(s, m) + 1]';
+            echo '#define X(p, s, m) __attribute__((used)) char _w_##p##_##m[(unsigned)__builtin_offsetof(s, m) + 1]';
             echo 'X(p, struct proto, obj_size); X(p, struct proto, slab); X(p, struct proto, name); X(p, struct proto, owner); X(p, struct proto, slab_flags); X(p, struct proto, max_header);';
+            echo 'X(p, struct proto, useroffset); X(p, struct proto, usersize); X(p, struct proto, orphan_count); X(p, struct proto, rsk_prot); X(p, struct proto, twsk_prot); X(p, struct proto, node); X(p, struct proto, diag_destroy);';
+            echo '#include <linux/version.h>';
+            echo '#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)';
+            echo 'X(p, struct proto, per_cpu_fw_alloc);';
+            echo '#endif';
             echo 'X(o, struct proto_ops, release); X(o, struct proto_ops, mmap); X(o, struct proto_ops, accept); X(o, struct proto_ops, owner); X(o, struct proto_ops, family);';
             echo 'X(f, struct net_proto_family, family); X(f, struct net_proto_family, create); X(f, struct net_proto_family, owner);';
             echo 'X(d, struct dir_context, actor); X(d, struct dir_context, pos);';
