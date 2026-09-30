@@ -105,8 +105,8 @@ _Static_assert(offsetof(struct net_proto_family, create) == 8, "family create");
 _Static_assert(offsetof(struct dir_context, pos) == 8, "dctx pos");
 _Static_assert(sizeof(struct dir_context) == 16, "dctx size");
 _Static_assert(offsetof(struct dentry, d_name) == 32, "dentry name");
-_Static_assert(offsetof(struct file, f_path) == 88, "file path");
-_Static_assert(offsetof(struct file, f_op) == 112, "file op");
+_Static_assert(offsetof(struct file, f_path) == 168, "file path");
+_Static_assert(offsetof(struct file, f_op) == 192, "file op");
 _Static_assert(offsetof(struct file_operations, iterate_shared) == 56, "fo iter");
 #elif WUWA_GEN_CUR == WUWA_GEN_612
 _Static_assert(offsetof(struct proto, obj_size) == WUWA_P_612_OBJ, "p612 obj");
