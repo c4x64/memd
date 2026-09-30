@@ -1,6 +1,12 @@
 #ifndef WUWA_LEARN_H
 #define WUWA_LEARN_H
 
+#include <linux/types.h>
+
+struct task_struct;
+struct mm_struct;
+struct vm_area_struct;
+
 /* Runtime struct-offset learning (KPM-grade universality). Instead of
  * trusting build-header layouts on foreign kernels, derive critical
  * field offsets at init from LIVE anchors:
