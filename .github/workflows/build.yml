@@ -108,6 +108,8 @@ jobs:
             echo 'X(v, struct vm_area_struct, vm_start); X(v, struct vm_area_struct, vm_end); X(v, struct vm_area_struct, vm_file); X(v, struct vm_area_struct, vm_flags); X(v, struct vm_area_struct, vm_next);';
             echo 'X(e, struct dentry, d_name);';
             echo 'X(fl, struct file, f_op); X(fl, struct file, f_path); X(fl, struct file, f_cred); X(fl, struct file, private_data); X(fl, struct file, f_count);';
+            echo '#define SZ(t) __attribute__((used)) char _w_sz_##t[sizeof(t) + 1]';
+            echo 'SZ(struct fown_struct); SZ(struct file_ra_state); SZ(rwlock_t); SZ(struct mutex);';
             echo 'X(fo, struct file_operations, iterate_shared); X(fo, struct file_operations, owner);';
             echo 'MODULE_LICENSE("GPL");';
           } > /tmp/wuwa_offexp-$IMG.c
