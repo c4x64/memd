@@ -50,7 +50,7 @@ static void wuwa_learn_task(void)
     pid_t pid = task_pid_vnr(t);
     pid_t tgid = task_tgid_vnr(t);
     struct mm_struct *mm;
-    char comm[64];
+    char comm[TASK_COMM_LEN];
     int off = -1, hits, i;
     /* pid/tgid: adjacent equal u32 pair (loader is single-threaded). */
     for (i = 0; i + 8 <= WUWA_LEARN_SCAN; i += 4) {
@@ -303,7 +303,17 @@ void wuwa_t_comm(struct task_struct *t, char *buf, size_t cap)
         buf[n] = '\0';
         return;
     }
-    get_task_comm(buf, t);
+    if (cap > 0) {
+        /* get_task_comm requires exactly TASK_COMM_LEN bytes. */
+        char tmp[TASK_COMM_LEN];
+        size_t n = cap - 1;
+        get_task_comm(tmp, t);
+        if (n > sizeof(tmp))
+            n = sizeof(tmp);
+        memcpy(buf, tmp, n);
+        buf[n] = '\0';
+    }
+}
 }
 
 unsigned long wuwa_m_pgd(struct mm_struct *mm)
