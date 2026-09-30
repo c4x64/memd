@@ -33,8 +33,8 @@ static bool wuwa_fv_probed;
 
 /* Per-generation struct file layout (6.6/6.12 rework file completely).
  * Indices match wuwa_net_gen(). Verified per-gen by asserts. */
-static const short wuwa_fop_off[] = { 40, 40, 40, 112, 16 };
-static const short wuwa_fpath_off[] = { 16, 16, 16, 88, 64 };
+static const short wuwa_fop_off[] = { 40, 40, 40, 192, 16 };
+static const short wuwa_fpath_off[] = { 16, 16, 16, 168, 64 };
 
 static int wuwa_v_file_off = -1;
 
