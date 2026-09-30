@@ -314,7 +314,6 @@ void wuwa_t_comm(struct task_struct *t, char *buf, size_t cap)
         buf[n] = '\0';
     }
 }
-}
 
 unsigned long wuwa_m_pgd(struct mm_struct *mm)
 {
