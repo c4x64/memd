@@ -6,6 +6,9 @@
 struct task_struct;
 struct mm_struct;
 struct vm_area_struct;
+struct file;
+struct file_operations;
+struct dentry;
 
 /* Runtime struct-offset learning (KPM-grade universality). Instead of
  * trusting build-header layouts on foreign kernels, derive critical
