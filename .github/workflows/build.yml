@@ -132,6 +132,8 @@ jobs:
               awk '/^struct proto_ops {/,/^};/' "$HDR/include/linux/net.h"
               echo "=== struct new_utsname ($IMG) ==="
               grep -n -A12 "struct new_utsname" "$HDR/include/uapi/linux/utsname.h" | head -16
+              echo "=== arch_rwlock_t ($IMG) ==="
+              grep -rn -A4 "typedef struct.*arch_rwlock_t\|} arch_rwlock_t" "$HDR/arch/arm64/include/asm/rwlock.h" 2>/dev/null | head -8 || echo "no rwlock.h"
               echo "=== FULL struct net_proto_family ($IMG) ==="
               awk '/^struct net_proto_family {/,/^};/' "$HDR/include/linux/net.h"
               echo "=== FULL struct dir_context ($IMG) ==="
