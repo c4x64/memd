@@ -107,7 +107,7 @@ jobs:
             echo 'X(m, struct mm_struct, pgd); X(m, struct mm_struct, arg_start); X(m, struct mm_struct, arg_end); X(m, struct mm_struct, mmap);';
             echo 'X(v, struct vm_area_struct, vm_start); X(v, struct vm_area_struct, vm_end); X(v, struct vm_area_struct, vm_file); X(v, struct vm_area_struct, vm_flags); X(v, struct vm_area_struct, vm_next);';
             echo 'X(e, struct dentry, d_name);';
-            echo 'X(fl, struct file, f_op); X(fl, struct file, f_path);';
+            echo 'X(fl, struct file, f_op); X(fl, struct file, f_path); X(fl, struct file, f_cred); X(fl, struct file, private_data); X(fl, struct file, f_count);';
             echo 'X(fo, struct file_operations, iterate_shared); X(fo, struct file_operations, owner);';
             echo 'MODULE_LICENSE("GPL");';
           } > /tmp/wuwa_offexp-$IMG.c
