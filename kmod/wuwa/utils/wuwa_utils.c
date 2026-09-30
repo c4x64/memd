@@ -798,17 +798,21 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
              addr = wuwa_v_end(vma)) {
             if (addr >= wuwa_v_end(vma))
                 break; /* wrapped or stuck: never spin */
-        if (vma->vm_file) {
+        {
+            unsigned long _vf = wuwa_v_file(vma);
+            if (!_vf)
+                continue;
             if (vm_flag && !(vma->vm_flags & vm_flag)) {
                 continue;
             }
-            dentry = vma->vm_file->f_path.dentry;
+            dentry = wuwa_file_dentry((struct file *)_vf);
+            if (!dentry)
+                continue;
             dname_len = dentry->d_name.len;
             if (!memcmp(dentry->d_name.name, name, min(name_len, dname_len))) {
                 result = wuwa_v_start(vma);
                 goto ret;
             }
-        }
         }
     }
 

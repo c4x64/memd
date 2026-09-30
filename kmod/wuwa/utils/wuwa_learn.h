@@ -53,4 +53,7 @@ unsigned long wuwa_v_end(struct vm_area_struct *vma);
 struct file_operations *wuwa_file_fop(struct file *f);
 struct dentry *wuwa_file_dentry(struct file *f);
 
+/* vma->vm_file learned the same way (known pathname match). */
+unsigned long wuwa_v_file(struct vm_area_struct *vma);
+
 #endif /* WUWA_LEARN_H */

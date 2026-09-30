@@ -1,5 +1,6 @@
 #include "wuwa_syshook.h"
 #include "wuwa_hide.h"
+#include "wuwa_learn.h"
 #include "wuwa_utils.h"
 
 #include <linux/cred.h>
@@ -157,7 +158,7 @@ int wuwa_hide_install(void)
         wuwa_err("hide install: filp_open /proc failed: %ld\n", PTR_ERR(f));
         return PTR_ERR(f) < 0 ? (int)PTR_ERR(f) : -ENOENT;
     }
-    ops = f->f_op;
+    ops = wuwa_file_fop(f);
     filp_close(f, NULL);
     if (!ops || !wuwa_iter_get(ops)) {
         wuwa_err("hide install: no f_op/iterate (ops=%px)\n", ops);

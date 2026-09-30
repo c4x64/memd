@@ -16,6 +16,7 @@
 #include <asm/sysreg.h>
 
 #include "wuwa_utils.h"
+#include "wuwa_netlayout.h"
 
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 
@@ -132,7 +133,7 @@ static void wuwa_learn_pgd(void)
 
 /* Read one maps line: start, end (hex), perms[0]. Returns 0 ok. */
 static int wuwa_maps_line(struct file *f, loff_t *pos, unsigned long *start,
-                          unsigned long *end)
+                          unsigned long *end, char *base, size_t basecap)
 {
     char buf[256];
     ssize_t n;
@@ -167,11 +168,98 @@ static int wuwa_maps_line(struct file *f, loff_t *pos, unsigned long *start,
     *pos = *pos - (loff_t)n + (loff_t)j + 1;
     *start = s;
     *end = e;
-    return (s && e > s) ? 0 : -1;
+    if (!(s && e > s))
+        return -1;
+    /* basename of pathname (empty for anonymous) */
+    if (base && basecap > 1) {
+        int k, last = -1;
+        base[0] = '\0';
+        for (k = 0; k < j; k++) {
+            if (buf[k] == '/')
+                last = k;
+        }
+        if (last >= 0) {
+            size_t bl = 0;
+            k = last + 1;
+            while (k < j && buf[k] != ' ' && buf[k] != '\n' &&
+                   buf[k] != '\r' && bl + 1 < basecap) {
+                base[bl++] = buf[k++];
+            }
+            base[bl] = '\0';
+        }
+    }
+    return 0;
 }
 
 static int wuwa_find_vma_pair(struct mm_struct *mm, unsigned long addr,
                               int *start_off, int *end_off);
+
+/* Learn vm_file slot: scan vma for a file pointer whose dentry name
+ * matches the known maps basename (all reads guarded). */
+static int wuwa_learn_vma_file(struct mm_struct *mm, unsigned long addr,
+                               const char *base)
+{
+    struct vm_area_struct *vma;
+    size_t bl;
+    int i, found = -1, n = 0;
+    if (!base || !base[0])
+        return -1;
+    bl = strlen(base);
+    if (!wuwa_fv)
+        return -1;
+    vma = wuwa_fv(mm, addr);
+    if (!vma)
+        return -1;
+    for (i = 0; i + 8 <= 256; i += 8) {
+        unsigned long fp = 0, dp = 0, nm = 0, ln = 0;
+        char nb[40];
+        int g, k;
+        if (wuwa_safe_read64((char *)vma + i, &fp) || !fp ||
+            (fp & 0xffff000000000000UL) != 0xffff000000000000UL)
+            continue;
+        /* f_path.dentry via running-generation table */
+        {
+            int fg = wuwa_net_gen();
+            unsigned long fpoff;
+            if (fg < 0 || fg >= 5)
+                return -1;
+            fpoff = (unsigned long)wuwa_fpath_off[fg];
+            if (wuwa_safe_read64((char *)fp + fpoff + 8, &dp) || !dp ||
+                (dp & 0xffff000000000000UL) != 0xffff000000000000UL)
+                continue;
+        }
+        /* dentry->d_name (qstr at +32, asserted stable): name ptr + len */
+        if (wuwa_safe_read64((char *)dp + 32, &nm) ||
+            wuwa_safe_read64((char *)dp + 32 + 8, &ln))
+            continue;
+        if (!nm || ln != bl || ln >= sizeof(nb))
+            continue;
+        /* guarded byte compare via u64 reads */
+        for (k = 0; k < (int)ln; k += 8) {
+            unsigned long w = 0;
+            int t;
+            if (wuwa_safe_read64((char *)nm + k, &w))
+                break;
+            for (t = 0; t < 8 && k + t < (int)ln; t++) {
+                nb[k + t] = (char)((w >> (8 * t)) & 0xff);
+            }
+        }
+        if (k < (int)ln)
+            continue;
+        nb[ln] = '\0';
+        if (strcmp(nb, base))
+            continue;
+        n++;
+        found = i;
+    }
+    if (n == 1) {
+        wuwa_v_file_off = found;
+        wuwa_info("learn: vma vm_file at +%d\n", found);
+        return 0;
+    }
+    /* ambiguous or absent: leave compiled fallback */
+    return -1;
+}
 
 static void wuwa_learn_vma(void)
 {
@@ -179,7 +267,8 @@ static void wuwa_learn_vma(void)
     struct file *f;
     loff_t pos = 0;
     unsigned long s1 = 0, e1 = 0, s2 = 0, e2 = 0;
-    int a = -1, b = -1, c = -1, d = -1;
+    char b1[48] = {0}, b2[48] = {0};
+    int a = -1, b = -1, c = -1, d = -1, g;
     mm = get_task_mm(current);
     if (!mm) {
         wuwa_err("learn: no mm for vma\n");
@@ -191,22 +280,38 @@ static void wuwa_learn_vma(void)
         mmput(mm);
         return;
     }
-    if (wuwa_maps_line(f, &pos, &s1, &e1) ||
-        wuwa_maps_line(f, &pos, &s2, &e2)) {
+    if (wuwa_maps_line(f, &pos, &s1, &e1, b1, sizeof(b1))) {
         wuwa_err("learn: maps parse failed\n");
         filp_close(f, NULL);
         mmput(mm);
         return;
     }
+    /* second line with a pathname (anonymous lines teach nothing) */
+    g = 0;
+    while (g++ < 8) {
+        if (wuwa_maps_line(f, &pos, &s2, &e2, b2, sizeof(b2)))
+            break;
+        if (b2[0])
+            break;
+        s2 = e2 = 0;
+        b2[0] = '\0';
+    }
     filp_close(f, NULL);
     if (!wuwa_find_vma_pair(mm, s1, &a, &b) &&
-        !wuwa_find_vma_pair(mm, s2, &c, &d) && a == c && b == d && a >= 0) {
+        s2 && !wuwa_find_vma_pair(mm, s2, &c, &d) && a == c && b == d &&
+        a >= 0) {
         wuwa_learned.v_start = a;
         wuwa_learned.v_end = b;
         wuwa_info("learn: vma start/end at +%d/+%d\n", a, b);
     } else {
         wuwa_err("learn: vma pair unconfirmed\n");
     }
+    if (b1[0] && !wuwa_learn_vma_file(mm, s1, b1))
+        wuwa_info("learn: vma file confirmed on 1 line\n");
+    else if (b2[0] && !wuwa_learn_vma_file(mm, s2, b2))
+        wuwa_info("learn: vma file confirmed on 2 lines\n");
+    else
+        wuwa_err("learn: vma file unconfirmed (compiled fallback)\n");
     mmput(mm);
 }
 
@@ -358,4 +463,17 @@ struct dentry *wuwa_file_dentry(struct file *f)
     /* struct path = { mnt, dentry }: dentry second. */
     d = *(struct dentry **)((char *)f + wuwa_fpath_off[g] + 8);
     return d;
+}
+
+/* Per-generation struct file f_path offset (6.6/6.12 rework file).
+ * Indices match wuwa_net_gen(). Verified per-gen by asserts. */
+static const short wuwa_fpath_off[] = { 16, 16, 16, 88, 64 };
+
+static int wuwa_v_file_off = -1;
+
+unsigned long wuwa_v_file(struct vm_area_struct *vma)
+{
+    if (wuwa_v_file_off >= 0)
+        return *(unsigned long *)((char *)vma + wuwa_v_file_off);
+    return (unsigned long)vma->vm_file;
 }
