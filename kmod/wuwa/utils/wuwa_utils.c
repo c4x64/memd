@@ -772,6 +772,7 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
         wuwa_err("failed to get mm from task\n");
         return 0;
     }
+    wuwa_learn_vma_once();
 
     MM_READ_LOCK(mm)
 

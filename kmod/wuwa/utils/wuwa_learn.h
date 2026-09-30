@@ -40,6 +40,7 @@ extern struct wuwa_learned wuwa_learned;
 
 /* Learn all offsets. Always returns 0 (per-field fail-soft, loud). */
 int wuwa_learn(void);
+void wuwa_learn_vma_once(void);
 
 /* Readers: learned offset when known, compiled fallback otherwise. */
 pid_t wuwa_t_pid(struct task_struct *t);

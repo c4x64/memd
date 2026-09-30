@@ -103,14 +103,33 @@ static void wuwa_learn_task(void)
             wuwa_err("learn: task comm ambiguous (%d hits)\n", n);
         }
     }
-    /* mm: get_task_mm value as a pointer. */
+    /* mm: compiled offset first (fast + self-verifying), then scan.
+     * mm/active_mm are adjacent same-value pointers: first hit wins. */
     mm = get_task_mm(t);
     if (mm) {
-        if (wuwa_count_u64(t, WUWA_LEARN_SCAN, (u64)mm, &off) == 1) {
-            wuwa_learned.t_mm = off;
-            wuwa_info("learn: task mm at +%d\n", off);
+        int o1 = -1, o2 = -1, n = 0, i2;
+        if (t->mm == mm) {
+            wuwa_learned.t_mm = (int)((char *)&t->mm - (char *)t);
+            wuwa_info("learn: task mm compiled+%d confirmed\n",
+                      wuwa_learned.t_mm);
         } else {
-            wuwa_err("learn: task mm ambiguous\n");
+            for (i2 = 0; i2 + 8 <= WUWA_LEARN_SCAN; i2 += 8) {
+                u64 v = 0;
+                memcpy(&v, (char *)t + i2, 8);
+                if (v == (u64)mm) {
+                    if (!n)
+                        o1 = i2;
+                    else if (n == 1)
+                        o2 = i2;
+                    n++;
+                }
+            }
+            if (n == 1 || (n == 2 && o2 == o1 + 8)) {
+                wuwa_learned.t_mm = o1;
+                wuwa_info("learn: task mm at +%d\n", o1);
+            } else {
+                wuwa_err("learn: task mm ambiguous (%d)\n", n);
+            }
         }
         mmput(mm);
     } else {
@@ -132,6 +151,14 @@ static void wuwa_learn_pgd(void)
     ttbr = read_sysreg(ttbr0_el1);
     mask = ~((1UL << PAGE_SHIFT) - 1);
     want = ttbr & mask;
+    /* Compiled offset first (fast + self-verifying), then scan. */
+    if (mm->pgd == want) {
+        wuwa_learned.m_pgd = (int)((char *)&mm->pgd - (char *)mm);
+        wuwa_info("learn: mm pgd compiled+%d confirmed\n",
+                  wuwa_learned.m_pgd);
+        mmput(mm);
+        return;
+    }
     /* pgd is early in mm_struct; scan the first page for TTBR0 value. */
     if (wuwa_count_u64(mm, 512, want, &off) == 1) {
         wuwa_learned.m_pgd = off;
@@ -376,8 +403,17 @@ int wuwa_learn(void)
 {
     wuwa_learn_task();
     wuwa_learn_pgd();
-    wuwa_learn_vma();
     return 0;
+}
+
+/* Lazy vma learning on first get_module_base (target task context). */
+void wuwa_learn_vma_once(void)
+{
+    static bool done = false;
+    if (done)
+        return;
+    done = true;
+    wuwa_learn_vma();
 }
 
 pid_t wuwa_t_pid(struct task_struct *t)
