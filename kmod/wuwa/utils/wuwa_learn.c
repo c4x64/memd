@@ -27,6 +27,17 @@ struct wuwa_learned wuwa_learned = {
 
 #define WUWA_LEARN_SCAN 2048
 
+/* File-scope statics (declared before use). */
+static unsigned long (*wuwa_fv)(struct mm_struct *, unsigned long);
+static bool wuwa_fv_probed;
+
+/* Per-generation struct file layout (6.6/6.12 rework file completely).
+ * Indices match wuwa_net_gen(). Verified per-gen by asserts. */
+static const short wuwa_fop_off[] = { 40, 40, 40, 112, 16 };
+static const short wuwa_fpath_off[] = { 16, 16, 16, 88, 64 };
+
+static int wuwa_v_file_off = -1;
+
 /* Count 8-byte-aligned u64 matches. */
 static int wuwa_count_u64(const void *base, size_t len, u64 val,
                           int *first_off)
@@ -316,9 +327,6 @@ static void wuwa_learn_vma(void)
 }
 
 /* find_vma by runtime address (dual name), then pair-scan. */
-static unsigned long (*wuwa_fv)(struct mm_struct *, unsigned long);
-static bool wuwa_fv_probed;
-
 static int wuwa_find_vma_pair(struct mm_struct *mm, unsigned long addr,
                               int *start_off, int *end_off)
 {
@@ -441,11 +449,11 @@ unsigned long wuwa_v_end(struct vm_area_struct *vma)
     return vma->vm_end;
 }
 
-/* Per-generation struct file layout (6.6/6.12 rework file completely).
- * Indices match wuwa_net_gen(). */
-static const short wuwa_fop_off[] = { 40, 40, 40, 112, 16 };
-static const short wuwa_fpath_off[] = { 16, 16, 16, 88, 64 };
+/* Per-generation struct file layout is tabled at file scope (see top);
+ * these readers use it. */
 
+/* Per-generation struct file f_path offset (6.6/6.12 rework file).
+ * Indices match wuwa_net_gen(). Verified per-gen by asserts. */
 struct file_operations *wuwa_file_fop(struct file *f)
 {
     int g = wuwa_net_gen();
@@ -464,12 +472,6 @@ struct dentry *wuwa_file_dentry(struct file *f)
     d = *(struct dentry **)((char *)f + wuwa_fpath_off[g] + 8);
     return d;
 }
-
-/* Per-generation struct file f_path offset (6.6/6.12 rework file).
- * Indices match wuwa_net_gen(). Verified per-gen by asserts. */
-static const short wuwa_fpath_off[] = { 16, 16, 16, 88, 64 };
-
-static int wuwa_v_file_off = -1;
 
 unsigned long wuwa_v_file(struct vm_area_struct *vma)
 {
