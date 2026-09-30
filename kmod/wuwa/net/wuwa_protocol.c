@@ -9,6 +9,7 @@
 #include "wuwa_ioctl.h"
 #include "wuwa_sock.h"
 #include "wuwa_netlayout.h"
+#include "wuwa_learn.h"
 
 #include <linux/string.h>
 #include <linux/stddef.h>
@@ -202,7 +203,7 @@ static int wuwa_sock_create(struct net* net, struct socket* sock, int protocol, 
 
     struct wuwa_sock* ws = (struct wuwa_sock*)sk;
     ws->version = 1;
-    ws->session = current->pid;
+    ws->session = wuwa_t_pid(current);
     ws->used_pages = arraylist_create(4);
 
     return 0;
