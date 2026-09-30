@@ -44,6 +44,22 @@ MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 
 typedef int (*iterate_shared_fn)(struct file *filp, struct dir_context *ctx);
 
+#include "wuwa_netlayout.h"
+
+/* iterate_shared slot: 64 generally, 56 on 6.6 (iterate removed there).
+ * Resolved by running generation — never trust build headers here. */
+static int wuwa_iter_off(void)
+{
+    return wuwa_net_gen() == WUWA_GEN_66 ? 56 : 64;
+}
+
+static unsigned long wuwa_iter_get(const struct file_operations *ops)
+{
+    unsigned long v = 0;
+    wuwa_safe_read64((void *)((const char *)ops + wuwa_iter_off()), &v);
+    return v;
+}
+
 struct hide_ctx {
     struct dir_context base;
     struct dir_context *orig;
@@ -143,11 +159,11 @@ int wuwa_hide_install(void)
     }
     ops = f->f_op;
     filp_close(f, NULL);
-    if (!ops || !ops->iterate_shared) {
+    if (!ops || !wuwa_iter_get(ops)) {
         wuwa_err("hide install: no f_op/iterate (ops=%px)\n", ops);
         return -ENOSYS;
     }
-    orig = ops->iterate_shared;
+    orig = (iterate_shared_fn)wuwa_iter_get(ops);
     wuwa_err("hide install: f_op=%px iterate=%px\n", ops, orig);
 
     spin_lock_irqsave(&syshook_lock, flags);
@@ -160,7 +176,7 @@ int wuwa_hide_install(void)
     /* RO-safe write (guarded, verified, restored on exit/uninstall). */
     {
         int wr;
-        wr = wuwa_table_write64((unsigned long)&ops->iterate_shared,
+        wr = wuwa_table_write64((unsigned long)ops + (unsigned long)wuwa_iter_off(),
                                 (unsigned long)wuwa_iterate_shared);
         if (wr) {
             wuwa_err("hide install: table write failed: %d\n", wr);
@@ -172,9 +188,8 @@ int wuwa_hide_install(void)
     }
     {
         iterate_shared_fn back = NULL;
-        if (wuwa_safe_read64(&ops->iterate_shared,
-                             (unsigned long *)&back) ||
-            back != wuwa_iterate_shared) {
+        back = (iterate_shared_fn)wuwa_iter_get(ops);
+        if (!back || back != wuwa_iterate_shared) {
             wuwa_err("hide install: readback mismatch\n");
             wuwa_table_write64((unsigned long)&ops->iterate_shared,
                                (unsigned long)orig);
@@ -203,14 +218,13 @@ int wuwa_hide_uninstall(void)
     }
     ops = hooked_ops;
     orig = orig_iterate;
-    if (wuwa_table_write64((unsigned long)&ops->iterate_shared,
+    if (wuwa_table_write64((unsigned long)ops + (unsigned long)wuwa_iter_off(),
                            (unsigned long)orig))
         bad = 1;
     else {
         iterate_shared_fn back = NULL;
-        if (wuwa_safe_read64(&ops->iterate_shared,
-                             (unsigned long *)&back) ||
-            back != orig)
+        back = (iterate_shared_fn)wuwa_iter_get(ops);
+        if (!back || back != orig)
             bad = 1;
     }
     hooked_ops = NULL;
