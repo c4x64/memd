@@ -152,7 +152,7 @@ static void wuwa_learn_pgd(void)
     mask = ~((1UL << PAGE_SHIFT) - 1);
     want = ttbr & mask;
     /* Compiled offset first (fast + self-verifying), then scan. */
-    if (mm->pgd == want) {
+    if ((u64)mm->pgd == want) {
         wuwa_learned.m_pgd = (int)((char *)&mm->pgd - (char *)mm);
         wuwa_info("learn: mm pgd compiled+%d confirmed\n",
                   wuwa_learned.m_pgd);
