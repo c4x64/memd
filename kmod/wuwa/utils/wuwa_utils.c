@@ -815,6 +815,7 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
             }
         }
     }
+    }
 
 ret:
     MM_READ_UNLOCK(mm)
