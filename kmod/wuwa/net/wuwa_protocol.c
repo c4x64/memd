@@ -50,7 +50,10 @@ int wuwa_build_proto(void)
 #if WUWA_GEN_CUR >= 0
 /* Compile-time proof (every matrix job): the offset macros match the
  * headers they build against. A drift fails the build, never the load.
- * 5.10 has no owner member (reserved hole): no assert for it there. */
+ * 5.10 has no owner member (reserved hole): no assert for it there.
+ * dentry/file/fileops/dir are generation-stable (assert-locked); task,
+ * mm and vma layouts are learned live (wuwa_learn.c), never trusted
+ * from headers. */
 #include <linux/fs.h>
 #if WUWA_GEN_CUR == WUWA_GEN_510
 _Static_assert(offsetof(struct proto, obj_size) == WUWA_P_510_OBJ, "p510 obj");
@@ -61,6 +64,10 @@ _Static_assert(offsetof(struct proto_ops, mmap) == WUWA_O_510_MMAP, "o510 mmap")
 _Static_assert(offsetof(struct net_proto_family, create) == 8, "family create");
 _Static_assert(offsetof(struct dir_context, pos) == 8, "dctx pos");
 _Static_assert(sizeof(struct dir_context) == 16, "dctx size");
+_Static_assert(offsetof(struct dentry, d_name) == 32, "dentry name");
+_Static_assert(offsetof(struct file, f_path) == 8, "file path");
+_Static_assert(offsetof(struct file, f_op) == 32, "file op");
+_Static_assert(offsetof(struct file_operations, iterate_shared) == 64, "fo iter");
 #elif WUWA_GEN_CUR == WUWA_GEN_515
 _Static_assert(offsetof(struct proto, obj_size) == WUWA_P_515_OBJ, "p515 obj");
 _Static_assert(offsetof(struct proto, owner) == WUWA_P_515_OWNER, "p515 owner");
@@ -70,6 +77,10 @@ _Static_assert(offsetof(struct proto_ops, mmap) == WUWA_O_515_MMAP, "o515 mmap")
 _Static_assert(offsetof(struct net_proto_family, create) == 8, "family create");
 _Static_assert(offsetof(struct dir_context, pos) == 8, "dctx pos");
 _Static_assert(sizeof(struct dir_context) == 16, "dctx size");
+_Static_assert(offsetof(struct dentry, d_name) == 32, "dentry name");
+_Static_assert(offsetof(struct file, f_path) == 8, "file path");
+_Static_assert(offsetof(struct file, f_op) == 32, "file op");
+_Static_assert(offsetof(struct file_operations, iterate_shared) == 64, "fo iter");
 #elif WUWA_GEN_CUR == WUWA_GEN_61
 _Static_assert(offsetof(struct proto, obj_size) == WUWA_P_61_OBJ, "p61 obj");
 _Static_assert(offsetof(struct proto, owner) == WUWA_P_61_OWNER, "p61 owner");
@@ -79,6 +90,10 @@ _Static_assert(offsetof(struct proto_ops, mmap) == WUWA_O_61_MMAP, "o61 mmap");
 _Static_assert(offsetof(struct net_proto_family, create) == 8, "family create");
 _Static_assert(offsetof(struct dir_context, pos) == 8, "dctx pos");
 _Static_assert(sizeof(struct dir_context) == 16, "dctx size");
+_Static_assert(offsetof(struct dentry, d_name) == 32, "dentry name");
+_Static_assert(offsetof(struct file, f_path) == 8, "file path");
+_Static_assert(offsetof(struct file, f_op) == 32, "file op");
+_Static_assert(offsetof(struct file_operations, iterate_shared) == 64, "fo iter");
 #elif WUWA_GEN_CUR == WUWA_GEN_66
 _Static_assert(offsetof(struct proto, obj_size) == WUWA_P_66_OBJ, "p66 obj");
 _Static_assert(offsetof(struct proto, owner) == WUWA_P_66_OWNER, "p66 owner");
@@ -88,6 +103,10 @@ _Static_assert(offsetof(struct proto_ops, mmap) == WUWA_O_66_MMAP, "o66 mmap");
 _Static_assert(offsetof(struct net_proto_family, create) == 8, "family create");
 _Static_assert(offsetof(struct dir_context, pos) == 8, "dctx pos");
 _Static_assert(sizeof(struct dir_context) == 16, "dctx size");
+_Static_assert(offsetof(struct dentry, d_name) == 32, "dentry name");
+_Static_assert(offsetof(struct file, f_path) == 8, "file path");
+_Static_assert(offsetof(struct file, f_op) == 32, "file op");
+_Static_assert(offsetof(struct file_operations, iterate_shared) == 64, "fo iter");
 #elif WUWA_GEN_CUR == WUWA_GEN_612
 _Static_assert(offsetof(struct proto, obj_size) == WUWA_P_612_OBJ, "p612 obj");
 _Static_assert(offsetof(struct proto, owner) == WUWA_P_612_OWNER, "p612 owner");
@@ -97,6 +116,10 @@ _Static_assert(offsetof(struct proto_ops, mmap) == WUWA_O_612_MMAP, "o612 mmap")
 _Static_assert(offsetof(struct net_proto_family, create) == 8, "family create");
 _Static_assert(offsetof(struct dir_context, pos) == 8, "dctx pos");
 _Static_assert(sizeof(struct dir_context) == 16, "dctx size");
+_Static_assert(offsetof(struct dentry, d_name) == 32, "dentry name");
+_Static_assert(offsetof(struct file, f_path) == 8, "file path");
+_Static_assert(offsetof(struct file, f_op) == 32, "file op");
+_Static_assert(offsetof(struct file_operations, iterate_shared) == 64, "fo iter");
 #endif
 #endif
 

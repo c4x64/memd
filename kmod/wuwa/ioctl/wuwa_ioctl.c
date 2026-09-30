@@ -4,6 +4,7 @@
 #include <linux/capability.h>
 
 #include "wuwa_hide.h"
+#include "wuwa_learn.h"
 #include "wuwa_syshook.h"
 #include "wuwa_display.h"
 
@@ -44,14 +45,18 @@ int do_vaddr_translate(struct socket* sock, void* arg) {
 int do_debug_info(struct socket* sock, void* arg) {
     struct wuwa_debug_info_cmd debug_info_cmd;
 
-    debug_info_cmd.ttbr0_el1 = read_sysreg_s(SYS_TTBR0_EL1);
-    debug_info_cmd.task_struct = (u64)current;
-    debug_info_cmd.mm_struct = (u64)current->mm;
-    debug_info_cmd.pgd_addr = (u64)current->mm->pgd;
-    debug_info_cmd.pgd_phys_addr = virt_to_phys(current->mm->pgd);
-    debug_info_cmd.mm_asid = ASID(current->mm);
-    debug_info_cmd.mm_right = ((uint64_t)(ASID(current->mm)) << 48 | virt_to_phys(current->mm->pgd) | (uint64_t)1) ==
-        debug_info_cmd.ttbr0_el1;
+    {
+        struct mm_struct *dmm = wuwa_t_mm(current);
+        debug_info_cmd.ttbr0_el1 = read_sysreg_s(SYS_TTBR0_EL1);
+        debug_info_cmd.task_struct = (u64)current;
+        debug_info_cmd.mm_struct = (u64)dmm;
+        debug_info_cmd.pgd_addr = (u64)wuwa_m_pgd(dmm);
+        debug_info_cmd.pgd_phys_addr = dmm ? virt_to_phys(wuwa_m_pgd(dmm)) : 0;
+        debug_info_cmd.mm_asid = dmm ? ASID(dmm) : 0;
+        debug_info_cmd.mm_right = dmm ?
+            (((uint64_t)(ASID(dmm)) << 48 | virt_to_phys(wuwa_m_pgd(dmm)) | (uint64_t)1) ==
+            debug_info_cmd.ttbr0_el1) : 0;
+    }
 
     if (copy_to_user(arg, &debug_info_cmd, sizeof(debug_info_cmd))) {
         return -EFAULT;
@@ -88,7 +93,7 @@ int do_at_s1e0r(struct socket* sock, void* arg) {
     }
 
     u64 original_ttbr0 = read_sysreg_s(SYS_TTBR0_EL1);
-    u64 new_ttbr0 = (uint64_t)(ASID(mm)) << 48 | virt_to_phys(mm->pgd) | (uint64_t)1;
+    u64 new_ttbr0 = (uint64_t)(ASID(mm)) << 48 | virt_to_phys(wuwa_m_pgd(mm)) | (uint64_t)1;
     dsb(ish);
     asm volatile("msr ttbr0_el1, %0" ::"r"(new_ttbr0));
     dsb(ish);
@@ -870,7 +875,7 @@ int do_list_processes(struct socket* sock, void __user* arg) {
     // Iterate through all processes and set corresponding bits
     rcu_read_lock();
     for_each_process(task) {
-        pid_t pid = task->pid;
+        pid_t pid = wuwa_t_pid(task);
         
         // Check if PID is within bitmap range
         if (pid >= 0 && pid < (cmd.bitmap_size * 8)) {
@@ -931,7 +936,7 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
     }
 
     // Extract basic process information
-    cmd.tgid = task->tgid;
+    cmd.tgid = wuwa_t_tgid(task);
     cmd.uid = task->cred->uid.val;
     cmd.ppid = task->real_parent ? task->real_parent->pid : 0;
     cmd.prio = task->prio;
@@ -948,9 +953,9 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
         my_get_cmdline = (void*)kallsyms_lookup_name_ex("get_cmdline");
     }
 
-    if (my_get_cmdline != NULL && task->mm != NULL) {
+    if (my_get_cmdline != NULL && !wuwa_t_mm_null(task)) {
         ret = my_get_cmdline(task, cmdline, sizeof(cmdline));
-    } else if (task->mm != NULL) {
+    } else if (!wuwa_t_mm_null(task)) {
         struct mm_struct* mm = get_task_mm(task);
         if (mm) {
             unsigned long arg_start, arg_end;
@@ -976,7 +981,7 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
 
     // Fallback to task->comm if cmdline retrieval failed
     if (ret < 0 || cmdline[0] == '\0') {
-        strncpy(cmd.name, task->comm, sizeof(cmd.name) - 1);
+        wuwa_t_comm(task, cmd.name, sizeof(cmd.name));
     } else {
         // Extract program name (first part before space)
         char* space = strchr(cmdline, ' ');

@@ -1,5 +1,6 @@
 #include "wuwa_utils.h"
 #include "wuwa_kallsyms.h"
+#include "wuwa_learn.h"
 
 #include <asm/sysreg.h>
 #include <linux/capability.h>
@@ -794,8 +795,8 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
             return 0;
         }
         for (addr = 0; (vma = vma_find(mm, addr)) != NULL;
-             addr = vma->vm_end) {
-            if (addr >= vma->vm_end)
+             addr = wuwa_v_end(vma)) {
+            if (addr >= wuwa_v_end(vma))
                 break; /* wrapped or stuck: never spin */
         if (vma->vm_file) {
             if (vm_flag && !(vma->vm_flags & vm_flag)) {
@@ -804,7 +805,7 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
             dentry = vma->vm_file->f_path.dentry;
             dname_len = dentry->d_name.len;
             if (!memcmp(dentry->d_name.name, name, min(name_len, dname_len))) {
-                result = vma->vm_start;
+                result = wuwa_v_start(vma);
                 goto ret;
             }
         }
@@ -860,7 +861,7 @@ pid_t find_process_by_name(const char* name) {
 
     rcu_read_lock();
     for_each_process(task) {
-        if (task->mm == NULL) {
+        if (wuwa_t_mm_null(task)) {
             continue;
         }
 
@@ -873,9 +874,15 @@ pid_t find_process_by_name(const char* name) {
 
         if (ret < 0) {
             // 回退到task->comm，确保完全匹配
-            if (strlen(task->comm) == name_len && strncmp(task->comm, name, name_len) == 0) {
-                rcu_read_unlock();
-                return task->pid;
+            {
+                char tcomm[16] = {0};
+                pid_t _p;
+                wuwa_t_comm(task, tcomm, sizeof(tcomm));
+                if (strlen(tcomm) == name_len && strncmp(tcomm, name, name_len) == 0) {
+                    _p = wuwa_t_pid(task);
+                    rcu_read_unlock();
+                    return _p;
+                }
             }
         } else {
             // 提取程序名（第一个空格之前的部分）
@@ -892,8 +899,9 @@ pid_t find_process_by_name(const char* name) {
             }
 
             if (strlen(prog_name) == name_len && strncmp(prog_name, name, name_len) == 0) {
+                pid_t _p = wuwa_t_pid(task);
                 rcu_read_unlock();
-                return task->pid;
+                return _p;
             }
         }
     }

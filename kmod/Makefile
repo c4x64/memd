@@ -25,6 +25,7 @@ rwbridge-y := \
     wuwa/net/wuwa_netlayout.o \
     wuwa/utils/wuwa_utils.o \
     wuwa/utils/wuwa_kallsyms.o \
+    wuwa/utils/wuwa_learn.o \
     wuwa/utils/karray_list.o \
     wuwa/utils/wuwa_region.o \
     wuwa/ioctl/wuwa_ioctl.o \

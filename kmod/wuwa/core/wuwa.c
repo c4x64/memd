@@ -15,6 +15,7 @@
 #include "wuwa_sock.h"
 #include "wuwa_syshook.h"
 #include "wuwa_display.h"
+#include "wuwa_learn.h"
 #include "wuwa_utils.h"
 #include "wuwa_region.h"
 #include "hijack_arm64.h"
@@ -32,6 +33,10 @@ static int __init wuwa_init(void) {
         wuwa_err("init_arch failed: %d\n", ret);
         return ret;
     }
+
+    /* Runtime offset learning (fail-soft per field, loud): task/mm/vma
+     * layouts come from live anchors, never build headers. */
+    wuwa_learn();
 
     ret = wuwa_proto_init();
     if (ret) {

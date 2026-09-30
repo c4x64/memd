@@ -10,6 +10,7 @@
 #include "wuwa_common.h"
 
 #include "wuwa_utils.h"
+#include "wuwa_learn.h"
 
 // Function to merge and print contiguous memory regions
 static void print_merged_region(unsigned long* start, unsigned long* end) {
@@ -176,7 +177,7 @@ void traverse_page_tables(struct mm_struct* mm, struct page_walk_stats* stats) {
 
     MM_READ_LOCK(mm);
 
-    pgd = mm->pgd;
+    pgd = wuwa_m_pgd(mm);
 
     do {
         next = pgd_addr_end(addr, TASK_SIZE);
