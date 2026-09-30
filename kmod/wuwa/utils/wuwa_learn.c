@@ -335,3 +335,27 @@ unsigned long wuwa_v_end(struct vm_area_struct *vma)
         return *(unsigned long *)((char *)vma + wuwa_learned.v_end);
     return vma->vm_end;
 }
+
+/* Per-generation struct file layout (6.6/6.12 rework file completely).
+ * Indices match wuwa_net_gen(). */
+static const short wuwa_fop_off[] = { 40, 40, 40, 112, 16 };
+static const short wuwa_fpath_off[] = { 16, 16, 16, 88, 64 };
+
+struct file_operations *wuwa_file_fop(struct file *f)
+{
+    int g = wuwa_net_gen();
+    if (g < 0 || g >= 5 || !f)
+        return NULL;
+    return *(struct file_operations **)((char *)f + wuwa_fop_off[g]);
+}
+
+struct dentry *wuwa_file_dentry(struct file *f)
+{
+    int g = wuwa_net_gen();
+    struct dentry *d;
+    if (g < 0 || g >= 5 || !f)
+        return NULL;
+    /* struct path = { mnt, dentry }: dentry second. */
+    d = *(struct dentry **)((char *)f + wuwa_fpath_off[g] + 8);
+    return d;
+}

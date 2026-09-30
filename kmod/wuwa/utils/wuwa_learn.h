@@ -48,4 +48,9 @@ unsigned long wuwa_m_pgd(struct mm_struct *mm);
 unsigned long wuwa_v_start(struct vm_area_struct *vma);
 unsigned long wuwa_v_end(struct vm_area_struct *vma);
 
+/* struct file fields move per generation (6.6/6.12 rework): resolved by
+ * running generation. Returns NULL/0 when unknown (callers fail soft). */
+struct file_operations *wuwa_file_fop(struct file *f);
+struct dentry *wuwa_file_dentry(struct file *f);
+
 #endif /* WUWA_LEARN_H */
