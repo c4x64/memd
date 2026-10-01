@@ -197,13 +197,14 @@ void wuwa_proto_cleanup(void) {
 }
 
 static int wuwa_sock_create(struct net* net, struct socket* sock, int protocol, int kern) {
-    wuwa_info("create: enter type=%d\n", sock->type);
-    if (!capable(CAP_NET_BIND_SERVICE)) {
+    /* wuwa_dbg("create type=%d", sock->type); */
+    /* Universal privilege checks (no build-header cred offsets):
+     * learned cred + stable cred layout. Fail closed. */
+    if (!wuwa_capable(CAP_NET_BIND_SERVICE)) {
         return -EACCES;
     }
 
-    uid_t caller_uid = *(uid_t*)&current_cred()->uid;
-    if (caller_uid != 0) {
+    if (wuwa_uid() != 0) {
         wuwa_warn("only root can create wuwa socket!\n");
         return -EAFNOSUPPORT;
     }

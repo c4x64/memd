@@ -21,7 +21,7 @@
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 
 struct wuwa_learned wuwa_learned = {
-    .t_pid = -1, .t_tgid = -1, .t_comm = -1, .t_mm = -1,
+    .t_pid = -1, .t_tgid = -1, .t_comm = -1, .t_mm = -1, .t_cred = -1,
     .m_pgd = -1, .v_start = -1, .v_end = -1,
 };
 
@@ -135,13 +135,47 @@ static void wuwa_learn_task(void)
     } else {
         wuwa_err("learn: no mm on loader task\n");
     }
+    /* cred: adjacent equal kernel pointers (real_cred, cred) whose
+     * target looks like root cred (usage 1..1000 at +0, uid 0 at +4).
+     * Loader is root (su/insmod), so this identifies cred exactly.
+     * No tables: fully runtime. */
+    {
+        int i2, found = -1, n = 0;
+        for (i2 = 0; i2 + 16 <= WUWA_LEARN_SCAN; i2 += 8) {
+            u64 a = 0, b = 0;
+            u32 usage = 0, uid = 0;
+            memcpy(&a, (char *)t + i2, 8);
+            memcpy(&b, (char *)t + i2 + 8, 8);
+            if (a != b || (a & 0xffff000000000000UL) != 0xffff000000000000UL)
+                continue;
+            /* read usage (u32@0) + uid (u32@4) via one u64 */
+            {
+                unsigned long w = 0;
+                if (wuwa_safe_read64((void *)(uintptr_t)a, &w))
+                    continue;
+                usage = (u32)(w & 0xffffffffU);
+                uid = (u32)((w >> 32) & 0xffffffffU);
+            }
+            if (usage < 1 || usage > 1000 || uid != 0)
+                continue;
+            if (!n)
+                found = i2 + 8; /* cred is second (real_cred first) */
+            n++;
+        }
+        if (n == 1) {
+            wuwa_learned.t_cred = found;
+            wuwa_info("learn: task cred at +%d\n", found);
+        } else {
+            wuwa_err("learn: task cred ambiguous (%d)\n", n);
+        }
+    }
     (void)hits;
 }
 
 static void wuwa_learn_pgd(void)
 {
     struct mm_struct *mm;
-    u64 ttbr, mask, want;
+    u64 ttbr, want;
     int off = -1;
     mm = get_task_mm(current);
     if (!mm) {
@@ -149,8 +183,8 @@ static void wuwa_learn_pgd(void)
         return;
     }
     ttbr = read_sysreg(ttbr0_el1);
-    mask = ~((1UL << PAGE_SHIFT) - 1);
-    want = ttbr & mask;
+    /* TTBR0 = ASID[63:48] | BADDR[47:12]: strip ASID, keep phys page. */
+    want = ttbr & 0x0000fffffffff000ULL;
     /* Compiled offset first (fast + self-verifying), then scan. */
     if ((u64)mm->pgd == want) {
         wuwa_learned.m_pgd = (int)((char *)&mm->pgd - (char *)mm);
@@ -469,6 +503,46 @@ unsigned long wuwa_m_pgd(struct mm_struct *mm)
     if (wuwa_learned.m_pgd >= 0)
         return *(unsigned long *)((char *)mm + wuwa_learned.m_pgd);
     return mm->pgd;
+}
+
+/* struct cred layout (stable for years, CI-asserted per generation):
+ * usage@0 (atomic_t), uid@4 (kuid_t val), cap_effective low word@56. */
+#define WUWA_CRED_CAP_EFF 56
+
+static unsigned long wuwa_task_cred(struct task_struct *t)
+{
+    unsigned long c = 0;
+    if (wuwa_learned.t_cred < 0 || !t)
+        return 0;
+    if (wuwa_safe_read64((char *)t + wuwa_learned.t_cred, &c))
+        return 0;
+    if ((c & 0xffff000000000000UL) != 0xffff000000000000UL)
+        return 0;
+    return c;
+}
+
+int wuwa_capable(int cap)
+{
+    unsigned long c = wuwa_task_cred(current);
+    u32 eff = 0;
+    unsigned int v = 0;
+    if (!c || cap < 0 || cap >= 32)
+        return 0;
+    if (wuwa_safe_read32((void *)(c + WUWA_CRED_CAP_EFF), &v))
+        return 0;
+    eff = v;
+    return (eff >> cap) & 1;
+}
+
+unsigned int wuwa_uid(void)
+{
+    unsigned long c = wuwa_task_cred(current);
+    unsigned int v = 0;
+    if (!c)
+        return 999999;
+    if (wuwa_safe_read32((void *)(c + 4), &v))
+        return 999999;
+    return v;
 }
 
 unsigned long wuwa_v_start(struct vm_area_struct *vma)

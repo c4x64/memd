@@ -31,6 +31,7 @@ struct wuwa_learned {
     int t_tgid;   /* task_struct.tgid, -1 unknown */
     int t_comm;   /* task_struct.comm, -1 unknown */
     int t_mm;     /* task_struct.mm, -1 unknown */
+    int t_cred;   /* task_struct.cred, -1 unknown */
     int m_pgd;    /* mm_struct.pgd, -1 unknown */
     int v_start;  /* vm_area_struct.vm_start, -1 unknown */
     int v_end;    /* vm_area_struct.vm_end, -1 unknown */
@@ -56,6 +57,14 @@ unsigned long wuwa_v_end(struct vm_area_struct *vma);
  * running generation. Returns NULL/0 when unknown (callers fail soft). */
 struct file_operations *wuwa_file_fop(struct file *f);
 struct dentry *wuwa_file_dentry(struct file *f);
+
+/* Privilege checks without build-header cred offsets (capable() inlines
+ * task->cred from build headers — wrong on foreign kernels = crash).
+ * Learned cred offset + stable struct cred layout (usage@0, uid@4,
+ * cap_effective low word@56, CI-asserted per generation). Fail closed
+ * (deny) when unlearned. */
+int wuwa_capable(int cap);
+unsigned int wuwa_uid(void);
 
 /* vma->vm_file learned the same way (known pathname match). */
 unsigned long wuwa_v_file(struct vm_area_struct *vma);

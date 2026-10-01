@@ -589,7 +589,7 @@ int do_hide_process(struct socket* sock, void* arg) {
     (void)sock;
     /* Root-only management: any local app could otherwise hide arbitrary
      * pids (confusion/DoS). The overlay runs as root. */
-    if (!capable(CAP_SYS_ADMIN))
+    if (!wuwa_capable(CAP_SYS_ADMIN))
         return -EPERM;
     if (copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
@@ -608,7 +608,7 @@ int do_hide_process(struct socket* sock, void* arg) {
 int do_hide_status(struct socket* sock, void* arg) {
     struct wuwa_hide_status_cmd cmd;
     (void)sock;
-    if (!capable(CAP_SYS_ADMIN))
+    if (!wuwa_capable(CAP_SYS_ADMIN))
         return -EPERM;
     cmd.active = wuwa_hide_active();
     cmd.hidden_count = wuwa_hide_count();
@@ -621,7 +621,7 @@ int do_hide_status(struct socket* sock, void* arg) {
 int do_hide_install(struct socket* sock, void* arg) {
     struct wuwa_hide_install_cmd cmd;
     (void)sock;
-    if (!capable(CAP_SYS_ADMIN))
+    if (!wuwa_capable(CAP_SYS_ADMIN))
         return -EPERM;
     if (copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
@@ -640,7 +640,7 @@ int do_page_perms(struct socket* sock, void* arg) {
     struct wuwa_page_perms_cmd cmd;
     int ret;
     (void)sock;
-    if (!capable(CAP_SYS_ADMIN))
+    if (!wuwa_capable(CAP_SYS_ADMIN))
         return -EPERM;
     if (copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
@@ -661,7 +661,7 @@ int do_page_perms(struct socket* sock, void* arg) {
 int do_disp_status(struct socket* sock, void* arg) {
     struct wuwa_disp_status_cmd cmd;
     (void)sock;
-    if (!capable(CAP_SYS_ADMIN))
+    if (!wuwa_capable(CAP_SYS_ADMIN))
         return -EPERM;
     if (wuwa_disp_status(&cmd))
         return -EINVAL;
@@ -674,7 +674,7 @@ int do_disp_install(struct socket* sock, void* arg) {
     struct wuwa_disp_install_cmd cmd;
     int ret;
     (void)sock;
-    if (!capable(CAP_SYS_ADMIN))
+    if (!wuwa_capable(CAP_SYS_ADMIN))
         return -EPERM;
     if (copy_from_user(&cmd, arg, sizeof(cmd)))
         return -EFAULT;
@@ -693,7 +693,7 @@ int do_disp_frame(struct socket* sock, void* arg) {
     unsigned int count;
     int ret;
     (void)sock;
-    if (!capable(CAP_SYS_ADMIN))
+    if (!wuwa_capable(CAP_SYS_ADMIN))
         return -EPERM;
     if (copy_from_user(&cmd, arg, sizeof(cmd)))
         return -EFAULT;

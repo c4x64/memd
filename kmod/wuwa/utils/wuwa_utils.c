@@ -685,7 +685,7 @@ int translate_process_vaddr(pid_t pid, uintptr_t vaddr, uintptr_t* paddr_out) {
      * Priv-gated: kernel memory reads defeat KASLR for any local
      * process, so non-root gets nothing here (user reads unaffected). */
     if ((long)vaddr < 0) {
-        if (!capable(CAP_SYS_ADMIN))
+        if (!wuwa_capable(CAP_SYS_ADMIN))
             return -EPERM;
         paddr = kaddr_to_phy_addr(vaddr);
         pr_info("[wuwa] kread: va=%lx -> pa=%lx\n", vaddr, paddr);
