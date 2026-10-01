@@ -154,6 +154,8 @@ jobs:
               awk '/^struct file_operations {/,/^};/' "$HDR/include/linux/fs.h"
               echo "=== FULL struct socket ($IMG) ==="
               awk '/^struct socket {/,/^};/' "$HDR/include/linux/net.h"
+              echo "=== FULL struct sock ($IMG) ==="
+              awk '/^struct sock {/,/^};/' "$HDR/include/net/sock.h"
               echo "=== FULL struct thread_struct ($IMG) ==="
               awk '/^struct thread_struct {/,/^};/' "$HDR/arch/arm64/include/asm/processor.h"
               echo "=== struct task_struct head ($IMG) ==="
