@@ -45,6 +45,8 @@ int wuwa_build_proto(void)
     }
     obj_size = (unsigned int)sizeof(struct wuwa_sock);
     memcpy(wuwa_proto_buf + o->obj_size, &obj_size, sizeof(obj_size));
+    wuwa_info("netlayout: gen=%d proto name@%d owner@%d obj@%d slab@%d size=%u\n",
+              g, o->name, o->owner, o->obj_size, o->slab, obj_size);
     return 0;
 }
 
@@ -195,6 +197,7 @@ void wuwa_proto_cleanup(void) {
 }
 
 static int wuwa_sock_create(struct net* net, struct socket* sock, int protocol, int kern) {
+    wuwa_info("create: enter type=%d\n", sock->type);
     if (!capable(CAP_NET_BIND_SERVICE)) {
         return -EACCES;
     }
@@ -206,12 +209,15 @@ static int wuwa_sock_create(struct net* net, struct socket* sock, int protocol, 
     }
 
     if (sock->type != SOCK_RAW) {
-        wuwa_warn("socket must be SOCK_RAW!\n");
+        wuwa_info("create: non-raw type=%d -> ENOKEY\n", sock->type);
         return -ENOKEY;
     }
+    wuwa_info("create: raw, allocating\n");
 
     sock->state = SS_UNCONNECTED;
+    wuwa_info("create: sk_alloc\n");
     struct sock* sk = sk_alloc(net, PF_INET, GFP_KERNEL, wuwa_proto_ptr(), kern);
+    wuwa_info("create: sk=%px\n", sk);
     if (!sk) {
         wuwa_warn("sk_alloc failed!\n");
         return -ENOBUFS;
