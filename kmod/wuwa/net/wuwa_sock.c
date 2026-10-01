@@ -32,7 +32,7 @@ static int wuwa_release(struct socket* sock) {
     }
 
     if (ws->used_pages) {
-        wuwa_info("release free pages n=%d\n", ws->used_pages->size);
+        wuwa_info("release free pages n=%lu\n", (unsigned long)ws->used_pages->size);
         for (int i = 0; i < ws->used_pages->size; ++i) {
             struct page* page = (typeof(page))arraylist_get(ws->used_pages, i);
             if (page) {
