@@ -11,22 +11,28 @@
 
 
 static int wuwa_release(struct socket* sock) {
-    wuwa_info("release wuwa sock\n");
-
-    struct sock* sk = sock->sk;
+    struct sock* sk;
+    struct wuwa_sock* ws;
+    wuwa_info("release enter\n");
+    sk = sock->sk;
+    wuwa_info("release sk=%px\n", sk);
     if (!sk) {
         return 0;
     }
 
-    struct wuwa_sock* ws = (struct wuwa_sock*)sk;
+    ws = (struct wuwa_sock*)sk;
+    wuwa_info("release ws session=%d used=%px\n", ws->session,
+              ws->used_pages);
     ws->version = 0;
 
     if (ws->session) {
+        wuwa_info("release del region\n");
         wuwa_del_unsafe_region(ws->session);
         ws->session = 0;
     }
 
     if (ws->used_pages) {
+        wuwa_info("release free pages n=%d\n", ws->used_pages->size);
         for (int i = 0; i < ws->used_pages->size; ++i) {
             struct page* page = (typeof(page))arraylist_get(ws->used_pages, i);
             if (page) {
@@ -35,10 +41,14 @@ static int wuwa_release(struct socket* sock) {
         }
         wuwa_info("free %lu used pages\n", ws->used_pages->size);
         arraylist_destroy(ws->used_pages);
+        wuwa_info("release pages done\n");
     }
 
+    wuwa_info("release orphan\n");
     sock_orphan(sk);
+    wuwa_info("release put\n");
     sock_put(sk);
+    wuwa_info("release done\n");
     return 0;
 }
 
