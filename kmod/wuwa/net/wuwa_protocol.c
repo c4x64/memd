@@ -173,12 +173,10 @@ int wuwa_proto_init(void) {
     if (wuwa_build_proto() || wuwa_build_ops())
         return -ENODEV;
     err = proto_register(wuwa_proto_ptr(), 1);
-    wuwa_info("proto_register -> %d\n", err);
     if (err)
         goto out;
 
     err = register_free_family();
-    wuwa_info("register_free_family -> %d\n", err);
     if (err)
         goto out_proto;
 
@@ -210,15 +208,11 @@ static int wuwa_sock_create(struct net* net, struct socket* sock, int protocol, 
     }
 
     if (sock->type != SOCK_RAW) {
-        wuwa_info("create: non-raw type=%d -> ENOKEY\n", sock->type);
         return -ENOKEY;
     }
-    wuwa_info("create: raw, allocating\n");
 
     sock->state = SS_UNCONNECTED;
-    wuwa_info("create: sk_alloc\n");
     struct sock* sk = sk_alloc(net, PF_INET, GFP_KERNEL, wuwa_proto_ptr(), kern);
-    wuwa_info("create: sk=%px\n", sk);
     if (!sk) {
         wuwa_warn("sk_alloc failed!\n");
         return -ENOBUFS;

@@ -13,45 +13,33 @@
 static int wuwa_release(struct socket* sock) {
     struct sock* sk;
     struct wuwa_sock* ws;
-    wuwa_info("release enter\n");
     sk = sock->sk;
-    wuwa_info("release sk=%px\n", sk);
     if (!sk) {
         return 0;
     }
 
     ws = (struct wuwa_sock*)sk;
-    wuwa_info("release ws session=%d used=%px\n", ws->session,
-              ws->used_pages);
     ws->version = 0;
 
     if (ws->session) {
-        wuwa_info("release del region\n");
         wuwa_del_unsafe_region(ws->session);
         ws->session = 0;
     }
 
     if (ws->used_pages) {
-        wuwa_info("release free pages n=%lu\n", (unsigned long)ws->used_pages->size);
         for (int i = 0; i < ws->used_pages->size; ++i) {
             struct page* page = (typeof(page))arraylist_get(ws->used_pages, i);
             if (page) {
                 __free_page(page);
             }
         }
-        wuwa_info("free %lu used pages\n", ws->used_pages->size);
         arraylist_destroy(ws->used_pages);
-        wuwa_info("release pages done\n");
     }
-
-    wuwa_info("release orphan\n");
     /* TEST: skip sock_orphan (takes sk_callback_lock which panics on
      * foreign layout). Our socket has no callbacks/timers/packets —
      * nothing needs detaching. If close survives, orphan is the
      * confirmed killer and gets a layout-safe replacement. */
-    wuwa_info("release put\n");
     sock_put(sk);
-    wuwa_info("release done\n");
     return 0;
 }
 
@@ -59,13 +47,11 @@ static int wuwa_ioctl(struct socket* sock, unsigned int cmd, unsigned long arg) 
     void __user* argp = (void __user*)arg;
 
     int i;
-    wuwa_info("ioctl cmd=%u arg=%lx\n", cmd, arg);
     for (i = 0; i < ARRAY_SIZE(ioctl_handlers); i++) {
         if (cmd == ioctl_handlers[i].cmd) {
             if (ioctl_handlers[i].handler == NULL) {
                 continue;
             }
-            wuwa_info("ioctl dispatch %d\n", i);
             return ioctl_handlers[i].handler(sock, argp);
         }
     }

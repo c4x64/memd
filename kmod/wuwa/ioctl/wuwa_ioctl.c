@@ -638,13 +638,11 @@ int do_hide_status(struct socket* sock, void* arg) {
     unsigned long rc;
     (void)sock;
     cap = wuwa_capable(CAP_SYS_ADMIN);
-    wuwa_info("hide_status cap=%d arg=%px\n", cap, arg);
     if (!cap)
         return -EPERM;
     cmd.active = wuwa_hide_active();
     cmd.hidden_count = wuwa_hide_count();
     rc = wuwa_copy_to_user(arg, &cmd, sizeof(cmd));
-    wuwa_info("hide_status copy rc=%lu\n", rc);
     if (rc) {
         return -EFAULT;
     }
