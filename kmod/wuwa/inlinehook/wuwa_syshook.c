@@ -172,17 +172,15 @@ int wuwa_hide_install(void)
         spin_unlock_irqrestore(&syshook_lock, flags);
         return 0;
     }
-    hooked_ops = ops;
-    orig_iterate = orig;
-    /* RO-safe write (guarded, verified, restored on exit/uninstall). */
+    /* RO-safe write (guarded, verified). State commits ONLY on verified
+     * install: failure paths never lose orig and never report inactive
+     * while hooked (retryable + honest, never dangling-silent). */
     {
         int wr;
         wr = wuwa_table_write64((unsigned long)ops + (unsigned long)wuwa_iter_off(),
                                 (unsigned long)wuwa_iterate_shared);
         if (wr) {
             wuwa_err("hide install: table write failed: %d\n", wr);
-            hooked_ops = NULL;
-            orig_iterate = NULL;
             spin_unlock_irqrestore(&syshook_lock, flags);
             return -EIO;
         }
@@ -192,14 +190,27 @@ int wuwa_hide_install(void)
         back = (iterate_shared_fn)wuwa_iter_get(ops);
         if (!back || back != wuwa_iterate_shared) {
             wuwa_err("hide install: readback mismatch\n");
-            wuwa_table_write64((unsigned long)&ops->iterate_shared,
-                               (unsigned long)orig);
-            hooked_ops = NULL;
-            orig_iterate = NULL;
+            /* Best-effort restore to original (runtime offset, not
+             * compiled: 6.6 moved this slot). Verify it. */
+            if (!wuwa_table_write64((unsigned long)ops + (unsigned long)wuwa_iter_off(),
+                                    (unsigned long)orig)) {
+                back = (iterate_shared_fn)wuwa_iter_get(ops);
+                if (back && back == orig) {
+                    spin_unlock_irqrestore(&syshook_lock, flags);
+                    return -EIO;
+                }
+            }
+            /* Restore unverified: keep hooked (orig intact) so a later
+             * uninstall can retry — never clear into a dangling hook. */
+            hooked_ops = ops;
+            orig_iterate = orig;
+            hook_active = 1;
             spin_unlock_irqrestore(&syshook_lock, flags);
             return -EIO;
         }
     }
+    hooked_ops = ops;
+    orig_iterate = orig;
     hook_active = 1;
     spin_unlock_irqrestore(&syshook_lock, flags);
     return 0;
@@ -210,7 +221,6 @@ int wuwa_hide_uninstall(void)
     unsigned long flags;
     const struct file_operations *ops;
     iterate_shared_fn orig;
-    int bad = 0;
 
     spin_lock_irqsave(&syshook_lock, flags);
     if (!hook_active) {
@@ -219,20 +229,30 @@ int wuwa_hide_uninstall(void)
     }
     ops = hooked_ops;
     orig = orig_iterate;
+    /* Restore + verify. On ANY failure keep hooked/orig/active (honest +
+     * retryable) — clearing into an unverified f_op would dangle-silent
+     * (/proc empty for non-root, NULL call for root). Only a verified
+     * restore clears state. */
     if (wuwa_table_write64((unsigned long)ops + (unsigned long)wuwa_iter_off(),
-                           (unsigned long)orig))
-        bad = 1;
-    else {
+                           (unsigned long)orig)) {
+        wuwa_err("hide uninstall: table write failed\n");
+        spin_unlock_irqrestore(&syshook_lock, flags);
+        return -EIO;
+    }
+    {
         iterate_shared_fn back = NULL;
         back = (iterate_shared_fn)wuwa_iter_get(ops);
-        if (!back || back != orig)
-            bad = 1;
+        if (!back || back != orig) {
+            wuwa_err("hide uninstall: readback mismatch\n");
+            spin_unlock_irqrestore(&syshook_lock, flags);
+            return -EIO;
+        }
     }
     hooked_ops = NULL;
     orig_iterate = NULL;
     hook_active = 0;
     spin_unlock_irqrestore(&syshook_lock, flags);
-    return bad ? -EIO : 0;
+    return 0;
 }
 
 int wuwa_hide_active(void)
