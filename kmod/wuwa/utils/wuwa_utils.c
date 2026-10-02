@@ -206,7 +206,7 @@ uintptr_t vaddr_to_phy_addr(struct mm_struct* mm, uintptr_t va) {
         return 0;
     }
     wuwa_info("walk ok va=%lx pa=%lx\n", va,
-              (pte_pfn(__pte(pte_v)) << PAGE_SHIFT) + (va & (PAGE_SIZE - 1)));
+              (unsigned long)((pte_pfn(__pte(pte_v)) << PAGE_SHIFT) + (va & (PAGE_SIZE - 1))));
     return (pte_pfn(__pte(pte_v)) << PAGE_SHIFT) + (va & (PAGE_SIZE - 1));
 }
 
