@@ -13,4 +13,13 @@
 unsigned long wuwa_copy_from_user(void *dst, const void *src, unsigned long len);
 unsigned long wuwa_copy_to_user(void *dst, const void *src, unsigned long len);
 
+/* Cross-process user copies (KPTI-safe: kernel resolves target tables,
+ * no pgd offsets, no mmap_lock in our image). Chunked. Returns bytes
+ * remaining (0 = full success). Task ref held by caller. */
+struct task_struct;
+unsigned long wuwa_copy_from_task(struct task_struct *t, void *dst_kernel,
+                                  unsigned long src_user, unsigned long len);
+unsigned long wuwa_copy_to_task(struct task_struct *t, unsigned long dst_user,
+                                const void *src_kernel, unsigned long len);
+
 #endif /* WUWA_UACCESS_H */

@@ -462,37 +462,51 @@ static inline int memk_valid_phys_addr_range(uintptr_t addr, size_t size) { retu
 
 int do_read_physical_memory(struct socket* sock, void __user* arg) {
     struct wuwa_read_physical_memory_cmd cmd;
-    uintptr_t pa;
-    void* mapped;
+    struct task_struct *task;
+    char *kbuf;
+    unsigned long off = 0;
     int ret;
 
     if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
+    /* Phys diagnostic (best-effort walk; 0 when unresolvable, e.g.
+     * KPTI user tables — data below does not depend on it). */
     ret = translate_process_vaddr(cmd.pid, cmd.src_va, (uintptr_t*)&cmd.phy_addr);
-    if (ret < 0) {
-        return ret;
-    }
+    if (ret < 0)
+        cmd.phy_addr = 0;
 
     if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
 
-    pa = cmd.phy_addr;
-    if (!pa || !wuwa_pfn_ok(__phys_to_pfn(pa)) || !IS_VALID_PHYS_ADDR_RANGE(pa, cmd.size)) {
+    if (!cmd.size)
         return -EFAULT;
-    }
-
-    mapped = phys_to_virt(pa);
-    if (!mapped) {
+    task = get_target_task(cmd.pid);
+    if (!task)
+        return -ESRCH;
+    kbuf = kmalloc(65536, GFP_KERNEL);
+    if (!kbuf) {
+        put_task_struct(task);
         return -ENOMEM;
     }
-
-    if (wuwa_copy_to_user((void*)cmd.dst_va, mapped, cmd.size)) {
-        return -EACCES;
+    /* Data via kernel cross-process copy (KPTI/lock-safe, universal).
+     * No page walk, no phys needed for contents. */
+    while (off < cmd.size) {
+        unsigned long chunk = cmd.size - off;
+        if (chunk > 65536)
+            chunk = 65536;
+        if (wuwa_copy_from_task(task, kbuf, cmd.src_va + off, chunk))
+            break;
+        if (wuwa_copy_to_user((void *)(cmd.dst_va + off), kbuf, chunk))
+            break;
+        off += chunk;
     }
-
+    kfree(kbuf);
+    put_task_struct(task);
+    if (off != cmd.size)
+        return -EFAULT;
     return 0;
 }
 
@@ -535,37 +549,49 @@ int do_find_process(struct socket* sock, void* arg) {
 
 int do_write_physical_memory(struct socket* sock, void __user* arg) {
     struct wuwa_write_physical_memory_cmd cmd;
-    uintptr_t pa;
-    void* mapped;
+    struct task_struct *task;
+    char *kbuf;
+    unsigned long off = 0;
     int ret;
 
     if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
+    /* Phys diagnostic (best-effort; data below does not depend on it). */
     ret = translate_process_vaddr(cmd.pid, cmd.dst_va, (uintptr_t*)&cmd.phy_addr);
-    if (ret < 0) {
-        return ret;
-    }
+    if (ret < 0)
+        cmd.phy_addr = 0;
 
     if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
 
-    pa = cmd.phy_addr;
-    if (!pa || !wuwa_pfn_ok(__phys_to_pfn(pa)) || !IS_VALID_PHYS_ADDR_RANGE(pa, cmd.size)) {
+    if (!cmd.size)
         return -EFAULT;
-    }
-
-    mapped = phys_to_virt(pa);
-    if (!mapped) {
+    task = get_target_task(cmd.pid);
+    if (!task)
+        return -ESRCH;
+    kbuf = kmalloc(65536, GFP_KERNEL);
+    if (!kbuf) {
+        put_task_struct(task);
         return -ENOMEM;
     }
-
-    if (wuwa_copy_from_user(mapped, (void*)cmd.src_va, cmd.size)) {
-        return -EACCES;
+    /* Data via kernel cross-process copy (KPTI/lock-safe, universal). */
+    while (off < cmd.size) {
+        unsigned long chunk = cmd.size - off;
+        if (chunk > 65536)
+            chunk = 65536;
+        if (wuwa_copy_from_user(kbuf, (void *)(cmd.src_va + off), chunk))
+            break;
+        if (wuwa_copy_to_task(task, cmd.dst_va + off, kbuf, chunk))
+            break;
+        off += chunk;
     }
-
+    kfree(kbuf);
+    put_task_struct(task);
+    if (off != cmd.size)
+        return -EFAULT;
     return 0;
 }
 

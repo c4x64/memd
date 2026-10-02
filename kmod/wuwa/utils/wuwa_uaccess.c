@@ -50,3 +50,45 @@ unsigned long wuwa_copy_to_user(void *dst, const void *src,
 {
     return wuwa_uc_copy((char *)dst, (const char *)src, len, 1);
 }
+
+#define WUWA_TASK_CHUNK (64UL * 1024UL)
+
+static unsigned long wuwa_task_copy(struct task_struct *t, char *kbuf,
+                                    unsigned long uaddr, unsigned long len,
+                                    int to_task)
+{
+    unsigned long done = 0;
+    if (!t || !kbuf || !len)
+        return len;
+    while (done < len) {
+        unsigned long chunk = len - done;
+        int ret;
+        if (chunk > WUWA_TASK_CHUNK)
+            chunk = WUWA_TASK_CHUNK;
+        if (to_task)
+            ret = access_process_vm(t, uaddr + done, kbuf + done,
+                                    (int)chunk, FOLL_WRITE);
+        else
+            ret = access_process_vm(t, uaddr + done, kbuf + done,
+                                    (int)chunk, 0);
+        if (ret <= 0)
+            return len - done;
+        done += (unsigned long)ret;
+        if ((unsigned long)ret < chunk)
+            return len - done;
+    }
+    return 0;
+}
+
+unsigned long wuwa_copy_from_task(struct task_struct *t, void *dst_kernel,
+                                  unsigned long src_user, unsigned long len)
+{
+    return wuwa_task_copy(t, (char *)dst_kernel, src_user, len, 0);
+}
+
+unsigned long wuwa_copy_to_task(struct task_struct *t, unsigned long dst_user,
+                                const void *src_kernel, unsigned long len)
+{
+    /* access_process_vm takes non-const buf; our src is kernel-read, safe. */
+    return wuwa_task_copy(t, (char *)src_kernel, dst_user, len, 1);
+}
