@@ -145,13 +145,18 @@ uintptr_t vaddr_to_phy_addr(struct mm_struct* mm, uintptr_t va) {
         return 0;
     }
     pgd_base = wuwa_valid_pgd(mm);
+    wuwa_info("walk va=%lx pgd_base=%lx\n", va, pgd_base);
     if (!pgd_base)
         return 0;
     pgdp = (pgd_t *)pgd_base + pgd_index(va);
-    if (wuwa_safe_read64(pgdp, &v))
+    if (wuwa_safe_read64(pgdp, &v)) {
+        wuwa_info("walk pgd read fail\n");
         return 0;
-    if (pgd_none(__pgd(v)) || pgd_bad(__pgd(v)))
+    }
+    if (pgd_none(__pgd(v)) || pgd_bad(__pgd(v))) {
+        wuwa_info("walk pgd none/bad v=%lx\n", v);
         return 0;
+    }
     p4dp = (p4d_t *)p4d_offset((pgd_t *)pgd_base, va);
     if (wuwa_safe_read64(p4dp, &v))
         return 0;
