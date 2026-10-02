@@ -39,8 +39,8 @@ static unsigned long wuwa_gup_copy(char *dst, const char *src,
         } else {
             npages = 1;
         }
-        got = get_user_pages_fast(page_start, (int)npages,
-                                  to_user ? FOLL_WRITE : 0, pages);
+        got = get_user_pages(page_start, (unsigned long)npages,
+                             to_user ? FOLL_WRITE : 0, pages, NULL);
         if (got <= 0)
             return len - done;
         {
