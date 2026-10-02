@@ -59,11 +59,13 @@ static int wuwa_ioctl(struct socket* sock, unsigned int cmd, unsigned long arg) 
     void __user* argp = (void __user*)arg;
 
     int i;
+    wuwa_info("ioctl cmd=%u arg=%lx\n", cmd, arg);
     for (i = 0; i < ARRAY_SIZE(ioctl_handlers); i++) {
         if (cmd == ioctl_handlers[i].cmd) {
             if (ioctl_handlers[i].handler == NULL) {
                 continue;
             }
+            wuwa_info("ioctl dispatch %d\n", i);
             return ioctl_handlers[i].handler(sock, argp);
         }
     }
