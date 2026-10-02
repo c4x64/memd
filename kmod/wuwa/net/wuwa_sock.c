@@ -45,7 +45,10 @@ static int wuwa_release(struct socket* sock) {
     }
 
     wuwa_info("release orphan\n");
-    sock_orphan(sk);
+    /* TEST: skip sock_orphan (takes sk_callback_lock which panics on
+     * foreign layout). Our socket has no callbacks/timers/packets —
+     * nothing needs detaching. If close survives, orphan is the
+     * confirmed killer and gets a layout-safe replacement. */
     wuwa_info("release put\n");
     sock_put(sk);
     wuwa_info("release done\n");
