@@ -172,6 +172,8 @@ static void wuwa_learn_task(void)
     (void)hits;
 }
 
+static int wuwa_pgd_shape_ok(u64 phys);
+
 static void wuwa_learn_pgd(void)
 {
     struct mm_struct *mm;
@@ -193,14 +195,61 @@ static void wuwa_learn_pgd(void)
         mmput(mm);
         return;
     }
-    /* pgd is early in mm_struct; scan the first page for TTBR0 value. */
-    if (wuwa_count_u64(mm, 512, want, &off) == 1) {
-        wuwa_learned.m_pgd = off;
-        wuwa_info("learn: mm pgd at +%d\n", off);
-    } else {
-        wuwa_err("learn: mm pgd not unique\n");
+    /* Full-page scan for TTBR0 value + pgd-shape validation.
+     * TTBR0 can appear multiple times (saved copies, coincidence):
+     * the true pgd points to a page shaped like a pgd (mostly zeros
+     * + valid DRAM descriptors). Garbage matches fail shape safely
+     * (guarded reads, DRAM-range checks — never a fault). */
+    {
+        int i, hits = 0, best = -1;
+        for (i = 0; i + 8 <= 4096; i += 8) {
+            u64 v = 0;
+            memcpy(&v, (char *)mm + i, 8);
+            if (v != want)
+                continue;
+            hits++;
+            if (best < 0 && wuwa_pgd_shape_ok(want))
+                best = i;
+        }
+        if (best >= 0) {
+            wuwa_learned.m_pgd = best;
+            wuwa_info("learn: mm pgd at +%d (%d candidates)\n", best,
+                      hits);
+        } else {
+            wuwa_err("learn: mm pgd no valid shape (%d raw hits)\n",
+                     hits);
+        }
     }
     mmput(mm);
+}
+
+/* Validate that phys page looks like a pgd (guarded reads only). */
+static int wuwa_pgd_shape_ok(u64 phys)
+{
+    int i, zeros = 0, valid = 0;
+    void *kv;
+    if (phys < 0x40000000UL || phys >= (64UL << 30))
+        return 0;
+    if (phys & ((1UL << PAGE_SHIFT) - 1))
+        return 0;
+    kv = (void *)phys_to_virt((phys_addr_t)phys);
+    for (i = 0; i < 512; i++) {
+        unsigned long d = 0;
+        unsigned long out;
+        unsigned type;
+        if (wuwa_safe_read64((char *)kv + i * 8, &d))
+            return 0;
+        if (!d) {
+            zeros++;
+            continue;
+        }
+        type = (unsigned)(d & 3UL);
+        out = d & 0x0000fffffffff000UL;
+        if ((type == 3 || type == 1) && out >= 0x40000000UL &&
+            out < (64UL << 30))
+            valid++;
+    }
+    return zeros > 100 && valid > 0;
 }
 
 /* Read one maps line: start, end (hex), perms[0]. Returns 0 ok. */
