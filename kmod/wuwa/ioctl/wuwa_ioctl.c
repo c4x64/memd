@@ -607,12 +607,18 @@ int do_hide_process(struct socket* sock, void* arg) {
 
 int do_hide_status(struct socket* sock, void* arg) {
     struct wuwa_hide_status_cmd cmd;
+    int cap;
+    unsigned long rc;
     (void)sock;
-    if (!wuwa_capable(CAP_SYS_ADMIN))
+    cap = wuwa_capable(CAP_SYS_ADMIN);
+    wuwa_info("hide_status cap=%d arg=%px\n", cap, arg);
+    if (!cap)
         return -EPERM;
     cmd.active = wuwa_hide_active();
     cmd.hidden_count = wuwa_hide_count();
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    rc = copy_to_user(arg, &cmd, sizeof(cmd));
+    wuwa_info("hide_status copy rc=%lu\n", rc);
+    if (rc) {
         return -EFAULT;
     }
     return 0;
