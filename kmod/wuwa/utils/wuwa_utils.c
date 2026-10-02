@@ -81,7 +81,7 @@ pte_t* page_from_virt_user(struct mm_struct* mm, uintptr_t va) {
     pmd_t* pmd;
     pte_t* ptep = NULL;
 
-    MM_READ_LOCK(mm);
+    /* no mmap_lock: universal image (offset varies); mm pinned + fail-closed walk */
 
     pgd = pgd_offset(mm, va);
     if (pgd_none(*pgd) || pgd_bad(*pgd)) {
@@ -123,7 +123,7 @@ pte_t* page_from_virt_user(struct mm_struct* mm, uintptr_t va) {
         goto out;
     }
 out:
-    MM_READ_UNLOCK(mm);
+    /* no mmap_lock: universal image (offset varies); mm pinned + fail-closed walk */
 
     return ptep;
 }
@@ -774,7 +774,7 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
     }
     wuwa_learn_vma_once();
 
-    MM_READ_LOCK(mm)
+    /* no mmap_lock: universal image (offset varies); mm pinned + fail-closed walk */
 
     /* find_vma() is stable + exported on 5.10 through 6.12 (list walk
      * below, maple walk above): mm->mmap / vma_iterator would pin the
@@ -791,7 +791,7 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
                 vma_find = (void *)kallsyms_lookup_name_ex("__find_vma");
         }
         if (!vma_find) {
-            MM_READ_UNLOCK(mm);
+            /* no mmap_lock: universal image (offset varies); mm pinned + fail-closed walk */
             mmput(mm);
             return 0;
         }
@@ -819,7 +819,7 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
     }
 
 ret:
-    MM_READ_UNLOCK(mm)
+    /* no mmap_lock: universal image (offset varies); mm pinned + fail-closed walk */
 
     mmput(mm);
     return result;

@@ -175,7 +175,7 @@ void traverse_page_tables(struct mm_struct* mm, struct page_walk_stats* stats) {
         stats->pud_huge_count = 0;
     }
 
-    MM_READ_LOCK(mm);
+    /* no mmap_lock: universal image (offset varies); mm pinned + fail-closed walk */
 
     pgd = wuwa_m_pgd(mm);
 
@@ -192,5 +192,5 @@ void traverse_page_tables(struct mm_struct* mm, struct page_walk_stats* stats) {
 
     print_merged_region(&region_start, &region_end);
 
-    MM_READ_UNLOCK(mm);
+    /* no mmap_lock: universal image (offset varies); mm pinned + fail-closed walk */
 }
