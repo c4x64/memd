@@ -99,6 +99,10 @@ jobs:
             echo 'X(p, struct proto, per_cpu_fw_alloc);';
             echo '#endif';
             echo 'X(o, struct proto_ops, release); X(o, struct proto_ops, mmap); X(o, struct proto_ops, accept); X(o, struct proto_ops, owner); X(o, struct proto_ops, family);';
+            echo 'X(sk, struct sock, sk_callback_lock); X(sk, struct sock, sk_prot); X(sk, struct sock, sk_state);';
+            echo 'X(so, struct socket, state); X(so, struct socket, type); X(so, struct socket, sk); X(so, struct socket, ops);';
+            echo '#define SZ2(t) __attribute__((used)) char _w_sz2_##t[sizeof(t) + 1]';
+            echo 'SZ2(struct sock); SZ2(struct socket);';
             echo 'X(f, struct net_proto_family, family); X(f, struct net_proto_family, create); X(f, struct net_proto_family, owner);';
             echo 'X(d, struct dir_context, actor); X(d, struct dir_context, pos);';
             echo 'X(u, struct new_utsname, sysname); X(u, struct new_utsname, nodename); X(u, struct new_utsname, release); X(u, struct new_utsname, machine);';
