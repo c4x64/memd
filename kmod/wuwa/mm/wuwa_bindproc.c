@@ -1,4 +1,5 @@
 #include "wuwa_bindproc.h"
+#include "wuwa_uaccess.h"
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/module.h>
@@ -90,7 +91,7 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
             int prot;
             pgprot_t new_prot;
 
-            if (copy_from_user(&prot, (int __user*)arg, sizeof(prot))) {
+            if (wuwa_copy_from_user(&prot, (int __user*)arg, sizeof(prot))) {
                 return -EFAULT;
             }
 
@@ -128,7 +129,7 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
     case WUWA_BP_IOCTL_READ_MEMORY:
         {
             struct bp_read_memory_cmd cmd;
-            if (copy_from_user(&cmd, (struct bp_read_memory_cmd __user*)arg, sizeof(cmd))) {
+            if (wuwa_copy_from_user(&cmd, (struct bp_read_memory_cmd __user*)arg, sizeof(cmd))) {
                 return -EFAULT;
             }
             if (cmd.size == 0 || cmd.size > 0x10000) {
@@ -191,9 +192,9 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
                 }
 
                 /* Copy data to userspace */
-                ret = copy_to_user(cmd.dst_va + total_read, mapped + offset, bytes_to_read);
+                ret = wuwa_copy_to_user(cmd.dst_va + total_read, mapped + offset, bytes_to_read);
                 if (ret != 0) {
-                    wuwa_err("copy_to_user failed: %d bytes not copied\n", ret);
+                    wuwa_err("wuwa_copy_to_user failed: %d bytes not copied\n", ret);
                     ret = -EFAULT;
                     goto out;
                 }
@@ -209,7 +210,7 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
     case WUWA_BP_IOCTL_WRITE_MEMORY:
         {
             struct bp_write_memory_cmd cmd;
-            if (copy_from_user(&cmd, (struct bp_write_memory_cmd __user*)arg, sizeof(cmd))) {
+            if (wuwa_copy_from_user(&cmd, (struct bp_write_memory_cmd __user*)arg, sizeof(cmd))) {
                 return -EFAULT;
             }
             if (cmd.size == 0 || cmd.size > 0x10000) {
@@ -268,9 +269,9 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
                 }
 
                 /* Copy data from userspace to target process memory */
-                ret = copy_from_user(mapped + offset, (void __user*)(cmd.src_va + total_written), bytes_to_write);
+                ret = wuwa_copy_from_user(mapped + offset, (void __user*)(cmd.src_va + total_written), bytes_to_write);
                 if (ret != 0) {
-                    wuwa_err("copy_from_user failed: %d bytes not copied\n", ret);
+                    wuwa_err("wuwa_copy_from_user failed: %d bytes not copied\n", ret);
                     ret = -EFAULT;
                     goto out_write;
                 }
@@ -361,7 +362,7 @@ int do_bind_proc(struct socket* sock, void __user* arg) {
     int ret = 0;
 
     /* Copy command from userspace */
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -415,13 +416,13 @@ int do_bind_proc(struct socket* sock, void __user* arg) {
 
     /* Copy result back to userspace before installing fd */
     cmd.fd = fd;
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         wuwa_err("failed to copy cmd back to user\n");
         ret = -EFAULT;
         goto err_fput;
     }
 
-    /* Install fd only after successful copy_to_user */
+    /* Install fd only after successful wuwa_copy_to_user */
     fd_install(fd, filp);
 
     return 0;

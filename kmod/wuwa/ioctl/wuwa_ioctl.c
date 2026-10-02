@@ -1,4 +1,5 @@
 #include "wuwa_ioctl.h"
+#include "wuwa_uaccess.h"
 
 #include <asm-generic/errno-base.h>
 #include <linux/capability.h>
@@ -27,7 +28,7 @@ int do_vaddr_translate(struct socket* sock, void* arg) {
     struct wuwa_addr_translate_cmd cmd;
     int ret;
 
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -36,7 +37,7 @@ int do_vaddr_translate(struct socket* sock, void* arg) {
         return ret;
     }
 
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
     return 0;
@@ -58,7 +59,7 @@ int do_debug_info(struct socket* sock, void* arg) {
             debug_info_cmd.ttbr0_el1) : 0;
     }
 
-    if (copy_to_user(arg, &debug_info_cmd, sizeof(debug_info_cmd))) {
+    if (wuwa_copy_to_user(arg, &debug_info_cmd, sizeof(debug_info_cmd))) {
         return -EFAULT;
     }
 
@@ -67,7 +68,7 @@ int do_debug_info(struct socket* sock, void* arg) {
 
 int do_at_s1e0r(struct socket* sock, void* arg) {
     struct wuwa_at_s1e0r_cmd cmd;
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -114,7 +115,7 @@ int do_at_s1e0r(struct socket* sock, void* arg) {
         return -EFAULT;
     }
 
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
     return 0;
@@ -122,7 +123,7 @@ int do_at_s1e0r(struct socket* sock, void* arg) {
 
 int do_get_page_info(struct socket* sock, void* arg) {
     struct wuwa_page_info_cmd cmd;
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -160,7 +161,7 @@ int do_get_page_info(struct socket* sock, void* arg) {
     cmd.page._mapcount = page_struct->_mapcount;
     cmd.page._refcount = page_struct->_refcount;
 
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -172,7 +173,7 @@ int do_pte_mapping(struct socket* sock, void* arg) {
     // 这里需要注意 android kenel 6.6.66找不到 pte_mkwrite
     struct wuwa_sock* ws = (struct wuwa_sock*)sock->sk;
     struct wuwa_pte_mapping_cmd cmd;
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -346,7 +347,7 @@ int do_page_table_walk(struct socket* sock, void* arg) {
     struct wuwa_page_table_walk_cmd cmd;
     struct page_walk_stats stats;
 
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -374,7 +375,7 @@ int do_page_table_walk(struct socket* sock, void* arg) {
     put_task_struct(task);
 
     // Copy result back to userspace
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -414,7 +415,7 @@ int do_copy_process(struct socket* sock, void* arg) {
     struct pid* pid;
     struct task_struct* task /*, *p*/;
 
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -465,7 +466,7 @@ int do_read_physical_memory(struct socket* sock, void __user* arg) {
     void* mapped;
     int ret;
 
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -474,7 +475,7 @@ int do_read_physical_memory(struct socket* sock, void __user* arg) {
         return ret;
     }
 
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -488,7 +489,7 @@ int do_read_physical_memory(struct socket* sock, void __user* arg) {
         return -ENOMEM;
     }
 
-    if (copy_to_user((void*)cmd.dst_va, mapped, cmd.size)) {
+    if (wuwa_copy_to_user((void*)cmd.dst_va, mapped, cmd.size)) {
         return -EACCES;
     }
 
@@ -497,7 +498,7 @@ int do_read_physical_memory(struct socket* sock, void __user* arg) {
 
 int do_get_module_base(struct socket* sock, void __user* arg) {
     struct wuwa_get_module_base_cmd cmd;
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -507,7 +508,7 @@ int do_get_module_base(struct socket* sock, void __user* arg) {
     }
 
     cmd.base = base;
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -516,7 +517,7 @@ int do_get_module_base(struct socket* sock, void __user* arg) {
 
 int do_find_process(struct socket* sock, void* arg) {
     struct wuwa_find_proc_cmd cmd;
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -525,7 +526,7 @@ int do_find_process(struct socket* sock, void* arg) {
         return -ENAVAIL;
     }
 
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -538,7 +539,7 @@ int do_write_physical_memory(struct socket* sock, void __user* arg) {
     void* mapped;
     int ret;
 
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -547,7 +548,7 @@ int do_write_physical_memory(struct socket* sock, void __user* arg) {
         return ret;
     }
 
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -561,7 +562,7 @@ int do_write_physical_memory(struct socket* sock, void __user* arg) {
         return -ENOMEM;
     }
 
-    if (copy_from_user(mapped, (void*)cmd.src_va, cmd.size)) {
+    if (wuwa_copy_from_user(mapped, (void*)cmd.src_va, cmd.size)) {
         return -EACCES;
     }
 
@@ -570,13 +571,13 @@ int do_write_physical_memory(struct socket* sock, void __user* arg) {
 
 int do_is_process_alive(struct socket* sock, void* arg) {
     struct wuwa_is_proc_alive_cmd cmd;
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
     cmd.alive = is_pid_alive(cmd.pid);
 
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -591,7 +592,7 @@ int do_hide_process(struct socket* sock, void* arg) {
      * pids (confusion/DoS). The overlay runs as root. */
     if (!wuwa_capable(CAP_SYS_ADMIN))
         return -EPERM;
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
     if (cmd.pid <= 0)
@@ -616,7 +617,7 @@ int do_hide_status(struct socket* sock, void* arg) {
         return -EPERM;
     cmd.active = wuwa_hide_active();
     cmd.hidden_count = wuwa_hide_count();
-    rc = copy_to_user(arg, &cmd, sizeof(cmd));
+    rc = wuwa_copy_to_user(arg, &cmd, sizeof(cmd));
     wuwa_info("hide_status copy rc=%lu\n", rc);
     if (rc) {
         return -EFAULT;
@@ -629,14 +630,14 @@ int do_hide_install(struct socket* sock, void* arg) {
     (void)sock;
     if (!wuwa_capable(CAP_SYS_ADMIN))
         return -EPERM;
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
     /* Userspace gates on CFI status BEFORE calling: on enforcing
      * kernels the indirect table call would trap, so install there is
      * refused by policy (status stays inactive, loud NO-GO). */
     cmd.result = cmd.install ? wuwa_hide_install() : wuwa_hide_uninstall();
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
     return 0;
@@ -648,7 +649,7 @@ int do_page_perms(struct socket* sock, void* arg) {
     (void)sock;
     if (!wuwa_capable(CAP_SYS_ADMIN))
         return -EPERM;
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
     /* Descriptor metadata only: safe on execute-only mappings (no
@@ -657,7 +658,7 @@ int do_page_perms(struct socket* sock, void* arg) {
                           &cmd.leaf_level, &cmd.ap, &cmd.xn, cmd.desc);
     cmd.idx0 = pgd_index(cmd.va);
     cmd.idx1 = pud_index(cmd.va);
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
     return ret;
@@ -671,7 +672,7 @@ int do_disp_status(struct socket* sock, void* arg) {
         return -EPERM;
     if (wuwa_disp_status(&cmd))
         return -EINVAL;
-    if (copy_to_user(arg, &cmd, sizeof(cmd)))
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
     return 0;
 }
@@ -682,13 +683,13 @@ int do_disp_install(struct socket* sock, void* arg) {
     (void)sock;
     if (!wuwa_capable(CAP_SYS_ADMIN))
         return -EPERM;
-    if (copy_from_user(&cmd, arg, sizeof(cmd)))
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd)))
         return -EFAULT;
     /* Userspace gates on CFI status BEFORE calling (same policy as the
      * hide hook: enforcing kernels are refused, never attempted). */
     ret = wuwa_disp_install(cmd.backend, cmd.width, cmd.height);
     cmd.rc = ret ? (unsigned int)(-ret) : 0;
-    if (copy_to_user(arg, &cmd, sizeof(cmd)))
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
     return 0;
 }
@@ -701,21 +702,21 @@ int do_disp_frame(struct socket* sock, void* arg) {
     (void)sock;
     if (!wuwa_capable(CAP_SYS_ADMIN))
         return -EPERM;
-    if (copy_from_user(&cmd, arg, sizeof(cmd)))
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd)))
         return -EFAULT;
     count = cmd.count;
     if (count > WUWA_DISP_MAX_OPS)
         count = WUWA_DISP_MAX_OPS;
     if (count == 0) {
         cmd.rc = 0;
-        if (copy_to_user(arg, &cmd, sizeof(cmd)))
+        if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd)))
             return -EFAULT;
         return 0;
     }
     kops = kmalloc((size_t)count * sizeof(*kops), GFP_KERNEL);
     if (!kops)
         return -ENOMEM;
-    if (copy_from_user(kops, (void __user *)(uintptr_t)cmd.ops,
+    if (wuwa_copy_from_user(kops, (void __user *)(uintptr_t)cmd.ops,
                        (size_t)count * sizeof(*kops))) {
         kfree(kops);
         return -EFAULT;
@@ -723,20 +724,20 @@ int do_disp_frame(struct socket* sock, void* arg) {
     ret = wuwa_disp_frame(kops, count);
     kfree(kops);
     cmd.rc = ret ? (unsigned int)(-ret) : 0;
-    if (copy_to_user(arg, &cmd, sizeof(cmd)))
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
     return 0;
 }
 
 int do_give_root(struct socket* sock, void* arg) {
     struct wuwa_give_root_cmd cmd;
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
     cmd.result = give_root();
 
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -750,7 +751,7 @@ int do_read_physical_memory_ioremap(struct socket* sock, void* arg) {
     void* mapped;
     int ret;
 
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -776,7 +777,7 @@ int do_read_physical_memory_ioremap(struct socket* sock, void* arg) {
     }
 
     // Return physical address to userspace
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -792,7 +793,7 @@ int do_read_physical_memory_ioremap(struct socket* sock, void* arg) {
         return -ENOMEM;
     }
 
-    ret = copy_to_user((void*)cmd.dst_va, mapped, cmd.size);
+    ret = wuwa_copy_to_user((void*)cmd.dst_va, mapped, cmd.size);
     iounmap(mapped);
 
     return ret ? -EACCES : 0;
@@ -805,7 +806,7 @@ int do_write_physical_memory_ioremap(struct socket* sock, void* arg) {
     void* mapped;
     int ret;
 
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -831,7 +832,7 @@ int do_write_physical_memory_ioremap(struct socket* sock, void* arg) {
     }
 
     // Return physical address to userspace
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -847,7 +848,7 @@ int do_write_physical_memory_ioremap(struct socket* sock, void* arg) {
         return -ENOMEM;
     }
 
-    ret = copy_from_user(mapped, (void*)cmd.dst_va, cmd.size);
+    ret = wuwa_copy_from_user(mapped, (void*)cmd.dst_va, cmd.size);
     iounmap(mapped);
 
     return ret ? -EACCES : 0;
@@ -861,7 +862,7 @@ int do_list_processes(struct socket* sock, void __user* arg) {
     int ret = 0;
 
     // Copy command from userspace
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -896,14 +897,14 @@ int do_list_processes(struct socket* sock, void __user* arg) {
     rcu_read_unlock();
 
     // Copy bitmap to userspace
-    if (copy_to_user(cmd.bitmap, kernel_bitmap, cmd.bitmap_size)) {
+    if (wuwa_copy_to_user(cmd.bitmap, kernel_bitmap, cmd.bitmap_size)) {
         ret = -EFAULT;
         goto out_free;
     }
 
     // Update process count and copy back to userspace
     cmd.process_count = process_count;
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         ret = -EFAULT;
         goto out_free;
     }
@@ -923,7 +924,7 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
     int ret = 0;
 
     // Copy command from userspace
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
 
@@ -1004,7 +1005,7 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
     put_task_struct(task);
 
     // Copy result back to userspace
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
     }
 
