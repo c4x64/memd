@@ -178,16 +178,14 @@ static void wuwa_learn_pgd(void)
 {
     struct mm_struct *mm;
     u64 ttbr, want;
-    int off = -1;
     mm = get_task_mm(current);
     if (!mm) {
         wuwa_err("learn: no mm for pgd\n");
         return;
     }
     ttbr = read_sysreg(ttbr0_el1);
-    /* TTBR0 = ASID[63:48] | BADDR[47:12]: strip ASID, keep phys page. */
+    /* TTBR0 match (non-KPTI fast path): strip ASID, keep phys page. */
     want = ttbr & 0x0000fffffffff000ULL;
-    /* Compiled offset first (fast + self-verifying), then scan. */
     if ((u64)mm->pgd == want) {
         wuwa_learned.m_pgd = (int)((char *)&mm->pgd - (char *)mm);
         wuwa_info("learn: mm pgd compiled+%d confirmed\n",
@@ -195,29 +193,30 @@ static void wuwa_learn_pgd(void)
         mmput(mm);
         return;
     }
-    /* Full-page scan for TTBR0 value + pgd-shape validation.
-     * TTBR0 can appear multiple times (saved copies, coincidence):
-     * the true pgd points to a page shaped like a pgd (mostly zeros
-     * + valid DRAM descriptors). Garbage matches fail shape safely
-     * (guarded reads, DRAM-range checks — never a fault). */
+    /* Shape scan (KPTI-proof): TTBR0 (user tables) need not equal
+     * mm->pgd, so find the pgd by table shape instead of value.
+     * First shape-passing kernel pointer in mm wins (pgd is early).
+     * Direct reads are safe (mm slab is mapped); table reads guarded. */
     {
-        int i, hits = 0, best = -1;
-        for (i = 0; i + 8 <= 4096; i += 8) {
-            u64 v = 0;
-            memcpy(&v, (char *)mm + i, 8);
-            if (v != want)
+        int i, found = -1, n = 0;
+        for (i = 0; i + 8 <= 512; i += 8) {
+            u64 va = 0, pa = 0;
+            memcpy(&va, (char *)mm + i, 8);
+            if ((va & 0xffff000000000000UL) != 0xffff000000000000UL)
                 continue;
-            hits++;
-            if (best < 0 && wuwa_pgd_shape_ok(want))
-                best = i;
+            /* skip obvious non-tables (low values, stack-like?) */
+            pa = (unsigned long)virt_to_phys((void *)(uintptr_t)va);
+            if (!wuwa_pgd_shape_ok(pa))
+                continue;
+            if (!n)
+                found = i;
+            n++;
         }
-        if (best >= 0) {
-            wuwa_learned.m_pgd = best;
-            wuwa_info("learn: mm pgd at +%d (%d candidates)\n", best,
-                      hits);
+        if (found >= 0 && n == 1) {
+            wuwa_learned.m_pgd = found;
+            wuwa_info("learn: mm pgd at +%d (shape)\n", found);
         } else {
-            wuwa_err("learn: mm pgd no valid shape (%d raw hits)\n",
-                     hits);
+            wuwa_err("learn: mm pgd shape ambiguous (%d)\n", n);
         }
     }
     mmput(mm);
