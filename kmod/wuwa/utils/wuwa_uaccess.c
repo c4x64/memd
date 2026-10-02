@@ -1,18 +1,17 @@
-/* GUP + kmap user copies. See header for why inline uaccess is banned
- * in the universal image. Batch-pinned (16 pages) so large R/W works
- * without pinning megabytes at once. Process context only (ioctl path
- * can sleep: kmap, not kmap_atomic). */
+/* Universal user-copy via access_process_vm (stable out-of-line MM API:
+ * same (tsk, addr, buf, len, gup_flags) signature on 5.10 through 6.12,
+ * no inline pinner/uaccess code in our image). Chunked (32K) so large
+ * R/W never pins excessively. Same semantics as copy_*_user (0 ok).
+ * Process context only (current caller's buffers). */
 #include "wuwa_uaccess.h"
 
 #include <linux/mm.h>
-#include <linux/highmem.h>
-#include <linux/pagemap.h>
 #include <linux/sched.h>
 
-#define WUWA_GUP_BATCH 16
+#define WUWA_UC_CHUNK (32UL * 1024UL)
 
-static unsigned long wuwa_gup_copy(char *dst, const char *src,
-                                   unsigned long len, int to_user)
+static unsigned long wuwa_uc_copy(char *dst, const char *src,
+                                  unsigned long len, int to_user)
 {
     unsigned long done = 0;
     if (!len)
@@ -20,56 +19,21 @@ static unsigned long wuwa_gup_copy(char *dst, const char *src,
     if (!dst || !src)
         return len;
     while (done < len) {
-        unsigned long addr = (unsigned long)(to_user ? dst : src) + done;
-        unsigned long page_start = addr & PAGE_MASK;
-        unsigned long off = addr & ~PAGE_MASK;
         unsigned long chunk = len - done;
-        unsigned long first_end = PAGE_SIZE - off;
-        unsigned long npages, i;
-        struct page *pages[WUWA_GUP_BATCH];
-        int got;
-        if (chunk > first_end) {
-            /* span pages: pin up to batch */
-            unsigned long remain = chunk - first_end;
-            npages = 1 + (remain + PAGE_SIZE - 1) / PAGE_SIZE;
-            if (npages > WUWA_GUP_BATCH)
-                npages = WUWA_GUP_BATCH;
-            if (chunk > first_end + (npages - 1) * PAGE_SIZE)
-                chunk = first_end + (npages - 1) * PAGE_SIZE;
-        } else {
-            npages = 1;
-        }
-        got = get_user_pages(page_start, (unsigned long)npages,
-                             to_user ? FOLL_WRITE : 0, pages, NULL);
-        if (got <= 0)
+        int ret;
+        if (chunk > WUWA_UC_CHUNK)
+            chunk = WUWA_UC_CHUNK;
+        if (to_user)
+            ret = access_process_vm(current, (unsigned long)(dst + done),
+                                    (void *)(src + done), (int)chunk,
+                                    FOLL_WRITE);
+        else
+            ret = access_process_vm(current, (unsigned long)(src + done),
+                                    (void *)(dst + done), (int)chunk, 0);
+        if (ret <= 0)
             return len - done;
-        {
-            unsigned long left = chunk;
-            unsigned long o = off;
-            for (i = 0; i < (unsigned long)got && left; i++) {
-                unsigned long take = PAGE_SIZE - o;
-                char *k;
-                if (take > left)
-                    take = left;
-                k = (char *)kmap(pages[i]);
-                if (!k)
-                    break;
-                if (to_user)
-                    memcpy(k + o, src + done, take);
-                else
-                    memcpy(dst + done, k + o, take);
-                kunmap(pages[i]);
-                done += take;
-                left -= take;
-                o = 0;
-            }
-        }
-        for (i = 0; i < (unsigned long)got; i++) {
-            if (!PageReserved(pages[i]))
-                SetPageDirty(pages[i]);
-            put_page(pages[i]);
-        }
-        if (got < (int)npages)
+        done += (unsigned long)ret;
+        if ((unsigned long)ret < chunk)
             return len - done;
     }
     return 0;
@@ -78,11 +42,11 @@ static unsigned long wuwa_gup_copy(char *dst, const char *src,
 unsigned long wuwa_copy_from_user(void *dst, const void *src,
                                   unsigned long len)
 {
-    return wuwa_gup_copy((char *)dst, (const char *)src, len, 0);
+    return wuwa_uc_copy((char *)dst, (const char *)src, len, 0);
 }
 
 unsigned long wuwa_copy_to_user(void *dst, const void *src,
                                 unsigned long len)
 {
-    return wuwa_gup_copy((char *)dst, (const char *)src, len, 1);
+    return wuwa_uc_copy((char *)dst, (const char *)src, len, 1);
 }
