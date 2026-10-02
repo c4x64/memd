@@ -202,7 +202,7 @@ uintptr_t vaddr_to_phy_addr(struct mm_struct* mm, uintptr_t va) {
         return 0;
     }
     if (!pte_present(__pte(pte_v))) {
-        wuwa_info("walk pte not present v=%lx\n", pte_v);
+        wuwa_info("walk pte not present v=%llx\n", (unsigned long long)pte_v);
         return 0;
     }
     wuwa_info("walk ok va=%lx pa=%lx\n", va,
