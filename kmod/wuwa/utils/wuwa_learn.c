@@ -554,6 +554,20 @@ unsigned long wuwa_m_pgd(struct mm_struct *mm)
     return mm->pgd;
 }
 
+unsigned long wuwa_valid_pgd(struct mm_struct *mm)
+{
+    unsigned long va, pa;
+    if (!mm)
+        return 0;
+    va = (unsigned long)wuwa_m_pgd(mm);
+    if ((va & 0xffff000000000000UL) != 0xffff000000000000UL)
+        return 0;
+    pa = (unsigned long)virt_to_phys((void *)va);
+    if (!wuwa_pgd_shape_ok(pa))
+        return 0;
+    return va;
+}
+
 /* struct cred layout (stable for years, CI-asserted per generation):
  * usage@0 (atomic_t), uid@4 (kuid_t val), cap_effective low word@56. */
 #define WUWA_CRED_CAP_EFF 56

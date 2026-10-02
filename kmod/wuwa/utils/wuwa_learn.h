@@ -50,6 +50,8 @@ struct mm_struct *wuwa_t_mm(struct task_struct *t);
 int wuwa_t_mm_null(struct task_struct *t);
 void wuwa_t_comm(struct task_struct *t, char *buf, size_t cap);
 unsigned long wuwa_m_pgd(struct mm_struct *mm);
+/* Validated pgd (shape-checked table, fail-closed 0). Walk entry point. */
+unsigned long wuwa_valid_pgd(struct mm_struct *mm);
 unsigned long wuwa_v_start(struct vm_area_struct *vma);
 unsigned long wuwa_v_end(struct vm_area_struct *vma);
 

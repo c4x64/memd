@@ -128,26 +128,57 @@ out:
     return ptep;
 }
 
+/* Guarded user page-table walk (universal fail-closed). Every table
+ * dereference goes through the extable guard; pgd comes from runtime
+ * validation (never bare headers). A wrong pgd, a bad VA, or a
+ * concurrent teardown returns 0 — never a fault. */
 uintptr_t vaddr_to_phy_addr(struct mm_struct* mm, uintptr_t va) {
+    unsigned long pgd_base, v;
+    pgd_t *pgdp;
+    p4d_t *p4dp;
+    pud_t *pudp;
+    pmd_t *pmdp;
+    pte_t *ptep;
+    unsigned long pte_v;
     if (!mm) {
         wuwa_warn("mm_struct is NULL, cannot perform translation\n");
         return 0;
     }
-
-    pte_t* ptep = page_from_virt_user(mm, va);
-    if (!ptep) {
-        wuwa_err("failed to get PTE for virtual address 0x%lx\n", va);
+    pgd_base = wuwa_valid_pgd(mm);
+    if (!pgd_base)
         return 0;
-    }
-
-    if (!pte_present(*ptep)) {
-        wuwa_err("PTE not present for virtual address 0x%lx\n", va);
+    pgdp = (pgd_t *)pgd_base + pgd_index(va);
+    if (wuwa_safe_read64(pgdp, &v))
         return 0;
-    }
-
-    uintptr_t page_addr = pte_pfn(*ptep) << PAGE_SHIFT;
-
-    return page_addr + (va & (PAGE_SIZE - 1));
+    if (pgd_none(__pgd(v)) || pgd_bad(__pgd(v)))
+        return 0;
+    p4dp = (p4d_t *)p4d_offset((pgd_t *)pgd_base, va);
+    if (wuwa_safe_read64(p4dp, &v))
+        return 0;
+    if (p4d_none(__p4d(v)) || p4d_bad(__p4d(v)))
+        return 0;
+    pudp = (pud_t *)pud_offset((p4d_t *)p4dp, va);
+    if (wuwa_safe_read64(pudp, &v))
+        return 0;
+    if (pud_none(__pud(v)) || pud_bad(__pud(v)))
+        return 0;
+    if (pud_leaf(__pud(v)))
+        return 0;
+    pmdp = (pmd_t *)pmd_offset((pud_t *)pudp, va);
+    if (wuwa_safe_read64(pmdp, &v))
+        return 0;
+    if (pmd_none(__pmd(v)) || pmd_bad(__pmd(v)))
+        return 0;
+    if (pmd_leaf(__pmd(v)))
+        return 0;
+    ptep = pte_offset_kernel((pmd_t *)pmdp, va);
+    if (!ptep)
+        return 0;
+    if (wuwa_safe_read64(ptep, &pte_v))
+        return 0;
+    if (!pte_present(__pte(pte_v)))
+        return 0;
+    return (pte_pfn(__pte(pte_v)) << PAGE_SHIFT) + (va & (PAGE_SIZE - 1));
 }
 
 typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
