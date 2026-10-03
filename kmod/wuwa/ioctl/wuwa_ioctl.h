@@ -250,13 +250,7 @@ struct wuwa_hide_install_cmd {
 #define WUWA_IOCTL_DISP_INSTALL _IOWR('W', 27, struct wuwa_disp_install_cmd)
 #define WUWA_IOCTL_DISP_FRAME _IOWR('W', 28, struct wuwa_disp_frame_cmd)
 #ifdef WUWA_DISP_TEST
-struct wuwa_disp_readback_cmd {
-    unsigned long long dst;
-    unsigned int size;
-    unsigned int rc;
-    unsigned int w;
-    unsigned int h;
-};
+#include "wuwa_display.h"
 #define WUWA_IOCTL_DISP_READBACK _IOWR('W', 29, struct wuwa_disp_readback_cmd)
 #endif
 
