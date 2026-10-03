@@ -137,6 +137,8 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
     unsigned long i;
     int rc;
 
+    if (MEMD_DISP_TODO)
+        return -EOPNOTSUPP;
     if (width == 0 || height == 0)
         return -EINVAL;
     if (width > MEMD_DISP_MAX_W)

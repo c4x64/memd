@@ -139,7 +139,14 @@ process hiding (VFS `iterate_shared` swap on the live `/proc` file):
 - Each hook site is per-SoC backend code with its own NO-GO (unknown
   controller -> site disabled, never guessed).
 
-## Display facility (opcodes 26/27/28)
+## Display facility (opcodes 26/27/28) — TODO, parked
+
+> Parked: complete but unwired (`MEMD_DISP_TODO` in `disp_core.h`).
+> Everything below is implemented and stays compile-checked (CI builds
+> all of it incl. the TEST job), but `install` refuses with
+> `EOPNOTSUPP` until the TODO flips — no backend activates, no thread
+> spawns, status/frame/readback report inactive. What follows describes
+> the parked code, not live behavior.
 
 Core is backend-agnostic: double-buffered CPU raster (clear/rect/line/
 8x8-glyph, numeric ops only) + dirty-rectangle tracking + submit mutex.
@@ -149,14 +156,16 @@ region (stable snapshot under lock). All size math uses
 Route order is DRM client → simplefb → DECON raw probe; first success
 wins, nothing retained on failure. Status reports the active backend.
 
-**Pixel-proven (TEST RAM backend, opcode 29 readback, dummy-virt):**
+**Pixel-proven when live (TEST RAM backend, opcode 29 readback,
+dummy-virt — last proven before parking):**
 clear + border + diagonal + "OK" glyphs submitted as numeric ops and
 read back byte-exact (4 colors, geometry matches). TEST-only backend
 (`soc_ram.c`) + opcode, gated by `DISP_TEST=1` (own CI job
 `universal-test`, shell-bundle only, never SPX, never auto-selected);
 product surface stays 26/27/28.
 
-**Live viewing without a panel (TEST-only kernel VNC).**
+**Live viewing without a panel (TEST-only kernel VNC — parked with
+the rest; last proven before parking).**
 `memd_vnc.c` (same `DISP_TEST` gate, never shipped) serves the stable
 core front as RAW RFB on loopback TCP 5901 — started on display
 install, stopped on uninstall/rmmod alongside the refresh thread, one
