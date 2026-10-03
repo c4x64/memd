@@ -139,16 +139,48 @@ process hiding (VFS `iterate_shared` swap on the live `/proc` file):
 - Each hook site is per-SoC backend code with its own NO-GO (unknown
   controller -> site disabled, never guessed).
 
-## Display facility (`display/`, opcodes 26/27/28)
+## Display facility (opcodes 26/27/28)
 
-CPU raster (ARGB8888 clear/rect/line/8x8-glyph, numeric ops only) over a
-per-SoC overlay-plane backend. The Exynos DECON backend is probe-only
-until a window map is verified on real hardware: DTB match + register
-readback + coherent framebuffer alloc run, plane programming FAILS CLOSED
-(-ENODEV, empty winmap table) so a guessed offset can never wedge a
-display. Enabling a SoC = verify its window map on hardware, add the
-compatible to the table, nothing else. Frames program on submit (a
-per-SoC vsync source is a tracked TODO, never guessed).
+Core is backend-agnostic: double-buffered CPU raster (clear/rect/line/
+8x8-glyph, numeric ops only) + dirty-rectangle tracking + submit mutex.
+Frames draw to BACK, flip, then the backend presents FRONT's dirty
+region (stable snapshot under lock). All size math uses
+`check_mul_overflow`; shadows are `vmalloc` (no device, no DMA).
+Route order is DRM client → simplefb → DECON raw probe; first success
+wins, nothing retained on failure. Status reports the active backend.
+
+- **DRM client (primary, generic).** exynos-drm already owns clocks,
+  power, SysMMU, shadow update and vsync — a second register driver
+  would conflict with it, so the generic path goes through the DRM
+  core (CPU raster into a dumb buffer, atomic commit, real vsync).
+  No per-SoC code, no winmap, no vsync TODO. Discovery (drm_class +
+  card* match, stable core APIs only, zero DRM struct access) is live;
+  modeset/commit lands next with CI header-verified signatures +
+  Exynos+DRM hardware proof. Until then open refuses (status ENODEV).
+- **simplefb fallback (safest pixels).** Bootloader-lit panel via the
+  standard simple-framebuffer node (address/size/stride/format — zero
+  programming, no clocks, no power, no registers). Strict format gate
+  (`x8r8g8b8`/`a8r8g8b8` direct copy; anything else refuses — wrong
+  colors are worse than none) + overflow-checked geometry (panel must
+  fit the UI; top-left blit, rest of panel untouched). Uninstall unmaps
+  only (last frame persists, harmless — simplefb keeps scanning out).
+- **DECON raw (probe-only, last resort).** Only matters without the DRM
+  stack. Hazard-fixed probe: availability → resource claim (bound
+  exynos-drm fails here, nothing touched) → clocks by index + power
+  domains → map → readback → full cleanup on every path (retains
+  nothing; install re-probes statelessly). Zero clocks acquired refuses
+  the readback outright (a gated-block read can hang the bus — never
+  risk it). DMA alloc (when reachable) uses the DECON device with a
+  checked mask (IOVA, not phys; per-SoC mask arrives with the winmap).
+- **Window maps (DECON raw only).** Seeded from documentation (Linux
+  exynos-drm DECON driver + vendor TRM: WINCON, buffer start, size,
+  position) and CONFIRMED on hardware — never discovered by probing.
+  Each entry carries a silicon revision gate (compatible + version
+  register offset/value: right string on wrong silicon refuses) and,
+  when programming lands, shadow-update latch + frame-done IRQ
+  completion (stage all window regs, latch atomically; TRM bit/IRQ
+  names confirmed for the part at verification). Table stays EMPTY
+  until then: every controller NO-GO, plane code unreachable.
 
 ## Universal runtime techniques (proven on Samsung 5.15)
 

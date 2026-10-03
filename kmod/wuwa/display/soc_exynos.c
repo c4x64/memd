@@ -1,20 +1,34 @@
-/* Exynos DECON overlay-plane backend.
+/* Exynos DECON backend (probe-only) + wuwa_disp_* entry points.
  *
- * Probe-only until a per-SoC window register map is verified on real
- * hardware: programming an overlay plane through guessed offsets would
- * wedge the display, so install FAILS CLOSED with -ENODEV naming the
- * DTB compatible. What IS implemented and verified:
- * - DTB match on samsung,exynos-decon* compatibles (no hardcoded base).
- * - Register mapping via the DTB reg range + readback sanity (a global
- *   control word of all-0/all-1 refuses: mapping is wrong or the
- *   controller is gated).
- * - Framebuffer allocation via dma_alloc_coherent on the DECON device.
- * - Full status surface (backend id, dimensions, last errno).
+ * Hazard-fixed probe (bus hangs are worse than ENODEV): available check
+ * -> resource claim (drm conflict fails here, nothing touched) ->
+ * clocks by index + power domains -> map -> readback -> full cleanup.
+ * Reading a clock/power-gated block can hang the bus or raise SError
+ * (not return garbage), so a probe that reads first is never safe.
+ * Zero clocks acquired -> readback refused outright (fail closed).
+ * Everything acquired is released on every path (probe retains nothing;
+ * install re-probes statelessly — install is once-per-boot rare).
  *
- * Enabling a new SoC: verify its window-map on hardware, add the map to
- * the table below with the exact compatible string, and only then allow
- * plane programming for that entry. Never guess.
+ * DMA note: DECON sits behind a SysMMU, so the programmed address must
+ * be the DMA/IOVA address from the DECON device, not phys. Allocation
+ * uses the DECON platform device with a checked 32-bit mask (fail
+ * closed); the per-SoC mask lands with the winmap (TRM). Unreachable
+ * today (empty table -> ENODEV before alloc).
+ *
+ * Window maps come from documentation (Linux exynos-drm DECON driver +
+ * vendor TRM: WINCON, buffer start, size, position), confirmed on
+ * hardware — never discovered by probing. Each entry carries its
+ * silicon revision gate (compatible + version register offset/value:
+ * right string on wrong silicon still fails closed) and, when
+ * programming lands, shadow-update + frame-done IRQ completion
+ * (stage all window regs, latch atomically; vsync TODO hooks there —
+ * never raw vsync, never guessed bits/IRQs: confirm names in the TRM
+ * for the part at verification time).
  */
+#include "disp_core.h"
+#include "wuwa_display.h"
+#include "wuwa_raster.h"
+
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -24,50 +38,57 @@
 #include <linux/string.h>
 #include <linux/dma-mapping.h>
 #include <linux/slab.h>
-#include "wuwa_display.h"
-#include "wuwa_raster.h"
+#include <linux/clk.h>
+#include <linux/pm_runtime.h>
+#include <linux/device.h>
 
 #define WUWA_DISP_BACKEND_EXYNOS 1
-#define WUWA_DISP_MAX_W 640
-#define WUWA_DISP_MAX_H 480
 
 struct wuwa_decon_state {
-    struct device *dev;
-    void __iomem *regs;
-    resource_size_t regs_size;
-    __u32 *fb_virt;
-    dma_addr_t fb_phys;
-    size_t fb_size;
-    __u32 width;
-    __u32 height;
     int last_errno;
     char compat[64];
 };
 
 static struct wuwa_decon_state g_decon;
 
-/* Verified per-SoC window maps. Empty until hardware-verified. */
+/* Verified per-SoC window maps. EMPTY until hardware-verified from
+ * exynos-drm + TRM (offsets, enable bit, shadow bit, IRQ name, revision
+ * register + reset value). No entries: every controller is NO-GO. */
 struct wuwa_winmap {
     const char *compat;
-    __u32 wincon_off;   /* window control register offset */
-    __u32 win_en_bit;   /* enable bit within WINCON */
-    __u32 addr_off;     /* framebuffer address register offset */
-    __u32 size_off;     /* window size register offset */
+    __u32 rev_off;      /* version register offset */
+    __u32 rev_expect;   /* expected reset value */
+    __u32 wincon_off;
+    __u32 win_en_bit;
+    __u32 addr_off;
+    __u32 size_off;
+    __u32 shadow_off;   /* shadow-update latch register */
+    __u32 shadow_bit;   /* latch bit */
+    const char *irq_name; /* frame-done/vsync IRQ (TRM name) */
 };
 
 static const struct wuwa_winmap wuwa_winmaps[] = {
     /* No entries: every controller is NO-GO until verified on hardware. */
 };
 
-int wuwa_decon_probe(void)
+#define WUWA_DECON_MAX_CLOCKS 8
+
+/* Full probe with hazard ordering. Returns 0 with *map set (never
+ * today), negative errno otherwise. Retains nothing on any path. */
+static int wuwa_decon_probe(const struct wuwa_winmap **map_out)
 {
     struct device_node *np = NULL;
-    struct platform_device *pdev;
-    const struct wuwa_winmap *map = NULL;
-    unsigned long i;
+    struct platform_device *pdev = NULL;
+    struct resource res;
+    struct clk *clks[WUWA_DECON_MAX_CLOCKS];
+    int nclks = 0;
+    void __iomem *regs = NULL;
     __u32 probe0, probe1;
+    int i, rc = -ENODEV;
+    bool pm_on = false;
+    bool claimed = false;
 
-    /* Match any Exynos DECON compatible; record the exact string. */
+    *map_out = NULL;
     np = of_find_compatible_node(NULL, NULL, "samsung,exynos-decon");
     if (!np)
         return -ENODEV;
@@ -81,163 +102,203 @@ int wuwa_decon_probe(void)
             g_decon.compat[n] = '\0';
         }
     }
-
+    if (!of_device_is_available(np)) {
+        of_node_put(np);
+        return -ENODEV;
+    }
     pdev = of_find_device_by_node(np);
     if (!pdev) {
         of_node_put(np);
         return -ENODEV;
     }
-    g_decon.dev = &pdev->dev;
-
-    g_decon.regs = of_iomap(np, 0);
-    of_node_put(np);
-    if (!g_decon.regs)
-        return -ENODEV;
-
-    /* Readback sanity: two words must be neither all-0 nor all-1
-     * (wrong mapping or gated controller). */
-    /* Volatile dereference (not readl/__raw_readl): MMIO wrappers pull
-     * version-specific trace imports (__log_read_mmio on some baselines,
-     * log_read_mmio on others) that vendor kernels may not export. A
-     * volatile load + dsb is stable on every baseline and correct for
-     * probe reads. */
-    probe0 = *(volatile __u32 *)g_decon.regs;
+    if (of_address_to_resource(np, 0, &res)) {
+        goto out_put;
+    }
+    /* Claim first: a bound exynos-drm fails here cleanly (we touch
+     * nothing — no struct device field reads, no register access). */
+    if (!request_mem_region(res.start, resource_size(&res),
+                            "wuwa-decon-probe")) {
+        rc = -EBUSY;
+        goto out_put;
+    }
+    claimed = true;
+    /* Clocks by index (no SoC-specific names — never guess strings). */
+    for (i = 0; i < WUWA_DECON_MAX_CLOCKS; i++) {
+        struct clk *c = of_clk_get(np, i);
+        if (IS_ERR(c))
+            break;
+        if (clk_prepare_enable(c)) {
+            clk_put(c);
+            goto out_clocks;
+        }
+        clks[nclks++] = c;
+    }
+    if (!nclks) {
+        /* No gateable clocks visible: cannot prove the block is
+         * powered — refuse the readback rather than risk a bus hang. */
+        goto out_release;
+    }
+    /* Power domains (generic PM, no SoC knowledge). Balanced below. */
+    pm_runtime_enable(&pdev->dev);
+    if (pm_runtime_get_sync(&pdev->dev) < 0) {
+        pm_runtime_put_sync(&pdev->dev);
+        pm_runtime_disable(&pdev->dev);
+        goto out_clocks;
+    }
+    pm_on = true;
+    regs = ioremap(res.start, resource_size(&res));
+    if (!regs)
+        goto out_pm;
+    /* Volatile loads (no readl/__raw_readl: traced MMIO wrappers pull
+     * version-specific imports vendors strip). dsb pairs the reads. */
+    probe0 = *(volatile __u32 *)regs;
     asm volatile("dsb ish" ::: "memory");
-    probe1 = *(volatile __u32 *)(g_decon.regs + 4);
+    probe1 = *(volatile __u32 *)((char *)regs + 4);
     asm volatile("dsb ish" ::: "memory");
     if ((probe0 == 0 && probe1 == 0) ||
         (probe0 == 0xFFFFFFFFu && probe1 == 0xFFFFFFFFu)) {
-        iounmap(g_decon.regs);
-        g_decon.regs = NULL;
-        return -ENODEV;
+        goto out_unmap;
     }
+    /* Revision gate + winmap match (empty table: always NO-GO today).
+     * When entries exist: compat match AND version register match,
+     * else refuse (right string, wrong silicon). */
+    for (i = 0; i < (int)(sizeof(wuwa_winmaps) / sizeof(wuwa_winmaps[0])); i++) {
+        __u32 rev;
+        if (strcmp(g_decon.compat, wuwa_winmaps[i].compat))
+            continue;
+        rev = *(volatile __u32 *)((char *)regs + wuwa_winmaps[i].rev_off);
+        asm volatile("dsb ish" ::: "memory");
+        if (rev != wuwa_winmaps[i].rev_expect)
+            continue;
+        *map_out = &wuwa_winmaps[i];
+        break;
+    }
+    iounmap(regs);
+    pm_runtime_put_sync(&pdev->dev);
+    pm_runtime_disable(&pdev->dev);
+    for (i = 0; i < nclks; i++) {
+        clk_disable_unprepare(clks[i]);
+        clk_put(clks[i]);
+    }
+    release_mem_region(res.start, resource_size(&res));
+    of_node_put(np);
+    put_device(&pdev->dev);
+    return *map_out ? 0 : -ENODEV;
 
-    /* No verified window map for this compatible -> NO-GO by policy. */
-    for (i = 0; i < sizeof(wuwa_winmaps) / sizeof(wuwa_winmaps[0]); i++) {
-        if (!strcmp(g_decon.compat, wuwa_winmaps[i].compat)) {
-            map = &wuwa_winmaps[i];
-            break;
-        }
+out_unmap:
+    iounmap(regs);
+out_pm:
+    if (pm_on) {
+        pm_runtime_put_sync(&pdev->dev);
+        pm_runtime_disable(&pdev->dev);
     }
-    if (!map) {
-        iounmap(g_decon.regs);
-        g_decon.regs = NULL;
-        return -ENODEV;
+out_clocks:
+    for (i = 0; i < nclks; i++) {
+        clk_disable_unprepare(clks[i]);
+        clk_put(clks[i]);
     }
+out_release:
+    if (claimed)
+        release_mem_region(res.start, resource_size(&res));
+out_put:
+    of_node_put(np);
+    put_device(&pdev->dev);
+    return rc;
+}
+
+static int wuwa_decon_open(__u32 w, __u32 h)
+{
+    const struct wuwa_winmap *map = NULL;
+    int rc;
+    (void)w;
+    (void)h;
+    g_decon.last_errno = 0;
+    rc = wuwa_decon_probe(&map);
+    if (rc) {
+        g_decon.last_errno = rc;
+        return rc;
+    }
+    /* A verified map exists (not today): DMA alloc against the DECON
+     * device (IOVA, not phys) with checked mask would happen here,
+     * then plane programming with shadow-update + IRQ completion.
+     * Unreachable with an empty table. */
+    g_decon.last_errno = -ENODEV;
+    return -ENODEV;
+}
+
+static void wuwa_decon_close(void)
+{
+    g_decon.last_errno = 0;
+}
+
+static int wuwa_decon_present(const __u32 *fb, __u32 w, __u32 h,
+                              const struct wuwa_dirty *dirty)
+{
+    /* Probe-only: rasterize only, never display (no map, no plane). */
+    (void)fb;
+    (void)w;
+    (void)h;
+    (void)dirty;
     return 0;
 }
 
+static int wuwa_decon_active(void)
+{
+    return 0;
+}
+
+static void wuwa_decon_status(__u32 *w, __u32 *h, __u32 *err)
+{
+    if (w)
+        *w = 0;
+    if (h)
+        *h = 0;
+    if (err)
+        *err = (__u32)(-(g_decon.last_errno));
+}
+
+const struct wuwa_disp_backend wuwa_be_exynos = {
+    .id = WUWA_DISP_BACKEND_EXYNOS,
+    .name = "exynos",
+    .open = wuwa_decon_open,
+    .close = wuwa_decon_close,
+    .present = wuwa_decon_present,
+    .active = wuwa_decon_active,
+    .status = wuwa_decon_status,
+};
+
+/* Entry points (ioctl layer calls these; signatures unchanged). */
 int wuwa_disp_install(__u32 backend, __u32 width, __u32 height)
 {
-    size_t want;
-
-    if (g_decon.fb_virt)
-        return -EBUSY;
-    if (backend != 0 && backend != WUWA_DISP_BACKEND_EXYNOS)
-        return -ENODEV;
-    if (width == 0 || height == 0)
-        return -EINVAL;
-    if (width > WUWA_DISP_MAX_W)
-        width = WUWA_DISP_MAX_W;
-    if (height > WUWA_DISP_MAX_H)
-        height = WUWA_DISP_MAX_H;
-
-    if (wuwa_decon_probe()) {
-        g_decon.last_errno = -ENODEV;
-        return -ENODEV;
-    }
-
-    want = (size_t)width * (size_t)height * 4;
-    g_decon.fb_virt = dma_alloc_coherent(g_decon.dev, want,
-                                         &g_decon.fb_phys, GFP_KERNEL);
-    if (!g_decon.fb_virt) {
-        iounmap(g_decon.regs);
-        g_decon.regs = NULL;
-        g_decon.last_errno = -ENOMEM;
-        return -ENOMEM;
-    }
-    g_decon.fb_size = want;
-    g_decon.width = width;
-    g_decon.height = height;
-    g_decon.last_errno = 0;
-    wuwa_raster_clear(g_decon.fb_virt, width, height, 0x00000000u);
-    return 0;
+    return wuwa_core_install(backend, width, height);
 }
 
 int wuwa_disp_uninstall(void)
 {
-    if (!g_decon.fb_virt)
-        return -ENODEV;
-    /* Window restore happens here once a winmap exists (disable the
-     * overlay window first, then free). Probe-only today: nothing
-     * programmed, so just release. */
-    if (g_decon.regs) {
-        iounmap(g_decon.regs);
-        g_decon.regs = NULL;
-    }
-    dma_free_coherent(g_decon.dev, g_decon.fb_size,
-                      g_decon.fb_virt, g_decon.fb_phys);
-    g_decon.fb_virt = NULL;
-    g_decon.fb_size = 0;
-    g_decon.width = 0;
-    g_decon.height = 0;
-    return 0;
+    int rc = wuwa_core_uninstall();
+    return rc == -ENODEV ? -ENODEV : rc;
 }
 
 int wuwa_disp_active(void)
 {
-    return g_decon.fb_virt ? 1 : 0;
+    return wuwa_core_active();
 }
 
 int wuwa_disp_status(struct wuwa_disp_status_cmd *out)
 {
+    __u32 be = 0, w = 0, h = 0, e = 0;
     if (!out)
         return -EINVAL;
-    out->active = g_decon.fb_virt ? 1 : 0;
-    out->backend = g_decon.fb_virt ? WUWA_DISP_BACKEND_EXYNOS : 0;
-    out->width = g_decon.width;
-    out->height = g_decon.height;
-    out->errno_ = (__u32)(-(g_decon.last_errno));
+    wuwa_core_status(&be, &w, &h, &e);
+    out->active = wuwa_core_active() ? 1 : 0;
+    out->backend = be;
+    out->width = w;
+    out->height = h;
+    out->errno_ = e;
     return 0;
 }
 
 int wuwa_disp_frame(const struct wuwa_disp_op *ops, __u32 count)
 {
-    __u32 i;
-
-    if (!g_decon.fb_virt)
-        return -ENODEV;
-    if (!ops)
-        return -EINVAL;
-    if (count > WUWA_DISP_MAX_OPS)
-        count = WUWA_DISP_MAX_OPS;
-    for (i = 0; i < count; i++) {
-        switch (ops[i].op) {
-        case WUWA_DISP_CLEAR:
-            wuwa_raster_clear(g_decon.fb_virt, g_decon.width,
-                              g_decon.height, ops[i].color);
-            break;
-        case WUWA_DISP_RECT:
-            wuwa_raster_rect(g_decon.fb_virt, g_decon.width,
-                             g_decon.height, ops[i].x, ops[i].y,
-                             ops[i].w, ops[i].h, ops[i].color);
-            break;
-        case WUWA_DISP_LINE:
-            wuwa_raster_line(g_decon.fb_virt, g_decon.width,
-                             g_decon.height, ops[i].x, ops[i].y,
-                             ops[i].w, ops[i].h, ops[i].color);
-            break;
-        case WUWA_DISP_GLYPH:
-            wuwa_raster_glyph(g_decon.fb_virt, g_decon.width,
-                              g_decon.height, ops[i].x, ops[i].y,
-                              ops[i].glyph, ops[i].color);
-            break;
-        case WUWA_DISP_NOP:
-        default:
-            break;
-        }
-    }
-    /* Plane programming lands here with the first verified winmap.
-     * Until then the framebuffer rasterizes but is never displayed. */
-    return 0;
+    return wuwa_core_frame(ops, count);
 }

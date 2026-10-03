@@ -35,7 +35,10 @@ rwbridge-y := \
     wuwa/proc/wuwa_proc.o \
     wuwa/proc/wuwa_hide.o \
     wuwa/display/wuwa_raster.o \
+    wuwa/display/disp_core.o \
     wuwa/display/soc_exynos.o \
+    wuwa/display/soc_simplefb.o \
+    wuwa/display/soc_drm.o \
     wuwa/inlinehook/hijack_arm64.o \
     wuwa/inlinehook/wuwa_syshook.o
 
