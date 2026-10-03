@@ -156,6 +156,20 @@ read back byte-exact (4 colors, geometry matches). TEST-only backend
 `universal-test`, shell-bundle only, never SPX, never auto-selected);
 product surface stays 26/27/28.
 
+**Live viewing without a panel (TEST-only kernel VNC).**
+`memd_vnc.c` (same `DISP_TEST` gate, never shipped) serves the stable
+core front as RAW RFB on loopback TCP 5901 — started on display
+install, stopped on uninstall/rmmod alongside the refresh thread, one
+viewer at a time, unknown messages drop the client. The kernel still
+owns the frame; the stream is a read-only tap (lock → copy → unlock,
+byte-swap + send from the streamer's own buffer, never under the core
+lock). All sockets are created/used/released by the serving thread
+itself (non-blocking accept/recv + `should_stop` polls — no
+cross-thread close); bind failure logs once and the display is
+unaffected. View it: `adb forward tcp:5901 tcp:5901`, then any VNC
+viewer at `localhost:5901` (macOS: `open vnc://localhost:5901`).
+Stable ksocket APIs only (CI-verified 5.10–6.12).
+
 - **DRM client (primary, generic).** exynos-drm already owns clocks,
   power, SysMMU, shadow update and vsync — a second register driver
   would conflict with it, so the generic path goes through the DRM
