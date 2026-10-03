@@ -200,12 +200,10 @@ static int wuwa_drm_open(__u32 w, __u32 h)
         }
     } else {
         struct wuwa_map16 map;
-        int (*vf)(void *, void *) = NULL;
-        /* Re-resolve is unnecessary (same name); call through the
-         * int-typed entry explicitly for clarity. */
-        vf = (int (*)(void *, void *))p_drm_client_buffer_vmap;
-        /* NOTE: same symbol, newer signature — verified per-gen by CI
-         * header dumps (void* on 5.10, int+map on 5.15+). */
+        /* Same symbol, newer signature (int + 16B map, CI-verified
+         * per-gen). Reinterpret via memcpy (no function-type cast). */
+        int (*vf)(void *, void *);
+        memcpy(&vf, &p_drm_client_buffer_vmap, sizeof(vf));
         memset(&map, 0, sizeof(map));
         if (vf(g_drm.fb, &map) || !map.addr || map.is_iomem) {
             p_drm_client_release(g_drm.client);
