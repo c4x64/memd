@@ -216,9 +216,12 @@ wins, nothing retained on failure. Status reports the active backend.
 - **Hide hook without symbols.** `/proc` `file_operations` reached via
   live `filp_open` (per-generation `f_op`/`iterate_shared` slots from
   CI tables); the table write uses Break-Before-Make + full-VA TLBI +
-  AP[1]=bit7 (all proven on-device). Install/uninstall verify every
-  write by readback and never clear state on failure (no dangling:
-  failure keeps hooked + active + retryable, never silent-empty).
+  AP[1]=bit7 (all proven on-device) with bounded internal retry (first
+  entry-store can fault transiently on a stale TLB; retry succeeds,
+  still fail-closed after 3). Install/uninstall verify every write by
+  readback and never clear state on failure (failure keeps hooked +
+  active + retryable — clearing into an unverified `f_op` would dangle
+  `/proc` empty for non-root; proven by incident, fixed by design).
 - **Denylist for stripped vendors.** The universal image must not import
   what vendors strip even when GKI exports it (proven on Samsung 5.15:
   `printk`, `pfn_valid`, traced MMIO, `mmap_lock` inlines). CI denies
