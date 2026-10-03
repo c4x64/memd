@@ -521,9 +521,24 @@ int wuwa_table_write64(unsigned long entry_va, unsigned long val)
         }
         asm volatile("dsb ish\ntlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va) : "memory");
     }
-    if (wuwa_safe_write64((void *)entry_va, val)) {
-        wuwa_err("table_write64: entry store fail va=%lx\n", entry_va);
-        goto restore;
+    /* Entry store with bounded retry (proven transient: first attempt
+     * can fault on a stale RO TLB despite BBM+TLBI; immediate retry
+     * succeeds. Still fail-closed after 3 — persistent failure is a
+     * real problem, not a flake.) */
+    {
+        int attempt;
+        for (attempt = 0; attempt < 3; attempt++) {
+            if (!wuwa_safe_write64((void *)entry_va, val))
+                break;
+            if (attempt)
+                wuwa_err("table_write64: entry store fail va=%lx (try %d)\n",
+                         entry_va, attempt);
+            asm volatile("dsb ish\ntlbi vaae1, %0\ndsb ish\nisb\n" ::"r" (entry_va) : "memory");
+        }
+        if (attempt >= 3) {
+            wuwa_err("table_write64: entry store fail va=%lx\n", entry_va);
+            goto restore;
+        }
     }
     {
         unsigned long back = 0;
