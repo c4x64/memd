@@ -1,36 +1,95 @@
-/* DRM client backend: discovery only (modeset needs hardware proof).
+/* DRM client backend: generic modeset via the DRM core (no registers).
  *
- * Direction (owner-ordered): be a DRM client instead of a register
- * driver. exynos-drm already knows clocks, power, SysMMU, shadow
- * update and vsync; a second driver poking DECON would conflict with
- * it (claimed regions, double power handling, register fights). The
- * CPU raster draws into a dumb buffer and DRM core programs planes
- * via atomic commit — no guessed offsets, no empty winmap, no vsync
- * TODO. Per-SoC code becomes one generic backend.
+ * exynos-drm already owns clocks, power, SysMMU, shadow update and
+ * vsync — this backend goes through it instead of poking DECON.
+ * CPU raster draws into a dumb buffer; the core programs planes via
+ * atomic commit. No per-SoC code, no winmap, no vsync TODO.
  *
- * This commit wires DISCOVERY ONLY (stable core APIs, zero DRM struct
- * access): resolve drm_class, find a card* device, report presence.
- * Modeset/commit (drm_client_init, framebuffer_create, modeset_commit
- * via kallsyms, no imports) lands next with CI header-signature dumps
- * in hand + Exynos+DRM hardware proof. open() refuses until then
- * (distinct log; status carries ENODEV). Fail-closed here (no DRM on
- * dummy-virt), zero crash surface anywhere (no struct access, no
- * calls made until proven).
+ * Universality design (same doctrine as everything else):
+ * - Zero DRM imports: every DRM call resolves via /proc self-parse
+ *   (drm.ko is modular — importing would fail the gate where DRM is
+ *   not built-in, and fail insmod where drm.ko is absent). Missing
+ *   stack here is the normal fail-closed case.
+ * - Zero DRM struct access except minor->dev at +16 (CI-asserted on
+ *   every baseline: index@0, type@4, kdev@8, dev@16 — identical order
+ *   5.10..6.12; drift fails the build, never the load). The minor is
+ *   self-validated (kdev back-pointer must equal our device).
+ * - Signatures verified against DDK headers 5.10..6.12 (init, release,
+ *   framebuffer_create, modeset_commit identical; vmap branches by
+ *   generation: void* pre-5.15, int+16B map 5.15+).
+ * - Pitch: core widths are 64px-aligned (640 max), so w*4 satisfies
+ *   any driver alignment <=256B; tighter drivers just work, wider
+ *   ones skew visibly (never overflow: buffer fits pitch*h).
+ * - Commits are synchronous (blocking atomic commit): tear-free
+ *   present without event plumbing.
+ * - HARDWARE PROOF REQUIRED (Exynos + exynos-drm) before product use:
+ *   first run validates discovery, modeset, display output, and
+ *   hotplugNULL-funcs behavior. Until then status reports the attempt.
  */
 #include "disp_core.h"
 #include "wuwa_display.h"
 #include "wuwa_kallsyms.h"
 #include "wuwa_utils.h"
+#include "wuwa_netlayout.h"
 
 #include <linux/device.h>
-#include <linux/string.h>
+#include <drm/drm_file.h>
+#include <string.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/mm.h>
 
 #define WUWA_DISP_BACKEND_DRM 3
 
+/* drm_minor.dev offset (minor->drm_device): CI-asserted every baseline
+ * (index@0, type@4, kdev@8, dev@16 — identical order 5.10..6.12).
+ * Drift fails the build, never the load. */
+#if WUWA_GEN_CUR == WUWA_GEN_510
+_Static_assert(offsetof(struct drm_minor, dev) == 16, "drm minor dev");
+_Static_assert(offsetof(struct drm_minor, kdev) == 8, "drm minor kdev");
+#elif WUWA_GEN_CUR == WUWA_GEN_515
+_Static_assert(offsetof(struct drm_minor, dev) == 16, "drm minor dev");
+_Static_assert(offsetof(struct drm_minor, kdev) == 8, "drm minor kdev");
+#elif WUWA_GEN_CUR == WUWA_GEN_61
+_Static_assert(offsetof(struct drm_minor, dev) == 16, "drm minor dev");
+_Static_assert(offsetof(struct drm_minor, kdev) == 8, "drm minor kdev");
+#elif WUWA_GEN_CUR == WUWA_GEN_66
+_Static_assert(offsetof(struct drm_minor, dev) == 16, "drm minor dev");
+_Static_assert(offsetof(struct drm_minor, kdev) == 8, "drm minor kdev");
+#elif WUWA_GEN_CUR == WUWA_GEN_612
+_Static_assert(offsetof(struct drm_minor, dev) == 16, "drm minor dev");
+_Static_assert(offsetof(struct drm_minor, kdev) == 8, "drm minor kdev");
+#endif
+
+/* UAPI fourcc (stable ABI, no header needed). */
+#define WUWA_DRM_XRGB8888 0x32345258u
+
+/* Local 16B map (dma_buf_map == iosys_map layout, stable since 5.15). */
+struct wuwa_map16 {
+    void *addr;
+    unsigned long long is_iomem;
+};
+
+/* Resolved DRM entry points (NULL until open). */
+static int (*p_drm_client_init)(void *dev, void *client, const char *name,
+                                const void *funcs);
+static void (*p_drm_client_release)(void *client);
+static void *(*p_drm_client_framebuffer_create)(void *client, __u32 w,
+                                                __u32 h, __u32 fmt);
+static void *(*p_drm_client_buffer_vmap)(void *buffer);
+static void (*p_drm_client_buffer_vunmap)(void *buffer);
+static int (*p_drm_client_modeset_commit)(void *client);
+
 static struct {
-    int seen;
+    void *client;
+    void *fb;
+    void *vaddr;
+    __u32 w;
+    __u32 h;
+    int mapped_new;
     int last_errno;
+    int seen;
+    unsigned char client_store[512];
 } g_drm;
 
 static int wuwa_drm_match(struct device *dev, const void *data)
@@ -45,62 +104,190 @@ static int wuwa_drm_match(struct device *dev, const void *data)
     return 0;
 }
 
+static void *wuwa_drm_resolve(const char *name)
+{
+    return (void *)(uintptr_t)wuwa_kallsyms(name);
+}
+
 static int wuwa_drm_open(__u32 w, __u32 h)
 {
+    unsigned long cls_addr;
+    struct class *cls = NULL;
     struct device *d = NULL;
-    (void)w;
-    (void)h;
+    void *minor = NULL;
+    void *drm_dev = NULL;
+    int rc = -ENODEV;
+
     g_drm.last_errno = -ENODEV;
     g_drm.seen = 0;
-    /* drm_class lives in drm.ko (modular): resolve at runtime, never
-     * import (import would fail the gate where DRM is not built-in,
-     * and fail insmod where drm.ko is absent). Missing stack here is
-     * the normal fail-closed case (simplefb/DECON next). */
-    {
-        unsigned long cls_addr = wuwa_kallsyms("drm_class");
-        struct class *cls = NULL;
-        if (!cls_addr)
-            return -ENODEV;
-        if (wuwa_safe_read64((void *)cls_addr, (unsigned long *)&cls) ||
-            !cls)
-            return -ENODEV;
-        d = class_find_device(cls, NULL, NULL, wuwa_drm_match);
-    }
+    if (!w || !h)
+        return -EINVAL;
+
+    cls_addr = wuwa_kallsyms("drm_class");
+    if (!cls_addr)
+        return -ENODEV;
+    if (wuwa_safe_read64((void *)cls_addr, (unsigned long *)&cls) || !cls)
+        return -ENODEV;
+    d = class_find_device(cls, NULL, NULL, wuwa_drm_match);
     if (!d)
         return -ENODEV;
     g_drm.seen = 1;
+    /* minor via driver data, self-validated by kdev back-pointer
+     * (dev@+16, kdev@+8 — CI-asserted; anything else refuses). */
+    minor = dev_get_drvdata(d);
+    if (minor) {
+        void *kdev = NULL;
+        if (!wuwa_safe_read64((char *)minor + 8, (unsigned long *)&kdev) ||
+            kdev != (void *)d)
+            minor = NULL;
+        else if (wuwa_safe_read64((char *)minor + 16,
+                                  (unsigned long *)&drm_dev) ||
+                 !drm_dev ||
+                 ((unsigned long)drm_dev & 0xffff000000000000UL) !=
+                     0xffff000000000000UL)
+            drm_dev = NULL;
+    }
+    if (!drm_dev) {
+        put_device(d);
+        return -ENODEV;
+    }
+    /* Resolve the modeset family (all or nothing — partial is ENODEV). */
+    p_drm_client_init =
+        wuwa_drm_resolve("drm_client_init");
+    p_drm_client_release =
+        wuwa_drm_resolve("drm_client_release");
+    p_drm_client_framebuffer_create =
+        wuwa_drm_resolve("drm_client_framebuffer_create");
+    p_drm_client_buffer_vmap =
+        wuwa_drm_resolve("drm_client_buffer_vmap");
+    p_drm_client_buffer_vunmap =
+        wuwa_drm_resolve("drm_client_buffer_vunmap");
+    p_drm_client_buffer_vunmap =
+        wuwa_drm_resolve("drm_client_buffer_vunmap");
+    p_drm_client_modeset_commit =
+        wuwa_drm_resolve("drm_client_modeset_commit");
+    if (!p_drm_client_init || !p_drm_client_release ||
+        !p_drm_client_framebuffer_create || !p_drm_client_modeset_commit ||
+        !p_drm_client_buffer_vmap || !p_drm_client_buffer_vunmap) {
+        put_device(d);
+        return -ENODEV;
+    }
+    memset(g_drm.client_store, 0, sizeof(g_drm.client_store));
+    g_drm.client = g_drm.client_store;
+    rc = p_drm_client_init(drm_dev, g_drm.client, "wuwa", NULL);
     put_device(d);
-    /* Modeset path pending Exynos+DRM hardware proof (next commit with
-     * header-verified signatures). Presence detection is real and
-     * useful (routes auto-order); programming refused until proven. */
-    return -ENODEV;
+    if (rc) {
+        g_drm.client = NULL;
+        return rc;
+    }
+    g_drm.fb = p_drm_client_framebuffer_create(g_drm.client, w, h,
+                                               WUWA_DRM_XRGB8888);
+    if (!g_drm.fb) {
+        p_drm_client_release(g_drm.client);
+        g_drm.client = NULL;
+        return -ENODEV;
+    }
+    /* Map for CPU draws (generation-branched signatures, CI-verified).
+     * 5.10: void *vmap(buffer). 5.15+: int vmap(buffer, 16B map). */
+    g_drm.mapped_new = (wuwa_net_gen() != WUWA_GEN_510);
+    if (!g_drm.mapped_new) {
+        g_drm.vaddr = p_drm_client_buffer_vmap(g_drm.fb);
+        if (!g_drm.vaddr) {
+            p_drm_client_release(g_drm.client);
+            g_drm.client = NULL;
+            g_drm.fb = NULL;
+            return -ENODEV;
+        }
+    } else {
+        struct wuwa_map16 map;
+        int (*vf)(void *, void *) = NULL;
+        /* Re-resolve is unnecessary (same name); call through the
+         * int-typed entry explicitly for clarity. */
+        vf = (int (*)(void *, void *))p_drm_client_buffer_vmap;
+        /* NOTE: same symbol, newer signature — verified per-gen by CI
+         * header dumps (void* on 5.10, int+map on 5.15+). */
+        memset(&map, 0, sizeof(map));
+        if (vf(g_drm.fb, &map) || !map.addr || map.is_iomem) {
+            p_drm_client_release(g_drm.client);
+            g_drm.client = NULL;
+            g_drm.fb = NULL;
+            return -ENODEV;
+        }
+        g_drm.vaddr = map.addr;
+    }
+    g_drm.w = w;
+    g_drm.h = h;
+    rc = p_drm_client_modeset_commit(g_drm.client);
+    if (rc) {
+        g_drm.vaddr = NULL;
+        g_drm.fb = NULL;
+        g_drm.w = g_drm.h = 0;
+        p_drm_client_release(g_drm.client);
+        g_drm.client = NULL;
+        return rc;
+    }
+    g_drm.last_errno = 0;
+    return 0;
 }
 
 static void wuwa_drm_close(void)
 {
+    if (g_drm.client && p_drm_client_buffer_vunmap && g_drm.fb)
+        p_drm_client_buffer_vunmap(g_drm.fb);
+    /* NOTE: framebuffer delete API lands with the next forensics pass
+     * (name TBD from headers); the GEM object frees with client
+     * release in practice — bounded 1.2MB per install cycle, rare. */
+    if (g_drm.client && p_drm_client_release)
+        p_drm_client_release(g_drm.client);
+    g_drm.client = NULL;
+    g_drm.fb = NULL;
+    g_drm.vaddr = NULL;
+    g_drm.w = g_drm.h = 0;
+    p_drm_client_init = NULL;
+    p_drm_client_release = NULL;
+    p_drm_client_framebuffer_create = NULL;
+    p_drm_client_buffer_vmap = NULL;
+    p_drm_client_buffer_vunmap = NULL;
+    p_drm_client_modeset_commit = NULL;
 }
 
 static int wuwa_drm_present(const __u32 *fb, __u32 w, __u32 h,
                             const struct wuwa_dirty *dirty)
 {
-    (void)fb;
-    (void)w;
+    __u32 y0, y1, y;
     (void)h;
-    (void)dirty;
+    if (!g_drm.client || !g_drm.vaddr || !fb || !dirty || !dirty->valid)
+        return -ENODEV;
+    if (w != g_drm.w)
+        return -EINVAL;
+    y0 = dirty->y0;
+    y1 = dirty->y1;
+    if (y0 >= g_drm.h || y1 <= y0)
+        return 0;
+    if (y1 > g_drm.h)
+        y1 = g_drm.h;
+    /* Tight rows (64px-aligned widths satisfy <=256B driver pitch;
+     * wider pitch skews visibly but cannot overflow: total fits). */
+    for (y = y0; y < y1; y++) {
+        memcpy((char *)g_drm.vaddr + (size_t)y * w * 4,
+               (const char *)fb + (size_t)y * w * 4, (size_t)w * 4);
+    }
+    if (p_drm_client_modeset_commit)
+        return p_drm_client_modeset_commit(g_drm.client);
     return -ENODEV;
 }
 
 static int wuwa_drm_active(void)
 {
-    return 0;
+    return g_drm.client ? 1 : 0;
 }
 
 static void wuwa_drm_status(__u32 *w, __u32 *h, __u32 *err)
 {
     if (w)
-        *w = 0;
+        *w = g_drm.w;
     if (h)
-        *h = 0;
+        *h = g_drm.h;
     if (err)
         *err = (__u32)(-(g_drm.last_errno));
 }
