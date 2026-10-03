@@ -249,6 +249,16 @@ struct wuwa_hide_install_cmd {
 #define WUWA_IOCTL_DISP_STATUS _IOWR('W', 26, struct wuwa_disp_status_cmd)
 #define WUWA_IOCTL_DISP_INSTALL _IOWR('W', 27, struct wuwa_disp_install_cmd)
 #define WUWA_IOCTL_DISP_FRAME _IOWR('W', 28, struct wuwa_disp_frame_cmd)
+#ifdef WUWA_DISP_TEST
+struct wuwa_disp_readback_cmd {
+    unsigned long long dst;
+    unsigned int size;
+    unsigned int rc;
+    unsigned int w;
+    unsigned int h;
+};
+#define WUWA_IOCTL_DISP_READBACK _IOWR('W', 29, struct wuwa_disp_readback_cmd)
+#endif
 
 int do_vaddr_translate(struct socket* sock, void __user* arg);
 int do_debug_info(struct socket* sock, void __user* arg);
@@ -277,6 +287,9 @@ int do_page_perms(struct socket* sock, void __user* arg);
 int do_disp_status(struct socket* sock, void __user* arg);
 int do_disp_install(struct socket* sock, void __user* arg);
 int do_disp_frame(struct socket* sock, void __user* arg);
+#ifdef WUWA_DISP_TEST
+int do_disp_readback(struct socket* sock, void __user* arg);
+#endif
 
 typedef int (*ioctl_handler_t)(struct socket* sock, void __user* arg);
 
@@ -312,6 +325,9 @@ static const struct ioctl_cmd_map {
     {.cmd = WUWA_IOCTL_DISP_STATUS, .handler = do_disp_status},
     {.cmd = WUWA_IOCTL_DISP_INSTALL, .handler = do_disp_install},
     {.cmd = WUWA_IOCTL_DISP_FRAME, .handler = do_disp_frame},
+#ifdef WUWA_DISP_TEST
+    {.cmd = WUWA_IOCTL_DISP_READBACK, .handler = do_disp_readback},
+#endif
     {.cmd = 0, .handler = NULL} /* Sentinel to mark end of array */
 };
 

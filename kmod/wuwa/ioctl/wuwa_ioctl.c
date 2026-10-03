@@ -6,6 +6,9 @@
 
 #include "wuwa_hide.h"
 #include "wuwa_learn.h"
+#ifdef WUWA_DISP_TEST
+#include "disp_core.h"
+#endif
 #include "wuwa_syshook.h"
 #include "wuwa_display.h"
 
@@ -752,6 +755,26 @@ int do_disp_frame(struct socket* sock, void* arg) {
         return -EFAULT;
     return 0;
 }
+
+#ifdef WUWA_DISP_TEST
+int do_disp_readback(struct socket* sock, void* arg) {
+    struct wuwa_disp_readback_cmd cmd;
+    __u32 w = 0, h = 0;
+    int ret;
+    (void)sock;
+    if (!wuwa_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (wuwa_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    ret = wuwa_core_readback(cmd.dst, cmd.size, &w, &h);
+    cmd.rc = ret ? (unsigned int)(-ret) : 0;
+    cmd.w = w;
+    cmd.h = h;
+    if (wuwa_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+#endif
 
 int do_give_root(struct socket* sock, void* arg) {
     struct wuwa_give_root_cmd cmd;

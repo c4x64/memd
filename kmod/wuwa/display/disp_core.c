@@ -15,11 +15,18 @@
 extern const struct wuwa_disp_backend wuwa_be_exynos;
 extern const struct wuwa_disp_backend wuwa_be_simplefb;
 extern const struct wuwa_disp_backend wuwa_be_drm;
+#ifdef WUWA_DISP_TEST
+extern const struct wuwa_disp_backend wuwa_be_ram;
+#endif
 
 static const struct wuwa_disp_backend *wuwa_backends[] = {
+    &wuwa_be_drm,
     &wuwa_be_simplefb,
     &wuwa_be_exynos,
-    &wuwa_be_drm,
+#ifdef WUWA_DISP_TEST
+    /* RAM last: hardware preferred; RAM catches the no-panel case. */
+    &wuwa_be_ram,
+#endif
 };
 
 static DEFINE_MUTEX(g_core_mu);
@@ -309,3 +316,32 @@ int wuwa_core_frame(const struct wuwa_disp_op *ops, __u32 count)
     mutex_unlock(&g_core_mu);
     return rc;
 }
+
+#ifdef WUWA_DISP_TEST
+#include "wuwa_uaccess.h"
+
+int wuwa_core_readback(__u64 dst, __u32 size, __u32 *w, __u32 *h)
+{
+    size_t need = 0;
+    int rc = 0;
+    if (!w || !h)
+        return -EINVAL;
+    mutex_lock(&g_core_mu);
+    if (!g_core.be || !g_core.front || !g_core.w || !g_core.h) {
+        mutex_unlock(&g_core_mu);
+        return -ENODEV;
+    }
+    if (check_mul_overflow((size_t)g_core.w, (size_t)g_core.h, &need) ||
+        check_mul_overflow(need, (size_t)4, &need) || !need ||
+        (size_t)size < need) {
+        mutex_unlock(&g_core_mu);
+        return -EINVAL;
+    }
+    *w = g_core.w;
+    *h = g_core.h;
+    rc = wuwa_copy_to_user((void *)(uintptr_t)dst, g_core.front, need) ?
+        -EFAULT : 0;
+    mutex_unlock(&g_core_mu);
+    return rc;
+}
+#endif

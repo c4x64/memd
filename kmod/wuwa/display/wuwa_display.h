@@ -68,6 +68,21 @@ struct wuwa_disp_frame_cmd {
     __u32 rc;       /* Output: 0 ok, else -errno */
 };
 
+#ifdef WUWA_DISP_TEST
+/* TEST ONLY (never ship): read back the front buffer for host-side
+ * pixel verification (no panel hardware needed). Product builds omit
+ * the opcode entirely (dispatch returns ENOTTY). */
+struct wuwa_disp_readback_cmd {
+    __u64 dst;      /* Input: userspace pointer for ARGB8888 pixels */
+    __u32 size;     /* Input: dst capacity in bytes */
+    __u32 rc;       /* Output: 0 ok, else -errno */
+    __u32 w;        /* Output: framebuffer width */
+    __u32 h;        /* Output: framebuffer height */
+};
+
+int wuwa_disp_readback(__u64 dst, __u32 size, __u32 *w, __u32 *h);
+#endif
+
 int wuwa_disp_install(__u32 backend, __u32 width, __u32 height);
 int wuwa_disp_uninstall(void);
 int wuwa_disp_active(void);

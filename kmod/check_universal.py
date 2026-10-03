@@ -59,7 +59,7 @@ def main():
         die("empty System.map?")
     # Universal image only: _printk must exist in the BASELINE map (all
     # printk calls redirect to it — Samsung 5.15 strips printk itself).
-    if kmi == "universal" and "_printk" not in exported:
+    if (kmi == "universal" or kmi == "universal-test") and "_printk" not in exported:
         die("baseline map lacks _printk (printk redirect unsafe)")
     # vermagic placeholder must fit the longest real targets: UTS part
     # (after 'vermagic=' up to first space) needs room (~55+ chars).
@@ -102,7 +102,7 @@ def main():
     # when GKI exports them (proven on Samsung 5.15). pfn_valid goes
     # through wuwa_pfn_ok (runtime chain); MMIO uses volatile access;
     # kprobes must never appear (loader-rejected GOT relocs).
-    if kmi == "universal":
+    if kmi == "universal" or kmi == "universal-test":
         denied = {"pfn_valid", "__log_read_mmio", "__log_post_read_mmio",
                   "register_kprobe", "unregister_kprobe",
                   "kallsyms_lookup_name"}

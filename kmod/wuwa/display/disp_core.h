@@ -49,4 +49,8 @@ int wuwa_core_active(void);
 int wuwa_core_status(__u32 *backend, __u32 *w, __u32 *h, __u32 *err);
 int wuwa_core_frame(const struct wuwa_disp_op *ops, __u32 count);
 
+#ifdef WUWA_DISP_TEST
+int wuwa_core_readback(__u64 dst, __u32 size, __u32 *w, __u32 *h);
+#endif
+
 #endif /* WUWA_DISP_CORE_H */

@@ -42,6 +42,14 @@ rwbridge-y := \
     wuwa/inlinehook/hijack_arm64.o \
     wuwa/inlinehook/wuwa_syshook.o
 
+# TEST ONLY (never ship): DISP_TEST=1 adds the RAM backend + readback
+# opcode for host-side pixel verification (no panel hardware needed).
+# Product artifacts never set it (surface stays 26/27/28).
+ifdef DISP_TEST
+rwbridge-y += wuwa/display/soc_ram.o
+ccflags-y += -DWUWA_DISP_TEST
+endif
+
 # hijack_arm64.o is linked ONLY for hook_write_range (CFI-disable path).
 # check_target_can_hijack and the call-redirection machinery are never
 # called (no call sites outside that file); kept compiled to avoid forking
