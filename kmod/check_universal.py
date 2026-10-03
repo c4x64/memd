@@ -100,7 +100,7 @@ def main():
         die("CFI imports in artifact: " + " ".join(sorted(set(cfi_bad))))
     # Universal image only: deny imports that vendor kernels strip even
     # when GKI exports them (proven on Samsung 5.15). pfn_valid goes
-    # through wuwa_pfn_ok (runtime chain); MMIO uses volatile access;
+    # through memd_pfn_ok (runtime chain); MMIO uses volatile access;
     # kprobes must never appear (loader-rejected GOT relocs).
     if kmi == "universal" or kmi == "universal-test":
         denied = {"pfn_valid", "__log_read_mmio", "__log_post_read_mmio",

@@ -4,7 +4,7 @@ One packed deliverable (`rwbridge-spx`) carrying **one universal image
 first, 8 per-generation artifacts as fallback**; the loader tries the
 universal image on every 5.10–6.12 kernel and falls back to the
 numerically matched per-KMI artifact. Driver core derived from
-fuqiuluo/android-wuwa (socket transport, page-table walk, phys R/W,
+fuqiuluo/android-memd (socket transport, page-table walk, phys R/W,
 kallsyms resolution, CFI-disable); inline hooks are permitted ONLY for
 the kernel display facility and process hiding (owner override, see
 below); procfs/dmabuf transports are excluded.
@@ -70,7 +70,7 @@ dummy-virt, no controller guessed). No panics across the full suite.
   run): unlike the previous sysfs design, there is no useful
   degraded state, so init failure refuses the load instead of going
   silent-Live.
-- **Logging via printk** (`wuwa_info/err`): the universal image pins
+- **Logging via printk** (`memd_info/err`): the universal image pins
   `_printk` (5.10 headers emit `printk`, some vendors export only
   `_printk` — proven on Samsung 5.15; CI-gated present in baseline map).
   Boot lines only + errors; no per-op spam.
@@ -80,18 +80,18 @@ dummy-virt, no controller guessed). No panics across the full suite.
 No device node, no sysfs params. The driver registers a socket family
 (first free from `AF_DECnet`); discover it by probing families with
 `SOCK_SEQPACKET` (driver answers `-ENOKEY`) then opening `SOCK_RAW`.
-All commands are `ioctl()`s on that fd (see `kmod/wuwa/ioctl/`):
+All commands are `ioctl()`s on that fd (see `kmod/memd/ioctl/`):
 
 ```
-WUWA_IOCTL_READ_MEMORY / WRITE_MEMORY (phys, arbitrary size)
-WUWA_IOCTL_ADDR_TRANSLATE / AT_S1E0R  (VA translation)
-WUWA_IOCTL_DEBUG_INFO                 (TTBR0/task/mm/pgd — bring-up)
-WUWA_IOCTL_GET_MODULE_BASE / FIND_PROCESS / IS_PROCESS_ALIVE
-WUWA_IOCTL_PAGE_INFO / PAGE_TABLE_WALK / PTE_MAPPING
-WUWA_IOCTL_BIND_PROC / COPY_PROCESS
-WUWA_IOCTL_HIDE_PROCESS               (present, unused — see TO DO)
-WUWA_IOCTL_GIVE_ROOT                  (present, NEVER used by product)
-WUWA_IOCTL_*_IOREMAP / DMA_BUF_CREATE (present, unused by product)
+MEMD_IOCTL_READ_MEMORY / WRITE_MEMORY (phys, arbitrary size)
+MEMD_IOCTL_ADDR_TRANSLATE / AT_S1E0R  (VA translation)
+MEMD_IOCTL_DEBUG_INFO                 (TTBR0/task/mm/pgd — bring-up)
+MEMD_IOCTL_GET_MODULE_BASE / FIND_PROCESS / IS_PROCESS_ALIVE
+MEMD_IOCTL_PAGE_INFO / PAGE_TABLE_WALK / PTE_MAPPING
+MEMD_IOCTL_BIND_PROC / COPY_PROCESS
+MEMD_IOCTL_HIDE_PROCESS               (present, unused — see TO DO)
+MEMD_IOCTL_GIVE_ROOT                  (present, NEVER used by product)
+MEMD_IOCTL_*_IOREMAP / DMA_BUF_CREATE (present, unused by product)
 ```
 
 Strict validation everywhere: `pid>0`, user-VA gates, size bounds.
@@ -170,8 +170,8 @@ product surface stays 26/27/28.
   (`x8r8g8b8`/`a8r8g8b8` direct copy; anything else refuses — wrong
   colors are worse than none) + overflow-checked geometry (panel must
   fit the UI; top-left blit, rest of panel untouched). Continuous
-  refresh: a `wuwa_disp` kernel thread re-presents the stable front at
-  10 Hz (`WUWA_DISP_REFRESH_MS`), repainting over fbcon/splash writers
+  refresh: a `memd_disp` kernel thread re-presents the stable front at
+  10 Hz (`MEMD_DISP_REFRESH_MS`), repainting over fbcon/splash writers
   behind our back. Kernel thread = immune to LMK and force-stop,
   outlives userspace death; only uninstall/rmmod stops it (stop outside
   the core lock — `kthread_stop` sleeps — then teardown under lock).
@@ -241,7 +241,7 @@ product surface stays 26/27/28.
   what vendors strip even when GKI exports it (proven on Samsung 5.15:
   `printk`, `pfn_valid`, traced MMIO, `mmap_lock` inlines). CI denies
   these imports for the universal job; runtime chains replace them
-  (`_printk` pin, `wuwa_pfn_ok`, volatile MMIO, no mmap_lock).
+  (`_printk` pin, `memd_pfn_ok`, volatile MMIO, no mmap_lock).
 
 ## Explicit NO-GO list
 

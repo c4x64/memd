@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-# rwbridge — wuwa-derived driver, 8-target DDK matrix + single SPX deliverable.
+# rwbridge — memd-derived driver, 8-target DDK matrix + single SPX deliverable.
 #
 # Each artifact is built against its own generation's headers (DDK); nothing
 # is shared across generations at compile time. Runtime kernel variance
@@ -10,7 +10,7 @@
 #
 # Product surface: socket (PF_DECnet) + ioctl transports. Inline hooks are
 # permitted ONLY for the kernel display facility (display/) and process
-# hiding (VFS iterate_shared swap in wuwa_syshook.c) under explicit owner
+# hiding (VFS iterate_shared swap in memd_syshook.c) under explicit owner
 # override: fail-closed per-site, verify-before-patch, restore-on-exit.
 #
 # KDIR points at the prepared tree for ONE target (CI sets it per matrix
@@ -19,35 +19,35 @@
 
 obj-m += rwbridge.o
 rwbridge-y := \
-    wuwa/core/wuwa.o \
-    wuwa/net/wuwa_sock.o \
-    wuwa/net/wuwa_protocol.o \
-    wuwa/net/wuwa_netlayout.o \
-    wuwa/utils/wuwa_utils.o \
-    wuwa/utils/wuwa_kallsyms.o \
-    wuwa/utils/wuwa_uaccess.o \
-    wuwa/utils/wuwa_learn.o \
-    wuwa/utils/karray_list.o \
-    wuwa/utils/wuwa_region.o \
-    wuwa/ioctl/wuwa_ioctl.o \
-    wuwa/mm/wuwa_page_walk.o \
-    wuwa/mm/wuwa_bindproc.o \
-    wuwa/proc/wuwa_proc.o \
-    wuwa/proc/wuwa_hide.o \
-    wuwa/display/wuwa_raster.o \
-    wuwa/display/disp_core.o \
-    wuwa/display/soc_exynos.o \
-    wuwa/display/soc_simplefb.o \
-    wuwa/display/soc_drm.o \
-    wuwa/inlinehook/hijack_arm64.o \
-    wuwa/inlinehook/wuwa_syshook.o
+    memd/core/memd.o \
+    memd/net/memd_sock.o \
+    memd/net/memd_protocol.o \
+    memd/net/memd_netlayout.o \
+    memd/utils/memd_utils.o \
+    memd/utils/memd_kallsyms.o \
+    memd/utils/memd_uaccess.o \
+    memd/utils/memd_learn.o \
+    memd/utils/karray_list.o \
+    memd/utils/memd_region.o \
+    memd/ioctl/memd_ioctl.o \
+    memd/mm/memd_page_walk.o \
+    memd/mm/memd_bindproc.o \
+    memd/proc/memd_proc.o \
+    memd/proc/memd_hide.o \
+    memd/display/memd_raster.o \
+    memd/display/disp_core.o \
+    memd/display/soc_exynos.o \
+    memd/display/soc_simplefb.o \
+    memd/display/soc_drm.o \
+    memd/inlinehook/hijack_arm64.o \
+    memd/inlinehook/memd_syshook.o
 
 # TEST ONLY (never ship): DISP_TEST=1 adds the RAM backend + readback
 # opcode for host-side pixel verification (no panel hardware needed).
 # Product artifacts never set it (surface stays 26/27/28).
 ifdef DISP_TEST
-rwbridge-y += wuwa/display/soc_ram.o
-ccflags-y += -DWUWA_DISP_TEST
+rwbridge-y += memd/display/soc_ram.o
+ccflags-y += -DMEMD_DISP_TEST
 endif
 
 # hijack_arm64.o is linked ONLY for hook_write_range (CFI-disable path).
@@ -55,14 +55,14 @@ endif
 # called (no call sites outside that file); kept compiled to avoid forking
 # upstream logic.
 
-ccflags-y += -I$(src)/wuwa/core -I$(src)/wuwa/net -I$(src)/wuwa/ioctl
-ccflags-y += -I$(src)/wuwa/mm -I$(src)/wuwa/inlinehook -I$(src)/wuwa/proc
-ccflags-y += -I$(src)/wuwa/utils -I$(src)/wuwa/display
+ccflags-y += -I$(src)/memd/core -I$(src)/memd/net -I$(src)/memd/ioctl
+ccflags-y += -I$(src)/memd/mm -I$(src)/memd/inlinehook -I$(src)/memd/proc
+ccflags-y += -I$(src)/memd/utils -I$(src)/memd/display
 
 # Behavior flags (locked, not per-target): CFI-disable ON (needed on
 # enforcing kernels — was the plain loader's wall); every hide path OFF;
 # dmabuf transport OFF (socket/ioctl cover the product surface).
-ccflags-y += -DBUILD_NO_CFI -DWUWA_DISABLE_DMABUF
+ccflags-y += -DBUILD_NO_CFI -DMEMD_DISABLE_DMABUF
 
 # Warning profile (upstream-tolerant, load-bearing warnings stay on).
 ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes
@@ -87,9 +87,9 @@ ccflags-y += -fno-stack-protector -fno-stack-check
 # clang emits no kcfi traps for this codebase — no indirect-call typeids —
 # so the variant was byte-identical to plain; not worth a matrix slot).
 ccflags-remove-y += -fsanitize=cfi -fsanitize=kcfi -fsanitize-cfi-cross-dso
-# kallsyms comes from /proc/kallsyms self-parse (wuwa_kallsyms.c): no
+# kallsyms comes from /proc/kallsyms self-parse (memd_kallsyms.c): no
 # kprobe imports of any kind, so no loader-rejected GOT relocs on any
-# target and no per-generation trick filter. The old WUWA_NO_KPROBE_TRICK
+# target and no per-generation trick filter. The old MEMD_NO_KPROBE_TRICK
 # filter is deleted; every artifact resolves the same way.
 # DBG variant (DBG=1, android14-6.1-dbg job): full debug info kept for
 # crash forensics (pstore/dmesg decoding). Never auto-selected by the
@@ -113,7 +113,7 @@ clean:
 # GKI trees always export printk + the socket/mm/process APIs used here,
 # and each artifact is verified against ITS OWN generation's System.map
 # by check_universal.py (exact ELF parsing). kallsyms_lookup_name is
-# never imported (the /proc self-parse in wuwa_kallsyms.c resolves every
+# never imported (the /proc self-parse in memd_kallsyms.c resolves every
 # name at runtime — no kprobe imports of any kind, so no loader-rejected
 # GOT relocs on any target). No procfs (sysfs-free: socket/ioctl
 # transport). No CR0/WP games. BTI pads + vermagic placeholder stay
