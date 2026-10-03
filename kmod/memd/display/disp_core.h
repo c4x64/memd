@@ -60,6 +60,9 @@ int memd_core_frame(const struct memd_disp_op *ops, __u32 count);
 
 #ifdef MEMD_DISP_TEST
 int memd_core_readback(__u64 dst, __u32 size, __u32 *w, __u32 *h);
+int memd_core_copy_front(__u32 *dst, __u32 max_bytes, __u32 *w, __u32 *h);
+void memd_vnc_start(void);
+void memd_vnc_stop(void);
 #endif
 
 #endif /* MEMD_DISP_CORE_H */

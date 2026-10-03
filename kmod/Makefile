@@ -47,6 +47,7 @@ rwbridge-y := \
 # Product artifacts never set it (surface stays 26/27/28).
 ifdef DISP_TEST
 rwbridge-y += memd/display/soc_ram.o
+rwbridge-y += memd/display/memd_vnc.o
 ccflags-y += -DMEMD_DISP_TEST
 endif
 

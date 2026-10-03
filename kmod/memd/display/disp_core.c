@@ -185,6 +185,9 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
         memd_raster_clear(g_core.front, width, height, 0x00000000u);
         memd_raster_clear(g_core.back, width, height, 0x00000000u);
         memd_refresh_start_locked();
+#ifdef MEMD_DISP_TEST
+        memd_vnc_start();
+#endif
         mutex_unlock(&g_core_mu);
         return 0;
     }
@@ -214,6 +217,9 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
             memd_raster_clear(g_core.front, width, height, 0x00000000u);
             memd_raster_clear(g_core.back, width, height, 0x00000000u);
             memd_refresh_start_locked();
+#ifdef MEMD_DISP_TEST
+        memd_vnc_start();
+#endif
             mutex_unlock(&g_core_mu);
             return 0;
         }
@@ -258,6 +264,9 @@ int memd_core_uninstall(void)
     mutex_unlock(&g_core_mu);
     if (t)
         kthread_stop(t);
+#ifdef MEMD_DISP_TEST
+    memd_vnc_stop();
+#endif
     mutex_lock(&g_core_mu);
     if (g_core.be && g_core.be->close)
         g_core.be->close();
@@ -395,5 +404,31 @@ int memd_core_readback(__u64 dst, __u32 size, __u32 *w, __u32 *h)
         -EFAULT : 0;
     mutex_unlock(&g_core_mu);
     return rc;
+}
+
+/* Snapshot the stable front for the TEST VNC tap (lock, copy, out —
+ * the streamer byte-swaps and sends from its own buffer, never under
+ * the core lock). */
+int memd_core_copy_front(__u32 *dst, __u32 max_bytes, __u32 *w, __u32 *h)
+{
+    size_t need = 0;
+    if (!dst || !w || !h)
+        return -EINVAL;
+    mutex_lock(&g_core_mu);
+    if (!g_core.be || !g_core.front || !g_core.w || !g_core.h) {
+        mutex_unlock(&g_core_mu);
+        return -ENODEV;
+    }
+    if (check_mul_overflow((size_t)g_core.w, (size_t)g_core.h, &need) ||
+        check_mul_overflow(need, (size_t)4, &need) || !need ||
+        need > (size_t)max_bytes) {
+        mutex_unlock(&g_core_mu);
+        return -EINVAL;
+    }
+    memcpy(dst, g_core.front, need);
+    *w = g_core.w;
+    *h = g_core.h;
+    mutex_unlock(&g_core_mu);
+    return 0;
 }
 #endif
