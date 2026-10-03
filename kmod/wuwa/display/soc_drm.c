@@ -34,7 +34,7 @@
 
 #include <linux/device.h>
 #include <drm/drm_file.h>
-#include <string.h>
+#include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
