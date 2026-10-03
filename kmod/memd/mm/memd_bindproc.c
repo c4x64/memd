@@ -119,6 +119,7 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
                     }
                 }
                 arraylist_clear(private_data->mapped_pages);
+                private_data->prot = new_prot;
 
                 mutex_unlock(&private_data->lock);
             }
@@ -153,6 +154,10 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
             va = cmd.src_va;
             //memd_info("bindproc_read: pid=%d, va=0x%lx, size=%zu\n", private_data->pid, va, cmd.size);
 
+            /* Cache + prot are shared with concurrent READ/WRITE ioctls on
+             * this fd and with SET_PROT's clear: hold the lock across the
+             * page loop (sleepable mutex; ioremap/copy may sleep). */
+            mutex_lock(&private_data->lock);
             while (total_read < cmd.size) {
                 /* Translate current virtual address to physical */
                 ret = translate_process_vaddr(private_data->pid, va + total_read, &pa);
@@ -205,6 +210,7 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
             ret = total_read;
 
         out:
+            mutex_unlock(&private_data->lock);
             return ret;
         }
     case MEMD_BP_IOCTL_WRITE_MEMORY:
@@ -233,6 +239,8 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
 
             va = cmd.dst_va;
 
+            /* Same locking as the read path (shared cache/prot). */
+            mutex_lock(&private_data->lock);
             while (total_written < cmd.size) {
                 /* Translate current virtual address to physical */
                 ret = translate_process_vaddr(private_data->pid, va + total_written, &pa);
@@ -282,6 +290,7 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
             ret = total_written;
 
         out_write:
+            mutex_unlock(&private_data->lock);
             return ret;
         }
     default:
@@ -411,7 +420,8 @@ int do_bind_proc(struct socket* sock, void __user* arg) {
     if (IS_ERR(filp)) {
         memd_err("failed to create anon inode file: %ld\n", PTR_ERR(filp));
         ret = PTR_ERR(filp);
-        goto err_put_fd;
+        put_unused_fd(fd);
+        goto err_free_private;
     }
 
     /* Copy result back to userspace before installing fd */
@@ -436,7 +446,10 @@ err_put_fd:
     return ret;
 
 err_free_private:
-    /* Only reached if file creation failed */
+    /* Only reached before the file owns private_data (fd/anon setup
+     * failures); after fd_install/fput the release path owns it. */
+    if (private_data->mapped_pages)
+        arraylist_destroy(private_data->mapped_pages);
     mutex_destroy(&private_data->lock);
     kfree(private_data);
     return ret;

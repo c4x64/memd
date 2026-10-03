@@ -70,6 +70,7 @@ int memd_add_unsafe_region(pid_t session, uid_t uid, uintptr_t start, size_t num
     if (arraylist_add(unsafe_region_areas, area)) {
         write_unlock(&unsafe_region_areas_lock);
         memd_err("failed to add unsafe region area\n");
+        kvfree(area);
         return -ENOMEM;
     }
 
@@ -100,6 +101,9 @@ int memd_del_unsafe_region(pid_t pid)
             void* removed = arraylist_remove(unsafe_region_areas, i);
             if (removed) {
                 kvfree(removed);
+                /* List shifted left: recheck this index or the
+                 * neighbour with the same session is skipped (leak). */
+                i--;
             } else {
                 memd_err("failed to remove unsafe region area for pid %d\n", pid);
             }

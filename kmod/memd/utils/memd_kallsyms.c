@@ -39,6 +39,8 @@ static const char *memd_wanted[] = {
     "kallsyms_lookup_name",
     "pfn_valid",
     "max_pfn",
+    "find_vma",
+    "__find_vma",
 };
 
 #define MEMD_NWANT (sizeof(memd_wanted) / sizeof(memd_wanted[0]))

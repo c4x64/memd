@@ -3,6 +3,7 @@
 
 #include <asm-generic/errno-base.h>
 #include <linux/capability.h>
+#include <linux/preempt.h>
 
 #include "memd_hide.h"
 #include "memd_learn.h"
@@ -92,12 +93,14 @@ int do_at_s1e0r(struct socket* sock, void* arg) {
     put_task_struct(task);
     if (!mm) {
         memd_warn("failed to get mm: %d\n", cmd.pid);
-        put_task_struct(task);
         return -ESRCH;
     }
 
     u64 original_ttbr0 = read_sysreg_s(SYS_TTBR0_EL1);
     u64 new_ttbr0 = (uint64_t)(ASID(mm)) << 48 | virt_to_phys(memd_m_pgd(mm)) | (uint64_t)1;
+    /* TTBR0 is per-CPU: pin the CPU across msr/AT/restore, else a
+     * migration would corrupt the new CPU's TTBR0. */
+    preempt_disable();
     dsb(ish);
     asm volatile("msr ttbr0_el1, %0" ::"r"(new_ttbr0));
     dsb(ish);
@@ -106,14 +109,20 @@ int do_at_s1e0r(struct socket* sock, void* arg) {
     asm volatile("at s1e0r, %0" ::"r"(cmd.va));
     isb();
     uintptr_t pa = read_sysreg_s(SYS_PAR_EL1);
-    cmd.phy_addr = pa;
-    mmput(mm);
 
     dsb(ish);
     asm volatile("msr ttbr0_el1, %0" ::"r"(original_ttbr0));
     dsb(ish);
     isb();
+    preempt_enable();
+    mmput(mm);
 
+    /* PAR_EL1 bit 0 is F (fault): translation failed. Phys lives in
+     * bits [47:12]; the page offset comes from the VA. */
+    if (pa & 1) {
+        return -EFAULT;
+    }
+    cmd.phy_addr = (pa & 0x0000FFFFFFFFF000UL) | (cmd.va & (PAGE_SIZE - 1));
     if (cmd.phy_addr == 0) {
         return -EFAULT;
     }
@@ -147,7 +156,6 @@ int do_get_page_info(struct socket* sock, void* arg) {
     put_task_struct(task);
     if (!mm) {
         memd_warn("failed to get mm: %d\n", cmd.pid);
-        put_task_struct(task);
         return -ESRCH;
     }
 
@@ -163,6 +171,12 @@ int do_get_page_info(struct socket* sock, void* arg) {
     cmd.page.flags = page_struct->flags;
     cmd.page._mapcount = page_struct->_mapcount;
     cmd.page._refcount = page_struct->_refcount;
+    {
+        bool bad = (cmd.page.phy_addr == 0);
+        mmput(mm);
+        if (bad)
+            return -EFAULT;
+    }
 
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd))) {
         return -EFAULT;
@@ -484,8 +498,10 @@ int do_read_physical_memory(struct socket* sock, void __user* arg) {
         return -EFAULT;
     }
 
-    if (!cmd.size)
-        return -EFAULT;
+    /* Unbounded size would livelock the chunk loop (and wrap va+off):
+     * cap it. Root-only path, but a garbage size must still fail fast. */
+    if (!cmd.size || cmd.size > CMD_MAX_BYTES)
+        return -EINVAL;
     task = get_target_task(cmd.pid);
     if (!task)
         return -ESRCH;
@@ -518,6 +534,9 @@ int do_get_module_base(struct socket* sock, void __user* arg) {
     if (memd_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
+    /* User controls all 256 bytes: force NUL so the strlen/match in
+     * get_module_base cannot read past the stack struct. */
+    cmd.name[sizeof(cmd.name) - 1] = '\0';
 
     uintptr_t base = get_module_base(cmd.pid, cmd.name, cmd.vm_flag);
     if (base == 0) {
@@ -537,6 +556,9 @@ int do_find_process(struct socket* sock, void* arg) {
     if (memd_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
     }
+    /* Same NUL guarantee as get_module_base (find_process_by_name
+     * strlen-matches the name). */
+    cmd.name[sizeof(cmd.name) - 1] = '\0';
 
     cmd.pid = find_process_by_name(cmd.name);
     if (cmd.pid == 0) {
@@ -570,8 +592,9 @@ int do_write_physical_memory(struct socket* sock, void __user* arg) {
         return -EFAULT;
     }
 
-    if (!cmd.size)
-        return -EFAULT;
+    /* Same cap as the read path (see above): unbounded size livelocks. */
+    if (!cmd.size || cmd.size > CMD_MAX_BYTES)
+        return -EINVAL;
     task = get_target_task(cmd.pid);
     if (!task)
         return -ESRCH;
@@ -913,9 +936,11 @@ int do_list_processes(struct socket* sock, void __user* arg) {
         return -EFAULT;
     }
 
-    // Validate bitmap size (must be at least 8192 bytes for PID 0-65535)
-    if (cmd.bitmap_size < 8192) {
-        memd_warn("bitmap size too small: %zu (minimum 8192)\n", cmd.bitmap_size);
+    // Validate bitmap size (must be at least 8192 bytes for PID 0-65535;
+    // capped: uncapped kzalloc is a guest-triggered OOM, and size*8 below
+    // must not wrap).
+    if (cmd.bitmap_size < 8192 || cmd.bitmap_size > (1U << 20)) {
+        memd_warn("bitmap size out of range: %zu (need 8192..1M)\n", cmd.bitmap_size);
         return -EINVAL;
     }
 
@@ -991,9 +1016,39 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
 
     // Extract basic process information
     cmd.tgid = memd_t_tgid(task);
-    cmd.uid = task->cred->uid.val;
-    cmd.ppid = task->real_parent ? task->real_parent->pid : 0;
-    cmd.prio = task->prio;
+    /* Foreign task layout skews across OEMs (proven): raw
+     * task->cred/real_parent/prio dereferences oops on the wrong offset.
+     * Learned offsets + extable-guarded reads instead; unknown -> 0. */
+    cmd.uid = 0;
+    cmd.ppid = 0;
+    cmd.prio = 0;
+    {
+        unsigned long c = 0;
+        unsigned int v = 0;
+        if (memd_learned.t_cred >= 0 &&
+            !memd_safe_read64((char *)task + memd_learned.t_cred, &c) && c &&
+            !memd_safe_read32((const void *)(c + 4), &v))
+            cmd.uid = (uid_t)v;
+    }
+    {
+        unsigned long p = 0;
+        if (!memd_safe_read64(&task->real_parent, &p) && p) {
+            unsigned int pp = 0;
+            if (memd_learned.t_pid >= 0) {
+                if (!memd_safe_read32((const void *)((char *)p + memd_learned.t_pid), &pp))
+                    cmd.ppid = (pid_t)pp;
+            } else if (!memd_safe_read32(&((struct task_struct *)p)->pid, &pp)) {
+                cmd.ppid = (pid_t)pp;
+            }
+        }
+    }
+    {
+        int pr = 0;
+        /* prio has no learned slot: guarded compiled read only
+         * (fault -> 0, never an oops). */
+        if (!memd_safe_read32(&task->prio, (unsigned int *)&pr))
+            cmd.prio = pr;
+    }
 
     // Try to get full command line
     cmdline[0] = '\0';
