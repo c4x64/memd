@@ -6,6 +6,8 @@
 #include "wuwa_raster.h"
 
 #include <linux/mutex.h>
+#include <linux/kthread.h>
+#include <linux/delay.h>
 #include <linux/overflow.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -31,6 +33,8 @@ static const struct wuwa_disp_backend *wuwa_backends[] = {
 
 static DEFINE_MUTEX(g_core_mu);
 
+static struct task_struct *g_refresh_task;
+
 static struct {
     __u32 *front;
     __u32 *back;
@@ -47,6 +51,34 @@ static struct {
     .be = NULL,
     .last_errno = 0,
 };
+
+/* Refresh thread: re-presents the stable front at WUWA_DISP_REFRESH_MS
+ * for backends that ask (simplefb vs fbcon overwrites). Kernel thread:
+ * immune to LMK/force-stop, outlives userspace death; only rmmod or
+ * uninstall stops it. Per-tick work is one locked full present. */
+static int wuwa_refresh_fn(void *data)
+{
+    (void)data;
+    while (!kthread_should_stop()) {
+        struct wuwa_dirty full;
+        msleep_interruptible(WUWA_DISP_REFRESH_MS);
+        if (kthread_should_stop())
+            break;
+        mutex_lock(&g_core_mu);
+        if (g_core.be && g_core.be->refresh && g_core.front &&
+            g_core.be->present) {
+            full.x0 = 0;
+            full.y0 = 0;
+            full.x1 = g_core.w;
+            full.y1 = g_core.h;
+            full.valid = true;
+            g_core.be->present(g_core.front, g_core.w, g_core.h, &full);
+        }
+        mutex_unlock(&g_core_mu);
+    }
+    return 0;
+}
+
 
 static void wuwa_dirty_add(__u32 x, __u32 y, __u32 w, __u32 h)
 {
@@ -85,6 +117,17 @@ static const struct wuwa_disp_backend *wuwa_find_be(__u32 id)
             return wuwa_backends[i];
     }
     return NULL;
+}
+
+/* Must hold g_core_mu. Starts the refresh thread once (idempotent:
+ * kthread_run is non-blocking; the thread blocks on the mutex). */
+static void wuwa_refresh_start_locked(void)
+{
+    if (g_refresh_task)
+        return;
+    g_refresh_task = kthread_run(wuwa_refresh_fn, NULL, "wuwa_disp");
+    if (IS_ERR(g_refresh_task))
+        g_refresh_task = NULL;
 }
 
 int wuwa_core_install(__u32 backend, __u32 width, __u32 height)
@@ -141,6 +184,7 @@ int wuwa_core_install(__u32 backend, __u32 width, __u32 height)
         g_core.last_errno = 0;
         wuwa_raster_clear(g_core.front, width, height, 0x00000000u);
         wuwa_raster_clear(g_core.back, width, height, 0x00000000u);
+        wuwa_refresh_start_locked();
         mutex_unlock(&g_core_mu);
         return 0;
     }
@@ -169,6 +213,7 @@ int wuwa_core_install(__u32 backend, __u32 width, __u32 height)
             g_core.last_errno = 0;
             wuwa_raster_clear(g_core.front, width, height, 0x00000000u);
             wuwa_raster_clear(g_core.back, width, height, 0x00000000u);
+            wuwa_refresh_start_locked();
             mutex_unlock(&g_core_mu);
             return 0;
         }
@@ -202,12 +247,19 @@ fail_open:
 
 int wuwa_core_uninstall(void)
 {
+    struct task_struct *t;
     mutex_lock(&g_core_mu);
     if (!g_core.be) {
         mutex_unlock(&g_core_mu);
         return -ENODEV;
     }
-    if (g_core.be->close)
+    t = g_refresh_task;
+    g_refresh_task = NULL;
+    mutex_unlock(&g_core_mu);
+    if (t)
+        kthread_stop(t);
+    mutex_lock(&g_core_mu);
+    if (g_core.be && g_core.be->close)
         g_core.be->close();
     if (g_core.front)
         vfree(g_core.front);

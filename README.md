@@ -169,7 +169,15 @@ product surface stays 26/27/28.
   programming, no clocks, no power, no registers). Strict format gate
   (`x8r8g8b8`/`a8r8g8b8` direct copy; anything else refuses — wrong
   colors are worse than none) + overflow-checked geometry (panel must
-  fit the UI; top-left blit, rest of panel untouched). Uninstall unmaps
+  fit the UI; top-left blit, rest of panel untouched). Continuous
+  refresh: a `wuwa_disp` kernel thread re-presents the stable front at
+  10 Hz (`WUWA_DISP_REFRESH_MS`), repainting over fbcon/splash writers
+  behind our back. Kernel thread = immune to LMK and force-stop,
+  outlives userspace death; only uninstall/rmmod stops it (stop outside
+  the core lock — `kthread_stop` sleeps — then teardown under lock).
+  Present-on-submit stays immediate; the heartbeat only guards
+  persistence. DRM needs no refresh (atomic commit latches), RAM none
+  (readback reads the core front directly). Uninstall unmaps
   only (last frame persists, harmless — simplefb keeps scanning out).
 - **DECON raw (probe-only, last resort).** Only matters without the DRM
   stack. Hazard-fixed probe: availability → resource claim (bound

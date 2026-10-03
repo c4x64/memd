@@ -149,4 +149,7 @@ const struct wuwa_disp_backend wuwa_be_simplefb = {
     .present = wuwa_sfb_present,
     .active = wuwa_sfb_active,
     .status = wuwa_sfb_status,
+    /* fbcon / splash / other writers can paint over our region behind
+     * our back — core re-presents the stable front at 10Hz. */
+    .refresh = true,
 };

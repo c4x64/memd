@@ -41,7 +41,16 @@ struct wuwa_disp_backend {
                    const struct wuwa_dirty *dirty);
     int (*active)(void);
     void (*status)(__u32 *w, __u32 *h, __u32 *err);
+    /* Refresh need: backend whose display can be overwritten behind
+     * its back (fbcon on simplefb) sets true; core re-presents the
+     * stable front at WUWA_DISP_REFRESH_MS. DRM (commit persists) and
+     * probe-only/RAM leave false. */
+    bool refresh;
 };
+
+/* Refresh period (simplefb heartbeat vs fbcon overwrites). Present on
+ * submit stays immediate; this only repaints persistence. */
+#define WUWA_DISP_REFRESH_MS 100
 
 int wuwa_core_install(__u32 backend, __u32 width, __u32 height);
 int wuwa_core_uninstall(void);
