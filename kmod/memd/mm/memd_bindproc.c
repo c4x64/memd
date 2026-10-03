@@ -440,8 +440,6 @@ int do_bind_proc(struct socket* sock, void __user* arg) {
 err_fput:
     /* File not yet installed, safe to fput (releases private_data via bindproc_release) */
     fput(filp);
-    /* Fall through to put_unused_fd */
-err_put_fd:
     put_unused_fd(fd);
     return ret;
 
