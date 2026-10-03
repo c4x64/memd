@@ -57,6 +57,11 @@ struct wuwa_disp_op {
 
 #define WUWA_DISP_MAX_OPS 1024
 
+/* UI dimensions cap (bounded shadow memory + blit/upload cost).
+ * Fullscreen needs a plane/DRM modeset, not a bigger shadow. */
+#define WUWA_DISP_MAX_W 640
+#define WUWA_DISP_MAX_H 480
+
 struct wuwa_disp_frame_cmd {
     __u64 ops;      /* Input: userspace pointer to wuwa_disp_op array */
     __u32 count;    /* Input: op count (capped at WUWA_DISP_MAX_OPS) */
