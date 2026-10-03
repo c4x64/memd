@@ -7,10 +7,14 @@ numerically matched per-KMI artifact. Driver core derived from
 fuqiuluo/android-wuwa (socket transport, page-table walk, phys R/W,
 kallsyms resolution, CFI-disable); inline hooks are permitted ONLY for
 the kernel display facility and process hiding (owner override, see
-below); procfs/dmabuf transports are excluded. Process hiding is
-implemented (VFS `iterate_shared` hook on `/proc`, best-effort, loud
-status) and proven live on Samsung 5.15 (shell-blind, root-sees, clean
-uninstall + rmmod).
+below); procfs/dmabuf transports are excluded.
+
+**PROVEN LIVE (universal image, Samsung 5.15, non-CFI):** load Live +
+socket open/close with zero crashes; ioctl struct round-trips; R/W with
+byte-exact data integrity (`0xdeadbeefcafebabe` write→read MATCH);
+hide install/hide/unhide/uninstall with shell-blind + root-sees +
+`/proc` fully restored; display install refused cleanly (`-ENODEV` on
+dummy-virt, no controller guessed). No panics across the full suite.
 
 - **1 universal image, 8 fallback builds, 1 deliverable.** The universal
   image is a 5.10-baseline build with zero version-conditional behavior:
@@ -56,17 +60,20 @@ uninstall + rmmod).
   skew too), and every NEW import must be load-tested on-device (CI
   proves DDK compatibility only). Cross-check technique: our undef list
   must be a subset of proven on-device vendor undefs + core exports.
-- **Symbols resolve at runtime** (kprobe trick on
-  `kallsyms_lookup_name`); unresolvable kernels fail closed at init
-  (return code, never half-alive).
+- **Symbols resolve at runtime** (`/proc/kallsyms` self-parse — no
+  kprobe imports of any kind; vendor loaders reject GOT-page relocs
+  against even weak kprobe references, so the trick can never be in a
+  universal image); unresolvable kernels fail closed per-op (kptr_restrict
+  hides addresses → callers degrade to "not found", R/W + hide +
+  display-probe need no kallsyms at all).
 - **Init is load-bearing** (socket server + resolution + CFI patch must
   run): unlike the previous sysfs design, there is no useful
   degraded state, so init failure refuses the load instead of going
   silent-Live.
-- **Logging via printk** (`wuwa_info/err`): GKI trees always export it
-  and each artifact is verified against its own generation's System.map
-  by the gate. Kernels without the import surface are an explicit
-  NO-GO (below), never a silent break.
+- **Logging via printk** (`wuwa_info/err`): the universal image pins
+  `_printk` (5.10 headers emit `printk`, some vendors export only
+  `_printk` — proven on Samsung 5.15; CI-gated present in baseline map).
+  Boot lines only + errors; no per-op spam.
 
 ## Client contract (product path: socket)
 
@@ -143,11 +150,53 @@ display. Enabling a SoC = verify its window map on hardware, add the
 compatible to the table, nothing else. Frames program on submit (a
 per-SoC vsync source is a tracked TODO, never guessed).
 
+## Universal runtime techniques (proven on Samsung 5.15)
+
+- **Learned credentials.** `capable()` inlines `task->cred` from build
+  headers — wrong on foreign layouts = crash on first socket (proven:
+  instant kill). Privilege checks read cred via a runtime-learned offset
+  (adjacent equal cred pointers with root usage/uid anchor) + stable
+  `struct cred` layout (usage@0, uid@4, cap_effective@56, CI-asserted).
+  Fail closed (deny) when unlearned.
+- **GUP-free user copies.** `copy_to/from_user` are arm64 inlines (PAN/UAO
+  sequences from build headers): 5.10-built copies fail on 5.15 (proven:
+  8-byte stack copy returns all-remaining). All user copies go through
+  `access_process_vm` (stable out-of-line MM API, chunked) — same
+  semantics, every generation. Target data additionally bypasses the
+  page walk via `access_process_vm` on the target task (KPTI-safe; the
+  walk stays for the phys diagnostic only, best-effort).
+- **Runtime-built socket tables.** A 5.10-built `struct proto` hangs
+  newer kernels in `proto_register` (proven: `obj_size` alone moved
+  256→272; init wedged spinning). Registration structs are built at
+  init for the RUNNING generation from CI-proved offset tables
+  (every matrix job re-asserts its own headers; drift fails the build).
+- **No `sock_orphan`.** It takes `sk_callback_lock`, whose offset moves
+  with `struct sock` (proven panic: BRK in `queued_spin_lock_slowpath`
+  on close). Our socket carries no callbacks/timers/packets, so there
+  is nothing to detach — release frees privates + drops the ref.
+- **No `mmap_lock`.** Its offset moves with `mm_struct` (proven panic
+  in `down_read` on first R/W). mm is pinned via `get_task_mm`; walks
+  are fail-closed (guarded reads + entry validation + pgd shape gate).
+- **KPTI-aware pgd.** TTBR0 (user tables) need not equal `mm->pgd`, so
+  pgd is learned by table shape (zeros + valid DRAM descriptors,
+  guarded reads), never by value match. Data path does not depend on
+  it (see above).
+- **Hide hook without symbols.** `/proc` `file_operations` reached via
+  live `filp_open` (per-generation `f_op`/`iterate_shared` slots from
+  CI tables); the table write uses Break-Before-Make + full-VA TLBI +
+  AP[1]=bit7 (all proven on-device). Install/uninstall verify every
+  write by readback and never clear state on failure (no dangling:
+  failure keeps hooked + active + retryable, never silent-empty).
+- **Denylist for stripped vendors.** The universal image must not import
+  what vendors strip even when GKI exports it (proven on Samsung 5.15:
+  `printk`, `pfn_valid`, traced MMIO, `mmap_lock` inlines). CI denies
+  these imports for the universal job; runtime chains replace them
+  (`_printk` pin, `wuwa_pfn_ok`, volatile MMIO, no mmap_lock).
+
 ## Explicit NO-GO list
 
 `CONFIG_MODULES=n`, module-sig enforcement, kernels not exporting the
-checked import surface, kprobe-blocked kernels (symbol resolution fails
-closed at init), unparseable `uname -r`. A new NO-GO
+checked import surface, unparseable `uname -r`. A new NO-GO
 must be explicit, never silent. 16K/64K pages are SUPPORTED (explicit
 geometry in the address path); CFI-enforcing kernels are SUPPORTED
 (runtime bypass). Hiding adds its own: `/proc` non-VFS or missing
@@ -175,6 +224,9 @@ only); `hijack_arm64.c` stays linked SOLELY for `hook_write_range`
 - 16K-page live proof (geometry path exercised on-device, not just CI).
 - Hide status surfacing in the overlay client (opcodes 21/22 in the
   product client header; warn user when hiding is unavailable).
+- Cross-generation live proofs (5.10 / 6.1 / 6.6 / 6.12 devices +
+  CFI-enforcing + non-Samsung SoCs); 5.10/6.x user-pgd sourcing for the
+  phys diagnostic (data already KPTI-safe via the kernel copy).
 
 ## Diagnosis
 
