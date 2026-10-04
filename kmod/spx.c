@@ -510,7 +510,7 @@ static int shift_tm_relocs(unsigned char *d, long n, unsigned long init_off,
         const char *name;
         if (sym > 1000000 || symoff + (long)sym * 24 + 24 > n)
             continue;
-        noff = (unsigned long)rd64le(d + symoff + (long)sym * 24);
+        noff = (unsigned long)rd32le(d + symoff + (long)sym * 24);
         if (noff > 1000000 || stroff + (long)noff >= n)
             continue;
         name = (const char *)(d + stroff + (long)noff);
