@@ -173,3 +173,141 @@ void memd_raster_glyph(__u32 *fb, __u32 w, __u32 h,
         }
     }
 }
+
+/* Alpha blend a pixel (src over dst) */
+static inline __u32 alpha_blend(__u32 src, __u32 dst)
+{
+    __u8 sa = (src >> 24) & 0xFF;
+    __u8 sr = (src >> 16) & 0xFF;
+    __u8 sg = (src >> 8) & 0xFF;
+    __u8 sb = src & 0xFF;
+    
+    __u8 da = (dst >> 24) & 0xFF;
+    __u8 dr = (dst >> 16) & 0xFF;
+    __u8 dg = (dst >> 8) & 0xFF;
+    __u8 db = dst & 0xFF;
+    
+    if (sa == 0)
+        return dst;
+    if (sa == 255)
+        return src;
+    
+    /* Porter-Duff over operator */
+    __u16 a = sa + da * (255 - sa) / 255;
+    if (a == 0)
+        return 0;
+    
+    __u16 r = (sr * sa + dr * da * (255 - sa) / 255) / a * 255;
+    __u16 g = (sg * sa + dg * da * (255 - sa) / 255) / a * 255;
+    __u16 b = (sb * sa + db * da * (255 - sa) / 255) / a * 255;
+    
+    return (a << 24) | ((r / 255) << 16) | ((g / 255) << 8) | (b / 255);
+}
+
+void memd_raster_composite_layers(__u32 *fb, __u32 w, __u32 h,
+                                  struct memd_disp_layer *layers, __u32 layer_count)
+{
+    if (!fb || !layers || layer_count == 0)
+        return;
+    
+    /* Sort layers by z_order (simple bubble sort for small count) */
+    for (int i = 0; i < layer_count - 1; i++) {
+        for (int j = 0; j < layer_count - i - 1; j++) {
+            if (layers[j].z_order > layers[j + 1].z_order) {
+                struct memd_disp_layer tmp = layers[j];
+                layers[j] = layers[j + 1];
+                layers[j + 1] = tmp;
+            }
+        }
+    }
+    
+    for (int i = 0; i < layer_count; i++) {
+        struct memd_disp_layer *layer = &layers[i];
+        if (!layer->visible || !layer->buffer)
+            continue;
+        
+        __u32 lx = layer->x;
+        __u32 ly = layer->y;
+        __u32 lw = layer->w;
+        __u32 lh = layer->h;
+        __u8 alpha = layer->alpha;
+        
+        /* Clipping */
+        if (lx >= w || ly >= h)
+            continue;
+        if (lx + lw > w)
+            lw = w - lx;
+        if (ly + lh > h)
+            lh = h - ly;
+        
+        for (__u32 y = 0; y < lh; y++) {
+            for (__u32 x = 0; x < lw; x++) {
+                __u32 src = layer->buffer[y * layer->w + x];
+                __u32 *dst = &fb[(ly + y) * w + (lx + x)];
+                
+                /* Apply layer alpha */
+                if (alpha != 255) {
+                    __u8 sa = alpha;
+                    src = ((src & 0xFF00FF00) * sa / 255) & 0xFF00FF00 |
+                          ((src & 0x00FF00FF) * sa / 255) & 0x00FF00FF;
+                }
+                
+                *dst = alpha_blend(src, *dst);
+            }
+        }
+    }
+}
+
+void memd_raster_composite_cursor(__u32 *fb, __u32 w, __u32 h,
+                                  const __u32 *cursor_fb, __u32 cw, __u32 ch,
+                                  __u32 x, __u32 y)
+{
+    if (!fb || !cursor_fb || cw == 0 || ch == 0)
+        return;
+    
+    /* Clipping */
+    if (x >= w || y >= h)
+        return;
+    if (x + cw > w)
+        cw = w - x;
+    if (y + ch > h)
+        ch = h - y;
+    
+    for (__u32 cy = 0; cy < ch; cy++) {
+        for (__u32 cx = 0; cx < cw; cx++) {
+            __u32 src = cursor_fb[cy * cw + cx];
+            __u8 sa = (src >> 24) & 0xFF;
+            if (sa == 0)
+                continue;
+            
+            __u32 *dst = &fb[(y + cy) * w + (x + cx)];
+            *dst = alpha_blend(src, *dst);
+        }
+    }
+}
+
+void memd_raster_apply_gamma(__u32 *fb, __u32 w, __u32 h,
+                             const __u32 *lut_r, const __u32 *lut_g, const __u32 *lut_b,
+                             __u32 size)
+{
+    if (!fb || !lut_r || !lut_g || !lut_b || size == 0)
+        return;
+    
+    __u32 n = w * h;
+    for (__u32 i = 0; i < n; i++) {
+        __u32 pixel = fb[i];
+        __u8 r = (pixel >> 16) & 0xFF;
+        __u8 g = (pixel >> 8) & 0xFF;
+        __u8 b = pixel & 0xFF;
+        
+        __u16 idx_r = (r * (size - 1)) / 255;
+        __u16 idx_g = (g * (size - 1)) / 255;
+        __u16 idx_b = (b * (size - 1)) / 255;
+        
+        __u8 nr = (lut_r[idx_r] >> 8) & 0xFF;
+        __u8 ng = (lut_g[idx_g] >> 8) & 0xFF;
+        __u8 nb = (lut_b[idx_b] >> 8) & 0xFF;
+        
+        fb[i] = (pixel & 0xFF000000) | ((__u32)nr << 16) | ((__u32)ng << 8) | nb;
+    }
+}
