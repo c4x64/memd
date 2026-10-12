@@ -316,8 +316,35 @@ struct memd_sigforce_cmd {
     int sig;
     int force;
     int result;
+    int async;
+    int group;
 };
 #define MEMD_IOCTL_SIGFORCE _IOWR('W', 34, struct memd_sigforce_cmd)
+
+struct memd_gyro_calibrate_cmd {
+    pid_t pid;
+    int16_t bias_x, bias_y, bias_z;
+    int16_t scale_x, scale_y, scale_z;
+    u32 action;
+};
+#define MEMD_IOCTL_GYRO_CALIBRATE _IOWR('W', 35, struct memd_gyro_calibrate_cmd)
+
+struct memd_touch_calibrate_cmd {
+    pid_t pid;
+    int32_t min_x, max_x, min_y, max_y;
+    int32_t pressure_min, pressure_max;
+    u32 action;
+};
+#define MEMD_IOCTL_TOUCH_CALIBRATE _IOWR('W', 36, struct memd_touch_calibrate_cmd)
+
+struct memd_virtual_input_cmd {
+    pid_t pid;
+    u32 type;
+    char name[64];
+    u32 enable;
+    int result;
+};
+#define MEMD_IOCTL_VIRTUAL_INPUT_CREATE _IOWR('W', 37, struct memd_virtual_input_cmd)
 
 /* IOCTL command for hiding status (hook active, hidden count) */
 struct memd_hide_status_cmd {
@@ -384,6 +411,9 @@ int do_touch_init(struct socket* sock, void __user* arg);
 int do_touch_inject(struct socket* sock, void __user* arg);
 int do_gyro_inject(struct socket* sock, void __user* arg);
 int do_sigforce(struct socket* sock, void __user* arg);
+int do_gyro_calibrate(struct socket* sock, void __user* arg);
+int do_touch_calibrate(struct socket* sock, void __user* arg);
+int do_virtual_input_create(struct socket* sock, void __user* arg);
 
 typedef int (*ioctl_handler_t)(struct socket* sock, void __user* arg);
 
@@ -431,6 +461,9 @@ static const struct ioctl_cmd_map {
     {.cmd = MEMD_IOCTL_TOUCH_INJECT, .handler = do_touch_inject},
     {.cmd = MEMD_IOCTL_GYRO_INJECT, .handler = do_gyro_inject},
     {.cmd = MEMD_IOCTL_SIGFORCE, .handler = do_sigforce},
+    {.cmd = MEMD_IOCTL_GYRO_CALIBRATE, .handler = do_gyro_calibrate},
+    {.cmd = MEMD_IOCTL_TOUCH_CALIBRATE, .handler = do_touch_calibrate},
+    {.cmd = MEMD_IOCTL_VIRTUAL_INPUT_CREATE, .handler = do_virtual_input_create},
     {.cmd = 0, .handler = NULL} /* Sentinel to mark end of array */
 };
 

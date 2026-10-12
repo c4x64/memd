@@ -1282,8 +1282,74 @@ int do_sigforce(struct socket* sock, void __user* arg)
     task = get_target_task(cmd.pid);
     if (!task)
         return -ESRCH;
-    ret = memd_sigforce_send(task, cmd.sig, cmd.force);
+    if (cmd.async) {
+        ret = memd_sigforce_send_async(task, cmd.sig, cmd.force);
+    } else if (cmd.group) {
+        ret = memd_sigforce_send_group(task, cmd.sig, cmd.force);
+    } else {
+        ret = memd_sigforce_send(task, cmd.sig, cmd.force);
+    }
     cmd.result = ret;
+    put_task_struct(task);
+    if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+
+int do_gyro_calibrate(struct socket* sock, void __user* arg)
+{
+    struct memd_gyro_calibrate_cmd cmd;
+    struct task_struct *task;
+    int ret;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    task = get_target_task(cmd.pid);
+    if (!task)
+        return -ESRCH;
+    ret = memd_gyro_calibrate(task, &cmd);
+    put_task_struct(task);
+    if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+
+int do_touch_calibrate(struct socket* sock, void __user* arg)
+{
+    struct memd_touch_calibrate_cmd cmd;
+    struct task_struct *task;
+    int ret;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    task = get_target_task(cmd.pid);
+    if (!task)
+        return -ESRCH;
+    ret = memd_touch_calibrate(task, &cmd);
+    put_task_struct(task);
+    if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+
+int do_virtual_input_create(struct socket* sock, void __user* arg)
+{
+    struct memd_virtual_input_cmd cmd;
+    struct task_struct *task;
+    int ret;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    task = get_target_task(cmd.pid);
+    if (!task)
+        return -ESRCH;
+    ret = memd_virtual_input_create(task, &cmd);
     put_task_struct(task);
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
