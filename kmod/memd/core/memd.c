@@ -39,7 +39,7 @@ static int __init memd_init(void) {
 
     /* Runtime offset learning (fail-soft per field, loud): task/mm/vma
      * layouts come from live anchors, never build headers. */
-    memd_learn();
+    memd_learn_comprehensive();
 
     ret = memd_proto_init();
     if (ret) {

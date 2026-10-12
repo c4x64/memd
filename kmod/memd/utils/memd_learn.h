@@ -156,6 +156,34 @@ struct memd_learned_ext {
     int s_time_gran;  /* struct super_block.s_time_gran */
     int s_maxbytes;   /* struct super_block.s_maxbytes */
     int s_op_flags;   /* struct super_block.s_op_flags */
+    
+    /* Thread struct offsets */
+    int t_thread_cpuctx;      /* thread_struct.cpu_context */
+    int t_thread_fpsimd;      /* thread_struct.fpsimd_state */
+    
+    /* Signal struct offsets */
+    int t_signal_shared_pending; /* signal_struct.shared_pending */
+    int t_signal_cred_guard;     /* signal_struct.cred_guard_mutex */
+    
+    /* Sighand struct offsets */
+    int t_sighand_action;       /* sighand_struct.action */
+    
+    /* Fs struct offsets */
+    int t_fs_pwd;               /* fs_struct.pwd */
+    int t_fs_root;              /* fs_struct.root */
+    
+    /* Nsproxy struct offsets */
+    int t_nsproxy_mnt_ns;       /* nsproxy.mnt_ns */
+    int t_nsproxy_pid_ns;       /* nsproxy.pid_ns_for_children */
+    
+    /* Cred struct offsets */
+    int t_cred_cap_eff;         /* cred.cap_effective */
+    int t_cred_cap_perm;        /* cred.cap_permitted */
+    int t_cred_cap_inh;         /* cred.cap_inheritable */
+    int t_cred_uid;             /* cred.uid */
+    
+    /* Verification */
+    int t_sighand_verified;     /* sighand pointer verified */
 };
 
 extern struct memd_learned_ext memd_learned_ext;
@@ -243,5 +271,79 @@ int memd_learn_extended(void);
     (memd_learned_ext.m_env_end >= 0 ? \
      *(unsigned long *)((char *)(mm) + memd_learned_ext.m_env_end) : \
      (mm)->env_end)
+
+/* Thread struct readers */
+#define memd_t_thread_cpuctx(t) \
+    (memd_learned_ext.t_thread_cpuctx >= 0 ? \
+     *(void **)((char *)(t) + memd_learned_ext.t_thread_cpuctx) : \
+     NULL)
+
+#define memd_t_thread_fpsimd(t) \
+    (memd_learned_ext.t_thread_fpsimd >= 0 ? \
+     *(void **)((char *)(t) + memd_learned_ext.t_thread_fpsimd) : \
+     NULL)
+
+/* Signal struct readers */
+#define memd_t_signal_shared_pending(t) \
+    (memd_learned_ext.t_signal_shared_pending >= 0 ? \
+     *(struct list_head **)((char *)memd_t_signal(t) + memd_learned_ext.t_signal_shared_pending) : \
+     NULL)
+
+#define memd_t_signal_cred_guard(t) \
+    (memd_learned_ext.t_signal_cred_guard >= 0 ? \
+     *(struct mutex **)((char *)memd_t_signal(t) + memd_learned_ext.t_signal_cred_guard) : \
+     NULL)
+
+/* Sighand struct readers */
+#define memd_t_sighand_action(t) \
+    (memd_learned_ext.t_sighand_action >= 0 ? \
+     *(struct k_sigaction **)((char *)memd_t_sighand(t) + memd_learned_ext.t_sighand_action) : \
+     NULL)
+
+/* Fs struct readers */
+#define memd_t_fs_pwd(t) \
+    (memd_learned_ext.t_fs_pwd >= 0 ? \
+     *(struct path **)((char *)memd_t_fs(t) + memd_learned_ext.t_fs_pwd) : \
+     NULL)
+
+#define memd_t_fs_root(t) \
+    (memd_learned_ext.t_fs_root >= 0 ? \
+     *(struct path **)((char *)memd_t_fs(t) + memd_learned_ext.t_fs_root) : \
+     NULL)
+
+/* Nsproxy struct readers */
+#define memd_t_nsproxy_mnt_ns(t) \
+    (memd_learned_ext.t_nsproxy_mnt_ns >= 0 ? \
+     *(struct ns_common **)((char *)memd_t_nsproxy(t) + memd_learned_ext.t_nsproxy_mnt_ns) : \
+     NULL)
+
+#define memd_t_nsproxy_pid_ns(t) \
+    (memd_learned_ext.t_nsproxy_pid_ns >= 0 ? \
+     *(struct ns_common **)((char *)memd_t_nsproxy(t) + memd_learned_ext.t_nsproxy_pid_ns) : \
+     NULL)
+
+/* Cred struct readers */
+#define memd_t_cred_cap_eff(t) \
+    (memd_learned_ext.t_cred_cap_eff >= 0 ? \
+     *(struct kernel_cap_struct *)((char *)memd_t_cred(t) + memd_learned_ext.t_cred_cap_eff) : \
+     (struct kernel_cap_struct){0})
+
+#define memd_t_cred_cap_perm(t) \
+    (memd_learned_ext.t_cred_cap_perm >= 0 ? \
+     *(struct kernel_cap_struct *)((char *)memd_t_cred(t) + memd_learned_ext.t_cred_cap_perm) : \
+     (struct kernel_cap_struct){0})
+
+#define memd_t_cred_cap_inh(t) \
+    (memd_learned_ext.t_cred_cap_inh >= 0 ? \
+     *(struct kernel_cap_struct *)((char *)memd_t_cred(t) + memd_learned_ext.t_cred_cap_inh) : \
+     (struct kernel_cap_struct){0})
+
+#define memd_t_cred_uid(t) \
+    (memd_learned_ext.t_cred_uid >= 0 ? \
+     *(kuid_t *)((char *)memd_t_cred(t) + memd_learned_ext.t_cred_uid) : \
+     (kuid_t){0})
+
+/* Comprehensive learning */
+int memd_learn_comprehensive(void);
 
 #endif /* MEMD_LEARN_H */
