@@ -13,6 +13,10 @@
 #include <linux/string.h>
 #include <linux/vmalloc.h>
 #include <linux/kernel.h>
+#include <linux/wait.h>
+#include <linux/ktime.h>
+#include <linux/atomic.h>
+#include <linux/workqueue.h>
 
 extern const struct memd_disp_backend memd_be_exynos;
 extern const struct memd_disp_backend memd_be_simplefb;
@@ -32,8 +36,11 @@ static const struct memd_disp_backend *memd_backends[] = {
 };
 
 static DEFINE_MUTEX(g_core_mu);
+static DEFINE_WAIT_QUEUE_HEAD(g_vsync_wq);
+static atomic_t g_frame_pending = ATOMIC_INIT(0);
 
 static struct task_struct *g_refresh_task;
+static struct workqueue_struct *g_flip_wq = NULL;
 
 static struct {
     __u32 *front;
@@ -43,6 +50,29 @@ static struct {
     struct memd_dirty dirty;
     const struct memd_disp_backend *be;
     int last_errno;
+    
+    /* Enhanced features */
+    struct memd_disp_vsync vsync;
+    struct memd_disp_edid edid;
+    struct memd_disp_mode current_mode;
+    struct memd_disp_mode available_modes[16];
+    __u32 mode_count;
+    int dpms_mode;
+    __u32 gamma_lut_r[256];
+    __u32 gamma_lut_g[256];
+    __u32 gamma_lut_b[256];
+    __u32 gamma_size;
+    bool gamma_dirty;
+    struct memd_disp_layer layers[MEMD_DISP_MAX_LAYERS];
+    __u32 layer_count;
+    __u32 cursor_x, cursor_y;
+    bool cursor_visible;
+    __u32 cursor_w, cursor_h;
+    __u32 *cursor_fb;
+    bool tear_free;
+    int64_t frame_interval_ns;
+    int64_t last_flip_ns;
+    atomic_t frame_count;
 } g_core = {
     .front = NULL,
     .back = NULL,
@@ -50,6 +80,24 @@ static struct {
     .h = 0,
     .be = NULL,
     .last_errno = 0,
+    .vsync = {.enabled = false, .next_vsync_ns = 0, .frame_interval_ns = 0, .frame_pending = ATOMIC_INIT(0)},
+    .edid = {.len = 0, .valid = false},
+    .current_mode = {0},
+    .mode_count = 0,
+    .dpms_mode = 0,
+    .gamma_size = 256,
+    .gamma_dirty = false,
+    .layer_count = 0,
+    .cursor_x = 0,
+    .cursor_y = 0,
+    .cursor_visible = false,
+    .cursor_w = 0,
+    .cursor_h = 0,
+    .cursor_fb = NULL,
+    .tear_free = true,
+    .frame_interval_ns = 16666666,
+    .last_flip_ns = 0,
+    .frame_count = ATOMIC_INIT(0),
 };
 
 /* Refresh thread: re-presents the stable front at MEMD_DISP_REFRESH_MS
@@ -109,6 +157,90 @@ static void memd_dirty_add(__u32 x, __u32 y, __u32 w, __u32 h)
         g_core.dirty.y1 = y1;
 }
 
+static inline int64_t ktime_to_ns(ktime_t kt)
+{
+    return ktime_to_ns(kt);
+}
+
+static int64_t memd_get_time_ns(void)
+{
+    return ktime_get_real_ns();
+}
+
+static void memd_vsync_init(void)
+{
+    g_core.vsync.enabled = g_core.tear_free;
+    if (g_core.frame_interval_ns > 0)
+        g_core.vsync.frame_interval_ns = g_core.frame_interval_ns;
+    else
+        g_core.vsync.frame_interval_ns = 16666666;
+    g_core.vsync.next_vsync_ns = memd_get_time_ns() + g_core.vsync.frame_interval_ns;
+    init_waitqueue_head(&g_core.vsync.wq);
+    atomic_set(&g_core.vsync.frame_pending, 0);
+}
+
+static int memd_vsync_wait_internal(int64_t timeout_ns)
+{
+    int64_t start = memd_get_time_ns();
+    int64_t target = g_core.vsync.next_vsync_ns;
+    int64_t deadline = start + timeout_ns;
+    
+    if (!g_core.vsync.enabled)
+        return 0;
+    
+    atomic_inc(&g_core.vsync.frame_pending);
+    
+    while (memd_get_time_ns() < target) {
+        int64_t remaining = target - memd_get_time_ns();
+        if (remaining > timeout_ns)
+            remaining = timeout_ns;
+        if (remaining <= 0)
+            break;
+        
+        int ret = wait_event_interruptible_timeout(g_core.vsync.wq,
+            memd_get_time_ns() >= target || kthread_should_stop(),
+            msecs_to_jiffies(remaining / 1000000 + 1));
+        if (ret == -ERESTARTSYS || kthread_should_stop())
+            break;
+    }
+    
+    atomic_dec(&g_core.vsync.frame_pending);
+    
+    int64_t now = memd_get_time_ns();
+    g_core.last_flip_ns = now;
+    g_core.vsync.next_vsync_ns = now + g_core.vsync.frame_interval_ns;
+    atomic_inc(&g_core.frame_count);
+    
+    return 0;
+}
+
+static void memd_vsync_notify(void)
+{
+    wake_up_all(&g_core.vsync.wq);
+}
+
+static void memd_flip_work(struct work_struct *work)
+{
+    (void)work;
+    mutex_lock(&g_core_mu);
+    if (g_core.be && g_core.be->present && g_core.front && g_core.be->present) {
+        g_core.be->present(g_core.front, g_core.w, g_core.h, &g_core.dirty);
+    }
+    g_core.dirty.valid = false;
+    mutex_unlock(&g_core_mu);
+    
+    memd_vsync_notify();
+}
+
+static DECLARE_WORK(g_flip_work, memd_flip_work);
+
+static int memd_schedule_flip(void)
+{
+    if (!g_flip_wq)
+        return -ENODEV;
+    return queue_work(g_flip_wq, &g_flip_work) ? 0 : -EBUSY;
+}
+
 static const struct memd_disp_backend *memd_find_be(__u32 id)
 {
     unsigned long i;
@@ -128,6 +260,10 @@ static void memd_refresh_start_locked(void)
     g_refresh_task = kthread_run(memd_refresh_fn, NULL, "memd_disp");
     if (IS_ERR(g_refresh_task))
         g_refresh_task = NULL;
+    
+    if (!g_flip_wq) {
+        g_flip_wq = alloc_workqueue("memd_disp_flip", WQ_UNBOUND | WQ_MEM_RECLAIM, 1);
+    }
 }
 
 int memd_core_install(__u32 backend, __u32 width, __u32 height)
@@ -163,6 +299,34 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
     g_core.h = 0;
     g_core.be = NULL;
     g_core.dirty.valid = false;
+    
+    /* Initialize new features */
+    memset(&g_core.vsync, 0, sizeof(g_core.vsync));
+    memset(&g_core.edid, 0, sizeof(g_core.edid));
+    memset(&g_core.current_mode, 0, sizeof(g_core.current_mode));
+    memset(g_core.available_modes, 0, sizeof(g_core.available_modes));
+    g_core.mode_count = 0;
+    g_core.dpms_mode = 0;
+    g_core.gamma_size = 256;
+    for (i = 0; i < 256; i++) {
+        g_core.gamma_lut_r[i] = i << 8;
+        g_core.gamma_lut_g[i] = i << 8;
+        g_core.gamma_lut_b[i] = i << 8;
+    }
+    g_core.gamma_dirty = false;
+    memset(g_core.layers, 0, sizeof(g_core.layers));
+    g_core.layer_count = 0;
+    g_core.cursor_x = 0;
+    g_core.cursor_y = 0;
+    g_core.cursor_visible = false;
+    g_core.cursor_w = 0;
+    g_core.cursor_h = 0;
+    g_core.cursor_fb = NULL;
+    g_core.tear_free = true;
+    g_core.frame_interval_ns = 16666666;
+    g_core.last_flip_ns = 0;
+    atomic_set(&g_core.frame_count, 0);
+    memd_vsync_init();
 
     if (backend != 0) {
         be = memd_find_be(backend);
@@ -351,11 +515,11 @@ int memd_core_frame(const struct memd_disp_op *ops, __u32 count)
                              ops[i].x, ops[i].y, ops[i].w, ops[i].h,
                              ops[i].color);
             memd_dirty_add(ops[i].x < ops[i].w ? ops[i].x : ops[i].w,
-                           ops[i].y < ops[i].h ? ops[i].y : ops[i].h,
-                           ops[i].x < ops[i].w ? ops[i].w - ops[i].x + 8 :
-                                                 ops[i].x - ops[i].w + 8,
-                           ops[i].y < ops[i].h ? ops[i].h - ops[i].y + 8 :
-                                                 ops[i].y - ops[i].h + 8);
+                          ops[i].y < ops[i].h ? ops[i].y : ops[i].h,
+                          ops[i].x < ops[i].w ? ops[i].w - ops[i].x + 8 :
+                                                  ops[i].x - ops[i].w + 8,
+                          ops[i].y < ops[i].h ? ops[i].h - ops[i].y + 8 :
+                                                  ops[i].y - ops[i].h + 8);
             break;
         case MEMD_DISP_GLYPH:
             memd_raster_glyph(g_core.back, g_core.w, g_core.h,
@@ -372,11 +536,49 @@ int memd_core_frame(const struct memd_disp_op *ops, __u32 count)
     tmp = g_core.front;
     g_core.front = g_core.back;
     g_core.back = tmp;
-    if (g_core.be->present)
+    
+    /* Apply gamma correction if needed */
+    if (g_core.gamma_dirty) {
+        memd_raster_apply_gamma(g_core.front, g_core.w, g_core.h,
+                                g_core.gamma_lut_r, g_core.gamma_lut_g, g_core.gamma_lut_b,
+                                g_core.gamma_size);
+        g_core.gamma_dirty = false;
+    }
+    
+    /* Composite layers if any */
+    if (g_core.layer_count > 0) {
+        memd_raster_composite_layers(g_core.front, g_core.w, g_core.h,
+                                     g_core.layers, g_core.layer_count);
+    }
+    
+    /* Composite cursor if visible */
+    if (g_core.cursor_visible && g_core.cursor_fb) {
+        memd_raster_composite_cursor(g_core.front, g_core.w, g_core.h,
+                                     g_core.cursor_fb, g_core.cursor_w, g_core.cursor_h,
+                                     g_core.cursor_x, g_core.cursor_y);
+    }
+    
+    if (g_core.tear_free) {
+        /* Schedule async flip with vsync */
+        memd_schedule_flip();
+        if (g_core.vsync.enabled) {
+            mutex_unlock(&g_core_mu);
+            memd_vsync_wait_internal(g_core.vsync.frame_interval_ns * 2);
+            mutex_lock(&g_core_mu);
+        }
+    }
+    
+    if (g_core.be->present) {
         rc = g_core.be->present(g_core.front, g_core.w, g_core.h,
                                 &g_core.dirty);
+    }
     g_core.dirty.valid = false;
     mutex_unlock(&g_core_mu);
+    
+    if (!g_core.tear_free) {
+        memd_vsync_wait_internal(g_core.vsync.frame_interval_ns);
+    }
+    
     return rc;
 }
 
@@ -434,3 +636,297 @@ int memd_core_copy_front(__u32 *dst, __u32 max_bytes, __u32 *w, __u32 *h)
     return 0;
 }
 #endif
+
+/* New API implementations */
+
+int memd_core_set_mode(const struct memd_disp_mode *mode)
+{
+    int rc = 0;
+    
+    if (!mode)
+        return -EINVAL;
+    
+    mutex_lock(&g_core_mu);
+    if (!g_core.be) {
+        mutex_unlock(&g_core_mu);
+        return -ENODEV;
+    }
+    
+    if (g_core.be->set_mode) {
+        rc = g_core.be->set_mode(mode);
+        if (!rc) {
+            g_core.current_mode = *mode;
+            g_core.frame_interval_ns = 1000000000LL / mode->refresh_rate;
+            g_core.vsync.frame_interval_ns = g_core.frame_interval_ns;
+        }
+    } else {
+        rc = -ENOTSUPP;
+    }
+    
+    mutex_unlock(&g_core_mu);
+    return rc;
+}
+
+int memd_core_get_modes(struct memd_disp_mode *modes, __u32 max_modes)
+{
+    int rc = 0;
+    
+    if (!modes || max_modes == 0)
+        return -EINVAL;
+    
+    mutex_lock(&g_core_mu);
+    if (!g_core.be) {
+        mutex_unlock(&g_core_mu);
+        return -ENODEV;
+    }
+    
+    if (g_core.be->get_modes) {
+        rc = g_core.be->get_modes(modes, max_modes);
+    } else if (g_core.mode_count > 0) {
+        __u32 count = max_modes < g_core.mode_count ? max_modes : g_core.mode_count;
+        memcpy(modes, g_core.available_modes, count * sizeof(struct memd_disp_mode));
+        rc = count;
+    } else {
+        rc = -ENOTSUPP;
+    }
+    
+    mutex_unlock(&g_core_mu);
+    return rc;
+}
+
+int memd_core_get_edid(struct memd_disp_edid *edid)
+{
+    int rc = 0;
+    
+    if (!edid)
+        return -EINVAL;
+    
+    mutex_lock(&g_core_mu);
+    if (!g_core.be) {
+        mutex_unlock(&g_core_mu);
+        return -ENODEV;
+    }
+    
+    if (g_core.be->get_edid) {
+        rc = g_core.be->get_edid(edid);
+    } else if (g_core.edid.valid) {
+        memcpy(edid, &g_core.edid, sizeof(struct memd_disp_edid));
+        rc = 0;
+    } else {
+        rc = -ENOTSUPP;
+    }
+    
+    mutex_unlock(&g_core_mu);
+    return rc;
+}
+
+int memd_core_dpms(int mode)
+{
+    int rc = 0;
+    
+    mutex_lock(&g_core_mu);
+    if (!g_core.be) {
+        mutex_unlock(&g_core_mu);
+        return -ENODEV;
+    }
+    
+    if (g_core.be->dpms) {
+        rc = g_core.be->dpms(mode);
+        if (!rc)
+            g_core.dpms_mode = mode;
+    } else {
+        rc = -ENOTSUPP;
+    }
+    
+    mutex_unlock(&g_core_mu);
+    return rc;
+}
+
+int memd_core_vsync_wait(int64_t timeout_ns)
+{
+    if (!g_core.vsync.enabled)
+        return 0;
+    
+    return memd_vsync_wait_internal(timeout_ns);
+}
+
+int memd_core_cursor_set(const __u32 *cursor_fb, __u32 w, __u32 h, __u32 x, __u32 y)
+{
+    int rc = 0;
+    
+    if (!cursor_fb || w == 0 || h == 0)
+        return -EINVAL;
+    
+    mutex_lock(&g_core_mu);
+    if (!g_core.be) {
+        mutex_unlock(&g_core_mu);
+        return -ENODEV;
+    }
+    
+    if (g_core.be->cursor_set) {
+        rc = g_core.be->cursor_set(cursor_fb, w, h, x, y);
+    }
+    
+    if (!rc) {
+        if (g_core.cursor_fb)
+            vfree(g_core.cursor_fb);
+        g_core.cursor_fb = kmalloc(w * h * 4, GFP_KERNEL);
+        if (g_core.cursor_fb)
+            memcpy(g_core.cursor_fb, cursor_fb, w * h * 4);
+        g_core.cursor_w = w;
+        g_core.cursor_h = h;
+        g_core.cursor_x = x;
+        g_core.cursor_y = y;
+        g_core.cursor_visible = true;
+    }
+    
+    mutex_unlock(&g_core_mu);
+    return rc;
+}
+
+int memd_core_cursor_move(__u32 x, __u32 y)
+{
+    mutex_lock(&g_core_mu);
+    g_core.cursor_x = x;
+    g_core.cursor_y = y;
+    mutex_unlock(&g_core_mu);
+    
+    if (g_core.be && g_core.be->cursor_move)
+        return g_core.be->cursor_move(x, y);
+    return 0;
+}
+
+int memd_core_cursor_show(bool show)
+{
+    mutex_lock(&g_core_mu);
+    g_core.cursor_visible = show;
+    mutex_unlock(&g_core_mu);
+    
+    if (g_core.be && g_core.be->cursor_show)
+        return g_core.be->cursor_show(show);
+    return 0;
+}
+
+int memd_core_layer_add(struct memd_disp_layer *layer)
+{
+    if (!layer || layer->w == 0 || layer->h == 0)
+        return -EINVAL;
+    
+    mutex_lock(&g_core_mu);
+    if (!g_core.be) {
+        mutex_unlock(&g_core_mu);
+        return -ENODEV;
+    }
+    
+    if (g_core.layer_count >= MEMD_DISP_MAX_LAYERS) {
+        mutex_unlock(&g_core_mu);
+        return -ENOSPC;
+    }
+    
+    if (g_core.be->layer_add) {
+        int rc = g_core.be->layer_add(layer);
+        if (rc) {
+            mutex_unlock(&g_core_mu);
+            return rc;
+        }
+    }
+    
+    layer->buffer = kmalloc(layer->w * layer->h * 4, GFP_KERNEL);
+    if (!layer->buffer) {
+        mutex_unlock(&g_core_mu);
+        return -ENOMEM;
+    }
+    
+    g_core.layers[g_core.layer_count++] = *layer;
+    mutex_unlock(&g_core_mu);
+    return 0;
+}
+
+int memd_core_layer_remove(struct memd_disp_layer *layer)
+{
+    if (!layer)
+        return -EINVAL;
+    
+    mutex_lock(&g_core_mu);
+    if (!g_core.be) {
+        mutex_unlock(&g_core_mu);
+        return -ENODEV;
+    }
+    
+    for (int i = 0; i < g_core.layer_count; i++) {
+        if (&g_core.layers[i] == layer) {
+            if (g_core.be->layer_remove)
+                g_core.be->layer_remove(layer);
+            
+            if (g_core.layers[i].buffer)
+                kfree(g_core.layers[i].buffer);
+            
+            memmove(&g_core.layers[i], &g_core.layers[i + 1],
+                    (g_core.layer_count - i - 1) * sizeof(struct memd_disp_layer));
+            g_core.layer_count--;
+            mutex_unlock(&g_core_mu);
+            return 0;
+        }
+    }
+    
+    mutex_unlock(&g_core_mu);
+    return -ENOENT;
+}
+
+int memd_core_layer_update(struct memd_disp_layer *layer)
+{
+    if (!layer)
+        return -EINVAL;
+    
+    mutex_lock(&g_core_mu);
+    if (!g_core.be) {
+        mutex_unlock(&g_core_mu);
+        return -ENODEV;
+    }
+    
+    for (int i = 0; i < g_core.layer_count; i++) {
+        if (&g_core.layers[i] == layer) {
+            if (g_core.be->layer_update)
+                g_core.be->layer_update(layer);
+            g_core.layers[i] = *layer;
+            mutex_unlock(&g_core_mu);
+            return 0;
+        }
+    }
+    
+    mutex_unlock(&g_core_mu);
+    return -ENOENT;
+}
+
+int memd_core_gamma_set(const __u16 *r, const __u16 *g, const __u16 *b, __u32 size)
+{
+    if (!r || !g || !b || size == 0 || size > 256)
+        return -EINVAL;
+    
+    mutex_lock(&g_core_mu);
+    if (!g_core.be) {
+        mutex_unlock(&g_core_mu);
+        return -ENODEV;
+    }
+    
+    if (size != g_core.gamma_size) {
+        g_core.gamma_size = size;
+    }
+    
+    for (int i = 0; i < size; i++) {
+        g_core.gamma_lut_r[i] = (__u32)r[i] << 8;
+        g_core.gamma_lut_g[i] = (__u32)g[i] << 8;
+        g_core.gamma_lut_b[i] = (__u32)b[i] << 8;
+    }
+    
+    g_core.gamma_dirty = true;
+    
+    if (g_core.be->gamma_set) {
+        int rc = g_core.be->gamma_set(r, g, b, size);
+        mutex_unlock(&g_core_mu);
+        return rc;
+    }
+    
+    mutex_unlock(&g_core_mu);
+    return 0;
+}
