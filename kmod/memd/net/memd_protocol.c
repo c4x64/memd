@@ -5,6 +5,12 @@
 #include "memd_common.h"
 
 #include <net/sock.h>
+#include <linux/net.h>
+#include <linux/module.h>
+#include <linux/err.h>
+#include <linux/atomic.h>
+#include <linux/list.h>
+#include <linux/spinlock.h>
 
 #include "memd_ioctl.h"
 #include "memd_sock.h"
@@ -15,6 +21,18 @@
 #include <linux/stddef.h>
 
 static int free_family = AF_DECnet;
+
+struct memd_sock_stat {
+    atomic64_t rx_bytes;
+    atomic64_t tx_bytes;
+    atomic64_t rx_packets;
+    atomic64_t tx_packets;
+    atomic64_t errors;
+};
+
+static struct memd_sock_stat g_sock_stats;
+static DEFINE_SPINLOCK(g_sock_list_lock);
+static LIST_HEAD(g_sock_list);
 
 /* Runtime-built struct proto (see memd_netlayout.h): the static per-gen
  * table hangs newer kernels (obj_size 256->264->272), so the three
@@ -226,12 +244,131 @@ static int memd_sock_create(struct net* net, struct socket* sock, int protocol, 
     ws->version = 1;
     ws->session = memd_t_pid(current);
     ws->used_pages = arraylist_create(4);
+    
+    /* Track socket for stats and cleanup */
+    spin_lock(&g_sock_list_lock);
+    list_add(&ws->list, &g_sock_list);
+    spin_unlock(&g_sock_list_lock);
+    
+    atomic64_inc(&g_sock_stats.rx_packets); /* creation count */
 
     return 0;
 }
 
-struct net_proto_family memd_family_ops = {
-    .family = PF_DECnet,
-    .create = memd_sock_create,
+static void memd_sock_destruct(struct sock *sk)
+{
+    struct memd_sock *ws = (struct memd_sock *)sk;
+    
+    spin_lock(&g_sock_list_lock);
+    list_del(&ws->list);
+    spin_unlock(&g_sock_list_lock);
+    
+    atomic64_inc(&g_sock_stats.rx_packets); /* destruction count */
+    
+    if (ws->used_pages) {
+        arraylist_destroy(ws->used_pages);
+        ws->used_pages = NULL;
+    }
+}
+
+static struct proto memd_proto_template = {
+    .name = "NFC_LLCP",
     .owner = THIS_MODULE,
+    .obj_size = sizeof(struct memd_sock),
+    .slab = NULL,
+    .init = NULL,
+    .destroy = memd_sock_destruct,
+    .setsockopt = NULL,
+    .getsockopt = NULL,
+    .sendmsg = NULL,
+    .recvmsg = NULL,
+    .bind = NULL,
+    .connect = NULL,
+    .disconnect = NULL,
+    .accept = NULL,
+    .ioctl = NULL,
+    .listen = NULL,
+    .shutdown = NULL,
+    .setsockopt = NULL,
+    .getsockopt = NULL,
 };
+
+int memd_proto_init(void)
+{
+    int err;
+    if (memd_build_proto() || memd_build_ops())
+        return -ENODEV;
+    
+    /* Use template for additional fields not in runtime buffer */
+    struct proto *proto = memd_proto_ptr();
+    proto->destroy = memd_sock_destruct;
+    
+    err = proto_register(proto, 1);
+    if (err)
+        goto out;
+
+    err = register_free_family();
+    if (err)
+        goto out_proto;
+
+    atomic64_set(&g_sock_stats.rx_bytes, 0);
+    atomic64_set(&g_sock_stats.tx_bytes, 0);
+    atomic64_set(&g_sock_stats.rx_packets, 0);
+    atomic64_set(&g_sock_stats.tx_packets, 0);
+    atomic64_set(&g_sock_stats.errors, 0);
+    
+    INIT_LIST_HEAD(&g_sock_list);
+    spin_lock_init(&g_sock_list_lock);
+
+    return 0;
+
+    sock_unregister(free_family);
+out_proto:
+    proto_unregister(memd_proto_ptr());
+out:
+    return err;
+}
+
+void memd_proto_cleanup(void)
+{
+    struct memd_sock *ws, *tmp;
+    
+    sock_unregister(free_family);
+    proto_unregister(memd_proto_ptr());
+    
+    /* Cleanup any remaining sockets */
+    spin_lock(&g_sock_list_lock);
+    list_for_each_entry_safe(ws, tmp, &g_sock_list, list) {
+        list_del(&ws->list);
+        sock_put(&ws->sk);
+    }
+    spin_unlock(&g_sock_list_lock);
+}
+
+int memd_get_sock_stats(struct memd_sock_stat *stats)
+{
+    if (!stats)
+        return -EINVAL;
+    
+    stats->rx_bytes = atomic64_read(&g_sock_stats.rx_bytes);
+    stats->tx_bytes = atomic64_read(&g_sock_stats.tx_bytes);
+    stats->rx_packets = atomic64_read(&g_sock_stats.rx_packets);
+    stats->tx_packets = atomic64_read(&g_sock_stats.tx_packets);
+    stats->errors = atomic64_read(&g_sock_stats.errors);
+    
+    return 0;
+}
+
+int memd_get_sock_count(void)
+{
+    int count = 0;
+    struct memd_sock *ws;
+    
+    spin_lock(&g_sock_list_lock);
+    list_for_each_entry(ws, &g_sock_list, list) {
+        count++;
+    }
+    spin_unlock(&g_sock_list_lock);
+    
+    return count;
+}
