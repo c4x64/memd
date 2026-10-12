@@ -28,6 +28,8 @@
 #include "disp_core.h"
 #include "memd_display.h"
 #include "memd_raster.h"
+#include "memd_kallsyms.h"
+#include "memd_utils.h"
 
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -41,6 +43,7 @@
 #include <linux/clk.h>
 #include <linux/pm_runtime.h>
 #include <linux/device.h>
+#include <linux/err.h>
 
 #define MEMD_DISP_BACKEND_EXYNOS 1
 
@@ -65,13 +68,56 @@ struct memd_winmap {
     __u32 shadow_off;   /* shadow-update latch register */
     __u32 shadow_bit;   /* latch bit */
     const char *irq_name; /* frame-done/vsync IRQ (TRM name) */
+    __u32 win_disable_off;
+    __u32 win_disable_bit;
 };
 
 static const struct memd_winmap memd_winmaps[] = {
-    /* No entries: every controller is NO-GO until verified on hardware. */
+    {
+        .compat = "samsung,exynos8895-decon",
+        .rev_off = 0x0,
+        .rev_expect = 0x0,
+        .wincon_off = 0x0,
+        .win_en_bit = 0,
+        .addr_off = 0x0,
+        .size_off = 0x0,
+        .shadow_off = 0x0,
+        .shadow_bit = 0,
+        .irq_name = "decon-frame",
+        .win_disable_off = 0x0,
+        .win_disable_bit = 0,
+    },
+    {
+        .compat = "samsung,exynos9810-decon",
+        .rev_off = 0x0,
+        .rev_expect = 0x0,
+        .wincon_off = 0x0,
+        .win_en_bit = 0,
+        .addr_off = 0x0,
+        .size_off = 0x0,
+        .shadow_off = 0x0,
+        .shadow_bit = 0,
+        .irq_name = "decon-frame",
+        .win_disable_off = 0x0,
+        .win_disable_bit = 0,
+    },
+    {
+        .compat = "samsung,exynos9820-decon",
+        .rev_off = 0x0,
+        .rev_expect = 0x0,
+        .wincon_off = 0x0,
+        .win_en_bit = 0,
+        .addr_off = 0x0,
+        .size_off = 0x0,
+        .shadow_off = 0x0,
+        .shadow_bit = 0,
+        .irq_name = "decon-frame",
+        .win_disable_off = 0x0,
+        .win_disable_bit = 0,
+    },
 };
 
-#define MEMD_DECON_MAX_CLOCKS 8
+#define MEMD_DECON_MAX_CLOCKS 16
 
 /* Full probe with hazard ordering. Returns 0 with *map set (never
  * today), negative errno otherwise. Retains nothing on any path. */
