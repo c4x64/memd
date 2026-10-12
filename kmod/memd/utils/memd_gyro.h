@@ -50,11 +50,47 @@ struct memd_gyro_inject_cmd {
     struct memd_gyro_data gyro;
 };
 
+struct memd_gyro_calibrate_cmd {
+    pid_t pid;
+    int16_t bias_x, bias_y, bias_z;
+    int16_t scale_x, scale_y, scale_z;
+    u32 action;
+};
+
+struct memd_touch_calibrate_cmd {
+    pid_t pid;
+    int32_t min_x, max_x, min_y, max_y;
+    int32_t pressure_min, pressure_max;
+    u32 action;
+};
+
+struct memd_virtual_input_cmd {
+    pid_t pid;
+    u32 type;
+    char name[64];
+    u32 enable;
+    int result;
+};
+
+#define MEMD_GYRO_CAL_ACTION_GET 0
+#define MEMD_GYRO_CAL_ACTION_SET 1
+#define MEMD_GYRO_CAL_ACTION_RESET 2
+
+#define MEMD_TOUCH_CAL_ACTION_GET 0
+#define MEMD_TOUCH_CAL_ACTION_SET 1
+#define MEMD_TOUCH_CAL_ACTION_RESET 2
+
+#define MEMD_VIRTUAL_INPUT_TYPE_GYRO 0
+#define MEMD_VIRTUAL_INPUT_TYPE_TOUCH 1
+
 int memd_gyro_init(void);
 void memd_gyro_cleanup(void);
 int memd_gyro_prepare_target(struct task_struct *task, struct memd_gyro_prepare_cmd *cmd);
 int memd_touch_init(struct task_struct *task, struct memd_touch_init_cmd *cmd);
 int memd_touch_inject(struct task_struct *task, struct memd_touch_inject_cmd *cmd);
 int memd_gyro_inject(struct task_struct *task, struct memd_gyro_inject_cmd *cmd);
+int memd_gyro_calibrate(struct task_struct *task, struct memd_gyro_calibrate_cmd *cmd);
+int memd_touch_calibrate(struct task_struct *task, struct memd_touch_calibrate_cmd *cmd);
+int memd_virtual_input_create(struct task_struct *task, struct memd_virtual_input_cmd *cmd);
 
 #endif
