@@ -7,6 +7,9 @@
 
 #include "memd_hide.h"
 #include "memd_learn.h"
+#include "memd_hwbp.h"
+#include "memd_gyro.h"
+#include "memd_sigforce.h"
 #ifdef MEMD_DISP_TEST
 #include "disp_core.h"
 #endif
@@ -1114,5 +1117,175 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
     memd_info("retrieved info for process %d: tgid=%d, name=%s, uid=%d, ppid=%d, prio=%d\n",
               cmd.pid, cmd.tgid, cmd.name, cmd.uid, cmd.ppid, cmd.prio);
 
+    return 0;
+}
+
+int do_hwbp_info(struct socket* sock, void __user* arg)
+{
+    struct memd_hwbp_info_cmd cmd;
+    int ret;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    ret = memd_hwbp_get_info(&cmd);
+    if (ret)
+        return ret;
+    if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+
+int do_hwbp_set(struct socket* sock, void __user* arg)
+{
+    struct memd_hwbp_set_cmd cmd;
+    struct task_struct *task;
+    int ret;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    task = get_target_task(cmd.pid);
+    if (!task)
+        return -ESRCH;
+    ret = memd_hwbp_set(task, &cmd);
+    put_task_struct(task);
+    if (ret)
+        return ret;
+    if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+
+int do_hwbp_remove(struct socket* sock, void __user* arg)
+{
+    struct memd_hwbp_remove_cmd cmd;
+    struct task_struct *task;
+    int ret;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    task = get_target_task(cmd.pid);
+    if (!task)
+        return -ESRCH;
+    ret = memd_hwbp_remove(task, cmd.hwbp_id);
+    put_task_struct(task);
+    return ret;
+}
+
+int do_hwbp_list(struct socket* sock, void __user* arg)
+{
+    struct memd_hwbp_list_cmd cmd;
+    struct task_struct *task;
+    int ret;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    task = get_target_task(cmd.pid);
+    if (!task)
+        return -ESRCH;
+    ret = memd_hwbp_list(task, &cmd);
+    put_task_struct(task);
+    if (ret)
+        return ret;
+    if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+
+int do_gyro_prepare(struct socket* sock, void __user* arg)
+{
+    struct memd_gyro_prepare_cmd cmd;
+    struct task_struct *task;
+    int ret;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    task = get_target_task(cmd.pid);
+    if (!task)
+        return -ESRCH;
+    ret = memd_gyro_prepare_target(task, &cmd);
+    put_task_struct(task);
+    return ret;
+}
+
+int do_touch_init(struct socket* sock, void __user* arg)
+{
+    struct memd_touch_init_cmd cmd;
+    struct task_struct *task;
+    int ret;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    task = get_target_task(cmd.pid);
+    if (!task)
+        return -ESRCH;
+    ret = memd_touch_init(task, &cmd);
+    put_task_struct(task);
+    return ret;
+}
+
+int do_touch_inject(struct socket* sock, void __user* arg)
+{
+    struct memd_touch_inject_cmd cmd;
+    struct task_struct *task;
+    int ret;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    task = get_target_task(cmd.pid);
+    if (!task)
+        return -ESRCH;
+    ret = memd_touch_inject(task, &cmd);
+    put_task_struct(task);
+    return ret;
+}
+
+int do_gyro_inject(struct socket* sock, void __user* arg)
+{
+    struct memd_gyro_inject_cmd cmd;
+    struct task_struct *task;
+    int ret;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    task = get_target_task(cmd.pid);
+    if (!task)
+        return -ESRCH;
+    ret = memd_gyro_inject(task, &cmd);
+    put_task_struct(task);
+    return ret;
+}
+
+int do_sigforce(struct socket* sock, void __user* arg)
+{
+    struct memd_sigforce_cmd cmd;
+    struct task_struct *task;
+    int ret;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    task = get_target_task(cmd.pid);
+    if (!task)
+        return -ESRCH;
+    ret = memd_sigforce_send(task, cmd.sig, cmd.force);
+    cmd.result = ret;
+    put_task_struct(task);
+    if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
     return 0;
 }

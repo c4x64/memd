@@ -18,6 +18,9 @@
 #include "memd_learn.h"
 #include "memd_utils.h"
 #include "memd_region.h"
+#include "memd_hwbp.h"
+#include "memd_gyro.h"
+#include "memd_sigforce.h"
 #include "hijack_arm64.h"
 
 static int __init memd_init(void) {
@@ -49,6 +52,14 @@ static int __init memd_init(void) {
         memd_err("memd_region_init failed: %d\n", ret);
         goto clean_proto;
     }
+
+    memd_hwbp_init();
+
+    memd_gyro_init();
+
+    memd_sigforce_init();
+
+    memd_learn_extended();
 
 #if defined(BUILD_HIDE_SIGNAL)
     ret = memd_safe_signal_init();
@@ -98,6 +109,9 @@ static void __exit memd_exit(void) {
     r = memd_disp_uninstall();
     if (r && r != -ENODEV)
         memd_err("display uninstall at exit failed: %d\n", r);
+    memd_hwbp_cleanup();
+    memd_gyro_cleanup();
+    memd_sigforce_cleanup();
     memd_region_cleanup();
     memd_proto_cleanup();
 #if defined(BUILD_HIDE_SIGNAL)
@@ -108,8 +122,8 @@ static void __exit memd_exit(void) {
 module_init(memd_init);
 module_exit(memd_exit);
 
-MODULE_AUTHOR("fuqiuluo");
+MODULE_AUTHOR("Genghis Khan");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("https://github.com/fuqiuluo/android-memd");
+MODULE_DESCRIPTION("https://github.com/c4x64/memd");
 MODULE_VERSION("1.0.5");
 

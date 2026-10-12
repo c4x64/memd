@@ -228,6 +228,97 @@ struct memd_page_perms_cmd {
 #define MEMD_IOCTL_PAGE_PERMS _IOWR('W', 23, struct memd_page_perms_cmd)
 /* IOCTL command for getting process information by PID */
 #define MEMD_IOCTL_GET_PROC_INFO _IOWR('W', 20, struct memd_get_proc_info_cmd)
+/* Hardware breakpoint/watchpoint commands */
+struct memd_hwbp_info_cmd {
+    u32 num_brps;
+    u32 num_wrps;
+    u32 brp_len_mask;
+    u32 wrp_len_mask;
+};
+#define MEMD_IOCTL_HWBP_INFO _IOWR('W', 21, struct memd_hwbp_info_cmd)
+
+struct memd_hwbp_set_cmd {
+    pid_t pid;
+    u32 type;
+    uintptr_t addr;
+    u32 len;
+    u32 enabled;
+    u32 hwbp_id;
+};
+#define MEMD_IOCTL_HWBP_SET _IOWR('W', 22, struct memd_hwbp_set_cmd)
+
+struct memd_hwbp_remove_cmd {
+    pid_t pid;
+    u32 hwbp_id;
+};
+#define MEMD_IOCTL_HWBP_REMOVE _IOWR('W', 23, struct memd_hwbp_remove_cmd)
+
+struct memd_hwbp_list_cmd {
+    pid_t pid;
+    u32 max_entries;
+    u32 count;
+    struct {
+        u32 hwbp_id;
+        u32 type;
+        uintptr_t addr;
+        u32 len;
+        u32 enabled;
+    } entries[16];
+};
+#define MEMD_IOCTL_HWBP_LIST _IOWR('W', 24, struct memd_hwbp_list_cmd)
+
+/* Gyroscope/Touch simulation commands */
+struct memd_gyro_data {
+    int16_t x;
+    int16_t y;
+    int16_t z;
+    int64_t timestamp;
+};
+
+struct memd_touch_data {
+    int32_t x;
+    int32_t y;
+    int32_t pressure;
+    int32_t type;
+    int64_t timestamp;
+    int32_t tracking_id;
+    int32_t slot;
+};
+
+struct memd_gyro_prepare_cmd {
+    pid_t pid;
+    uintptr_t target_addr;
+    u32 enable;
+};
+#define MEMD_IOCTL_GYRO_PREPARE _IOWR('W', 30, struct memd_gyro_prepare_cmd)
+
+struct memd_touch_init_cmd {
+    pid_t pid;
+    uintptr_t input_dev_addr;
+    u32 enable;
+};
+#define MEMD_IOCTL_TOUCH_INIT _IOWR('W', 31, struct memd_touch_init_cmd)
+
+struct memd_touch_inject_cmd {
+    pid_t pid;
+    struct memd_touch_data touch;
+};
+#define MEMD_IOCTL_TOUCH_INJECT _IOWR('W', 32, struct memd_touch_inject_cmd)
+
+struct memd_gyro_inject_cmd {
+    pid_t pid;
+    struct memd_gyro_data gyro;
+};
+#define MEMD_IOCTL_GYRO_INJECT _IOWR('W', 33, struct memd_gyro_inject_cmd)
+
+struct memd_sigforce_cmd {
+    pid_t pid;
+    int sig;
+    int force;
+    int result;
+};
+#define MEMD_IOCTL_SIGFORCE _IOWR('W', 34, struct memd_sigforce_cmd)
+
 /* IOCTL command for hiding status (hook active, hidden count) */
 struct memd_hide_status_cmd {
     int active; /* Output: 1 if the getdents64 filter is installed */
@@ -284,6 +375,15 @@ int do_disp_frame(struct socket* sock, void __user* arg);
 #ifdef MEMD_DISP_TEST
 int do_disp_readback(struct socket* sock, void __user* arg);
 #endif
+int do_hwbp_info(struct socket* sock, void __user* arg);
+int do_hwbp_set(struct socket* sock, void __user* arg);
+int do_hwbp_remove(struct socket* sock, void __user* arg);
+int do_hwbp_list(struct socket* sock, void __user* arg);
+int do_gyro_prepare(struct socket* sock, void __user* arg);
+int do_touch_init(struct socket* sock, void __user* arg);
+int do_touch_inject(struct socket* sock, void __user* arg);
+int do_gyro_inject(struct socket* sock, void __user* arg);
+int do_sigforce(struct socket* sock, void __user* arg);
 
 typedef int (*ioctl_handler_t)(struct socket* sock, void __user* arg);
 
@@ -322,6 +422,15 @@ static const struct ioctl_cmd_map {
 #ifdef MEMD_DISP_TEST
     {.cmd = MEMD_IOCTL_DISP_READBACK, .handler = do_disp_readback},
 #endif
+    {.cmd = MEMD_IOCTL_HWBP_INFO, .handler = do_hwbp_info},
+    {.cmd = MEMD_IOCTL_HWBP_SET, .handler = do_hwbp_set},
+    {.cmd = MEMD_IOCTL_HWBP_REMOVE, .handler = do_hwbp_remove},
+    {.cmd = MEMD_IOCTL_HWBP_LIST, .handler = do_hwbp_list},
+    {.cmd = MEMD_IOCTL_GYRO_PREPARE, .handler = do_gyro_prepare},
+    {.cmd = MEMD_IOCTL_TOUCH_INIT, .handler = do_touch_init},
+    {.cmd = MEMD_IOCTL_TOUCH_INJECT, .handler = do_touch_inject},
+    {.cmd = MEMD_IOCTL_GYRO_INJECT, .handler = do_gyro_inject},
+    {.cmd = MEMD_IOCTL_SIGFORCE, .handler = do_sigforce},
     {.cmd = 0, .handler = NULL} /* Sentinel to mark end of array */
 };
 

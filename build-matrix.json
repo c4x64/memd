@@ -1,0 +1,119 @@
+{
+  "include": [
+    {
+      "kmi": "universal",
+      "img": "android12-5.10",
+      "ddk_tag": "android12-5.10-20251016"
+    },
+    {
+      "kmi": "universal-test",
+      "img": "android12-5.10",
+      "ddk_tag": "android12-5.10-20251016",
+      "test": true
+    },
+    {
+      "kmi": "android11-5.4",
+      "img": "android11-5.4",
+      "ddk_tag": "android11-5.4-20251016"
+    },
+    {
+      "kmi": "android13-5.10",
+      "img": "android13-5.10",
+      "ddk_tag": "android13-5.10-20251016"
+    },
+    {
+      "kmi": "android13-5.10-dbg",
+      "img": "android13-5.10",
+      "ddk_tag": "android13-5.10-20251016",
+      "dbg": true
+    },
+    {
+      "kmi": "android13-5.15",
+      "img": "android13-5.15",
+      "ddk_tag": "android13-5.15-20251016"
+    },
+    {
+      "kmi": "android13-5.15-dbg",
+      "img": "android13-5.15",
+      "ddk_tag": "android13-5.15-20251016",
+      "dbg": true
+    },
+    {
+      "kmi": "android14-5.15",
+      "img": "android14-5.15",
+      "ddk_tag": "android14-5.15-20251016"
+    },
+    {
+      "kmi": "android14-5.15-dbg",
+      "img": "android14-5.15",
+      "ddk_tag": "android14-5.15-20251016",
+      "dbg": true
+    },
+    {
+      "kmi": "android14-6.1",
+      "img": "android14-6.1",
+      "ddk_tag": "android14-6.1-20251016"
+    },
+    {
+      "kmi": "android14-6.1-dbg",
+      "img": "android14-6.1",
+      "ddk_tag": "android14-6.1-20251016",
+      "dbg": true
+    },
+    {
+      "kmi": "android15-6.1",
+      "img": "android15-6.1",
+      "ddk_tag": "android15-6.1-20251016"
+    },
+    {
+      "kmi": "android15-6.1-dbg",
+      "img": "android15-6.1",
+      "ddk_tag": "android15-6.1-20251016",
+      "dbg": true
+    },
+    {
+      "kmi": "android15-6.6",
+      "img": "android15-6.6",
+      "ddk_tag": "android15-6.6-20251016"
+    },
+    {
+      "kmi": "android15-6.6-dbg",
+      "img": "android15-6.6",
+      "ddk_tag": "android15-6.6-20251016",
+      "dbg": true
+    },
+    {
+      "kmi": "android16-6.6",
+      "img": "android16-6.6",
+      "ddk_tag": "android16-6.6-20251016"
+    },
+    {
+      "kmi": "android16-6.6-dbg",
+      "img": "android16-6.6",
+      "ddk_tag": "android16-6.6-20251016",
+      "dbg": true
+    },
+    {
+      "kmi": "android16-6.12",
+      "img": "android16-6.12",
+      "ddk_tag": "android16-6.12-20251016"
+    },
+    {
+      "kmi": "android16-6.12-dbg",
+      "img": "android16-6.12",
+      "ddk_tag": "android16-6.12-20251016",
+      "dbg": true
+    },
+    {
+      "kmi": "android17-6.12",
+      "img": "android17-6.12",
+      "ddk_tag": "android17-6.12-20251016"
+    },
+    {
+      "kmi": "android17-6.12-dbg",
+      "img": "android17-6.12",
+      "ddk_tag": "android17-6.12-20251016",
+      "dbg": true
+    }
+  ]
+}

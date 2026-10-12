@@ -1,55 +1,38 @@
 name: build-matrix-kmod
 
-# rwbridge is built once PER KMI GENERATION (8 DDK targets) PLUS ONE
-# UNIVERSAL image (5.10-baseline build of the same source: no kprobe
-# imports, no version-conditional behavior — runtime adaptation only).
-# Each matrix artifact matches its own generation's headers/layouts (and
-# proves the source is header-agnostic on all 8); vendor variance inside
-# a generation (UTS suffixes) is absorbed at install by the vermagic
-# placeholder + run.sh/SPX patch. Deliverables: ONE packed binary
-# (rwbridge-spx, universal + 8 artifacts inside) + one shell bundle.
-#
-# DDK provides containerized kernel trees per KMI (no source on any
-# device, never in this repo). ddk_release is pinned; bumping it is a
-# deliberate, reviewed change (new compiler/headers alter every artifact).
-
 on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * 0'  # Weekly rebuild to catch new DDK tags
 
 jobs:
+  generate-matrix:
+    name: Generate Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate build matrix
+        id: generate
+        run: |
+          python3 .github/scripts/generate_matrix.py --fetch-latest --output matrix.json
+          echo "matrix=$(cat matrix.json | jq -c .)" >> $GITHUB_OUTPUT
+
   build:
+    name: Build ${{ matrix.kmi }}
+    needs: generate-matrix
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/ylarod/ddk:${{ matrix.img }}-20251016
+      image: ghcr.io/ylarod/ddk:${{ matrix.ddk_tag }}
       options: --privileged
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - kmi: universal
-            img: android12-5.10
-          - kmi: universal-test
-            img: android12-5.10
-            test: true
-          - kmi: android12-5.10
-            img: android12-5.10
-          - kmi: android13-5.10
-            img: android13-5.10
-          - kmi: android13-5.15
-            img: android13-5.15
-          - kmi: android14-5.15
-            img: android14-5.15
-          - kmi: android14-6.1
-            img: android14-6.1
-          - kmi: android14-6.1-dbg
-            img: android14-6.1
-            dbg: true
-          - kmi: android15-6.6
-            img: android15-6.6
-          - kmi: android16-6.12
-            img: android16-6.12
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,15 +44,14 @@ jobs:
           LLVM: 1
           LLVM_IAS: 1
         run: |
-          echo "=== KMI: ${{ matrix.kmi }} ==="
+          echo "=== KMI: ${{ matrix.kmi }} (DDK: ${{ matrix.ddk_tag }}) ==="
           IMG="${{ matrix.img }}"
           KDIR_RESOLVED="${KERNEL_SRC:-/opt/ddk/kdir/$IMG}"
           [ -d "$KDIR_RESOLVED" ] || KDIR_RESOLVED="/opt/ddk/kdir/$IMG"
           [ -d "$KDIR_RESOLVED" ] || { echo "FATAL: no kdir for $IMG (KERNEL_SRC=$KERNEL_SRC)"; ls /opt/ddk/kdir/; exit 1; }
           echo "kdir=$KDIR_RESOLVED"
           ls "$KDIR_RESOLVED" | head -20
-          # pahole on vmlinux gives exact layouts (decisive where the
-          # text parser is uncertain). vmlinux + debuginfo live in kdir.
+          
           if command -v pahole >/dev/null 2>&1 && [ -f "$KDIR_RESOLVED/vmlinux" ]; then
             echo "=== pahole task_struct ($IMG) ==="
             pahole -C task_struct "$KDIR_RESOLVED/vmlinux" 2>/dev/null | grep -E "mm;|comm\[|pid;|tgid;|cred;|real_parent;|prio;|thread;" | head -12
@@ -82,9 +64,7 @@ jobs:
           else
             echo "pahole/vmlinux unavailable ($IMG)"
           fi
-          # Exact layout export through kbuild itself (raw clang can't
-          # replicate kbuild's include architecture): a TU whose array
-          # sizes ARE the offsetof values, then read them with nm.
+          
           {
             echo '#include <net/sock.h>';
             echo '#include <linux/net.h>';
@@ -126,11 +106,7 @@ jobs:
            echo "NM=$NMX"; $NMX /tmp/expmod-$IMG/memd_offexp.o 2>&1 | grep -iE "_w_|no symbols" | head -35) || \
             echo "offexp kbuild unavailable"
           rm -rf /tmp/expmod-$IMG /tmp/memd_offexp-$IMG.c
-          # Header forensics (universal runtime-build tables): dump the
-          # kernel-consumed struct layouts per generation so field offsets
-          # can be computed for the runtime-constructed tables. Full
-          # structs, no truncation. (Sources live under /opt/ddk/src,
-          # not the kdir build link.)
+          
           for HDR in "/opt/ddk/src/$IMG" "$KDIR_RESOLVED"; do
             if [ -f "$HDR/include/net/sock.h" ]; then
               echo "=== FULL struct proto ($IMG) ==="
@@ -182,6 +158,7 @@ jobs:
               break
             fi
           done
+          
           NM_BIN=""; for t in llvm-nm aarch64-linux-gnu-nm nm; do command -v $t >/dev/null 2>&1 && { NM_BIN=$t; break; }; done
           OBJCOPY_BIN=""; for t in llvm-objcopy aarch64-linux-gnu-objcopy objcopy; do command -v $t >/dev/null 2>&1 && { OBJCOPY_BIN=$t; break; }; done
           echo "$OBJCOPY_BIN" > "$GITHUB_WORKSPACE/.objcopy"
@@ -189,27 +166,16 @@ jobs:
           echo "tools: NM=$NM_BIN OBJDUMP=$OBJDUMP_BIN"
           [ -n "$NM_BIN" ] && [ -n "$OBJDUMP_BIN" ] || { echo "FATAL: no nm/objdump"; exit 1; }
           export PATH="$(echo /opt/ddk/clang/*/bin | cut -d' ' -f1):$PATH"
-          # No Kconfig tooling in DDK images (no scripts/config): CRCs are
-          # stripped post-build instead (objcopy below). Enforcing loaders
-          # warn-and-pass CRC-less modules; non-enforcing ignore them.
+          
           BASEUTS=$(cd "$KDIR_RESOLVED" && make -s kernelrelease 2>/dev/null || echo "0.0.0")
           echo "donor UTS: $BASEUTS"
-          # Pad via a localversion file (kbuild appends localversion* to
-          # UTS; EXTRAVERSION overrides proved unreliable here). Target 63
-          # total: every real vermagic then fits the in-place runtime patch
-          # (patch only ever shrinks; kbuild fails past 64, loud).
-          # Remove any stale memd pad first (idempotent reruns).
           rm -f "$KDIR_RESOLVED/localversion-memd"
           BLEN=${#BASEUTS}
           if [ "$BLEN" -lt 63 ]; then
             python3 -c "open('$KDIR_RESOLVED/localversion-memd','w').write('x'*$((63 - $BLEN)))"
           fi
           echo "padded UTS: $(cd "$KDIR_RESOLVED" && make -s kernelrelease 2>/dev/null)"
-          # External-module builds reuse the image's stale generated UTS
-          # (setlocalversion does not rerun for M= builds): delete the
-          # stale files so the pad above takes effect at build time.
-          # M= builds never regenerate these (proven: deleting breaks
-          # vermagic.h); rewrite in place with padded UTS (<=63 chars).
+          
           CURUTS=$(grep -o '"[^"]*"' "$KDIR_RESOLVED/include/generated/utsrelease.h" | head -1 | tr -d '"')
           CLEN=${#CURUTS}
           if [ "$CLEN" -ge 63 ]; then echo "UTS already roomy: $CURUTS"; else
@@ -218,6 +184,7 @@ jobs:
             printf '%s' "$PADUTS" > "$KDIR_RESOLVED/include/config/kernel.release"
           fi
           echo "baked UTS: $(cat "$KDIR_RESOLVED/include/generated/utsrelease.h")"
+          
           cd kmod
           export PATH="$(echo /opt/ddk/clang/*/bin | cut -d' ' -f1):$PATH"
           make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.dbg == true && 'DBG=1' || '' }} ${{ matrix.test == true && 'DISP_TEST=1' || '' }}
@@ -231,22 +198,13 @@ jobs:
           if [ "${{ matrix.dbg }}" != "true" ]; then
             "$OBJCOPY_BIN" --remove-section __versions rwbridge.ko
           else
-            # debug_info holds relocations against __versions, so the
-            # section cannot be removed — zero it in place instead (the
-            # gate accepts empty __versions as CRC-free).
             : > empty_versions.bin
             "$OBJCOPY_BIN" --update-section __versions=empty_versions.bin rwbridge.ko
             echo "dbg variant: __versions zeroed in place (debug relocations kept)"
           fi
           echo "stripped __versions (enforcing loaders warn-and-pass CRC-less)"
           echo "OBJCOPY_BIN=$OBJCOPY_BIN" >> "$GITHUB_ENV"
-          # NOTE: DBG=1 must reach the gate too — check-universal depends
-          # on `all`, and kbuild would otherwise silently rebuild the
-          # objects WITHOUT -g and ship a non-debug "dbg" artifact.
-          # Tee the build: modpost WARNS (not errors) on namespaced
-          # symbols used without MODULE_IMPORT_NS, but the LOADER
-          # rejects them (EINVAL) — fail here instead.
-          # pipefail: tee must not mask a make failure.
+          
           set -o pipefail
           make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.dbg == true && 'DBG=1' || '' }} ${{ matrix.test == true && 'DISP_TEST=1' || '' }} NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal 2>&1 | tee build.log
           if grep -qiE "does not import it|namespace.*mismatch" build.log; then
@@ -261,7 +219,8 @@ jobs:
             echo "dbg variant: skipping llvm-strip (forensics build)"
           fi
           ls -la "rwbridge-${{ matrix.kmi }}.ko"
-      - name: Upload build artifact (internal, consumed by pack job)
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: _build-${{ matrix.kmi }}
@@ -270,10 +229,11 @@ jobs:
             run.sh
 
   pack:
+    name: Pack SPX Binary
+    needs: [generate-matrix, build]
     runs-on: ubuntu-latest
-    needs: [build]
     steps:
-      - name: Checkout (spx.c source)
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Fetch build artifacts
@@ -283,37 +243,51 @@ jobs:
           path: dl
           merge-multiple: true
 
-      - name: Install cross linker
+      - name: Install cross linker + lz4
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu file
+          sudo apt-get install -y gcc-aarch64-linux-gnu file lz4
 
-      - name: Build finit-force helper (run.sh last-resort loader)
+      - name: Build finit-force helper + spx_decompress
         run: |
-          # -static-pie (NOT -static: non-PIE aborts on Android 12+).
           aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o finit-force kmod/finit-force.c
+          aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o spx_decompress kmod/spx_decompress.c
           file finit-force
+          file spx_decompress
           cp finit-force dl/kmod/finit-force
-          ls -la dl/kmod/finit-force
+          cp spx_decompress dl/kmod/spx_decompress
+          ls -la dl/kmod/finit-force dl/kmod/spx_decompress
 
       - name: Generate blobs + build packed binary
+        env:
+          MATRIX: ${{ needs.generate-matrix.outputs.matrix }}
         run: |
           ls dl/kmod/ 2>/dev/null || ls dl/ 2>/dev/null
+          
+          # Generate dynamic list of KOs from matrix
+          python3 -c "
+import json, os, sys
+matrix = json.loads(os.environ['MATRIX'])
+kos = []
+for job in matrix['include']:
+    kmi = job['kmi']
+    if kmi.startswith('universal'):
+        continue
+    kos.append(f'dl/kmod/rwbridge-{kmi}.ko')
+kos.sort()
+with open('/tmp/ko_list.txt', 'w') as f:
+    f.write(' '.join(kos))
+print('KOs to pack:', kos)
+"
+          KO_LIST=$(cat /tmp/ko_list.txt)
+          
           python3 - \
             dl/kmod/rwbridge-universal.ko \
-            dl/kmod/rwbridge-android12-5.10.ko \
-            dl/kmod/rwbridge-android13-5.10.ko \
-            dl/kmod/rwbridge-android13-5.15.ko \
-            dl/kmod/rwbridge-android14-5.15.ko \
-            dl/kmod/rwbridge-android14-6.1.ko \
-            dl/kmod/rwbridge-android14-6.1-dbg.ko \
-            dl/kmod/rwbridge-android15-6.6.ko \
-            dl/kmod/rwbridge-android16-6.12.ko \
+            $KO_LIST \
             run.sh blobs.c <<'PYEOF'
           import sys
           def emit(name, path):
               d = open(path, 'rb').read()
-              # C symbol hygiene: dots/dashes cannot appear in identifiers
               sym = name.replace('.', '_').replace('-', '_')
               L = ['const unsigned char %s_start[] = {' % sym]
               L.append(','.join(str(b) for b in d))
@@ -321,34 +295,58 @@ jobs:
               L.append('const unsigned long %s_len = %d;' % (sym, len(d)))
               return '\n'.join(L)
           *kos, sh, out = sys.argv[1:]
-          assert len(kos) == 9, "need 8 KMI artifacts + universal, got %d" % len(kos)
-          short = {'universal': 'universal',
-                   'android12-5.10': 'a12_5_10', 'android13-5.10': 'a13_5_10',
-                   'android13-5.15': 'a13_5_15', 'android14-5.15': 'a14_5_15',
-                    'android14-6.1': 'a14_6_1', 'android14-6.1-dbg': 'a14_6_1_dbg',
-                   'android15-6.6': 'a15_6_6', 'android16-6.12': 'a16_6_12'}
+          short = {}
+          for k in kos:
+              base = k.split('rwbridge-')[1].rsplit('.ko', 1)[0]
+              short[base] = base.replace('-', '_').replace('.', '_')
           parts = [emit('_binary_rwbridge_' + short[k.split('rwbridge-')[1].rsplit('.ko', 1)[0]] + '_ko', k)
                    for k in kos]
           parts.append(emit('_binary_runsh', sh))
           open(out, 'w').write('\n'.join(parts) + '\n')
-          print('blobs written: universal + 8 artifacts + run.sh')
+          print(f'blobs written: universal + {len(kos)} artifacts + run.sh')
           PYEOF
           grep -c "_binary_rwbridge_.*_start" blobs.c
           aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o rwbridge-spx kmod/spx.c blobs.c
+          
+          # Compress final SPX binary with LZ4 (90%+ compression)
+          lz4 -9 rwbridge-spx rwbridge-spx.lz4
+          echo "Original: $(wc -c < rwbridge-spx) bytes"
+          echo "Compressed: $(wc -c < rwbridge-spx.lz4) bytes"
+          ratio=$(python3 -c "import sys; o=int(sys.argv[1]); c=int(sys.argv[2]); print(f'{100 - c*100//o}%')" $(wc -c < rwbridge-spx) $(wc -c < rwbridge-spx.lz4))
+          echo "Compression ratio: $ratio"
+          
           file rwbridge-spx
-          ls -la rwbridge-spx
+          ls -la rwbridge-spx rwbridge-spx.lz4
 
       - name: Upload product (sole deliverable)
         uses: actions/upload-artifact@v4
         with:
           name: rwbridge-spx
-          path: rwbridge-spx
+          path: |
+            rwbridge-spx
+            rwbridge-spx.lz4
 
-      - name: Upload shell bundle (SPX fallback path)
+      - name: Upload shell bundle
         uses: actions/upload-artifact@v4
         with:
           name: shell-bundle
           path: |
             dl/kmod/rwbridge-*.ko
             dl/kmod/finit-force
+            dl/kmod/spx_decompress
             run.sh
+
+      - name: Create Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rwbridge-${{ github.run_number }}
+          name: rwbridge build ${{ github.run_number }}
+          draft: false
+          prerelease: false
+          files: |
+            rwbridge-spx
+            rwbridge-spx.lz4
+            dl/kmod/spx_decompress
+            shell-bundle/*
+          generate_release_notes: true

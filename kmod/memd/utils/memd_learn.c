@@ -25,6 +25,30 @@ struct memd_learned memd_learned = {
     .m_pgd = -1, .v_start = -1, .v_end = -1,
 };
 
+struct memd_learned_ext memd_learned_ext = {
+    .t_files = -1, .t_signal = -1, .t_sighand = -1, .t_thread = -1,
+    .t_stack = -1, .t_pid_link = -1, .t_real_parent = -1, .t_parent = -1,
+    .t_group_leader = -1, .t_nsproxy = -1, .t_fs = -1, .t_io_context = -1,
+    .t_cgroups = -1, .t_robust_list = -1, .t_perf_event_ctxp = -1, .t_bts = -1,
+    .m_mmap = -1, .m_mmap_cache = -1, .m_map_count = -1, .m_pgtables_bytes = -1,
+    .m_hiwater_rss = -1, .m_hiwater_vm = -1, .m_total_vm = -1, .m_locked_vm = -1,
+    .m_pinned_vm = -1, .m_data_vm = -1, .m_exec_vm = -1, .m_stack_vm = -1,
+    .m_arg_lock = -1, .m_arg_start = -1, .m_arg_end = -1, .m_env_start = -1,
+    .m_env_end = -1, .f_fpath = -1, .f_op = -1, .f_inode = -1, .f_mapping = -1,
+    .f_pos = -1, .f_flags = -1, .f_mode = -1, .f_count = -1,
+    .d_name = -1, .d_parent = -1, .d_inode = -1, .d_op = -1,
+    .d_sb = -1, .d_lock = -1, .d_count = -1, .d_flags = -1,
+    .i_ino = -1, .i_mode = -1, .i_uid = -1, .i_gid = -1, .i_size = -1,
+    .i_blocks = -1, .i_atime = -1, .i_mtime = -1, .i_ctime = -1,
+    .i_blkbits = -1, .i_flags = -1, .i_sb = -1, .i_mapping = -1,
+    .i_dentry = -1, .i_flock = -1, .i_lock = -1, .i_count = -1,
+    .s_id = -1, .s_op = -1, .s_root = -1, .s_dentry = -1,
+    .s_files = -1, .s_mounts = -1, .s_instances = -1, .s_list = -1,
+    .s_dev = -1, .s_blocksize = -1, .s_blocksize_bits = -1, .s_magic = -1,
+    .s_type = -1, .s_flags = -1, .s_time_gran = -1, .s_maxbytes = -1,
+    .s_op_flags = -1,
+};
+
 #define MEMD_LEARN_SCAN 2048
 
 /* File-scope statics (declared before use). */
@@ -650,4 +674,186 @@ unsigned long memd_v_file(struct vm_area_struct *vma)
     if (memd_v_file_off >= 0)
         return *(unsigned long *)((char *)vma + memd_v_file_off);
     return (unsigned long)vma->vm_file;
+}
+
+/* Extended offset learning for more universality */
+static int memd_scan_for_ptr(const void *base, size_t len, const void *target,
+                             int *first_off)
+{
+    size_t n = len / 8, i;
+    int hits = 0;
+    for (i = 0; i < n; i++) {
+        u64 v;
+        memcpy(&v, (const char *)base + i * 8, 8);
+        if (v == (u64)target) {
+            if (!hits && first_off)
+                *first_off = (int)(i * 8);
+            hits++;
+        }
+    }
+    return hits;
+}
+
+static void memd_learn_task_extended(void)
+{
+    struct task_struct *t = current;
+    struct files_struct *files = t->files;
+    struct signal_struct *signal = t->signal;
+    struct sighand_struct *sighand = t->sighand;
+    struct mm_struct *mm = t->mm;
+    struct task_struct *real_parent = t->real_parent;
+    struct nsproxy *nsproxy = t->nsproxy;
+    struct fs_struct *fs = t->fs;
+    int i, n, found;
+    
+    if (files) {
+        n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, files, &found);
+        if (n == 1) {
+            memd_learned_ext.t_files = found;
+            memd_info("learn: task files at +%d\n", found);
+        } else {
+            memd_err("learn: task files ambiguous (%d)\n", n);
+        }
+    }
+    
+    if (signal) {
+        n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, signal, &found);
+        if (n == 1) {
+            memd_learned_ext.t_signal = found;
+            memd_info("learn: task signal at +%d\n", found);
+        } else {
+            memd_err("learn: task signal ambiguous (%d)\n", n);
+        }
+    }
+    
+    if (sighand) {
+        n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, sighand, &found);
+        if (n == 1) {
+            memd_learned_ext.t_sighand = found;
+            memd_info("learn: task sighand at +%d\n", found);
+        } else {
+            memd_err("learn: task sighand ambiguous (%d)\n", n);
+        }
+    }
+    
+    if (real_parent) {
+        n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, real_parent, &found);
+        if (n == 1) {
+            memd_learned_ext.t_real_parent = found;
+            memd_info("learn: task real_parent at +%d\n", found);
+        } else {
+            memd_err("learn: task real_parent ambiguous (%d)\n", n);
+        }
+    }
+    
+    if (nsproxy) {
+        n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, nsproxy, &found);
+        if (n == 1) {
+            memd_learned_ext.t_nsproxy = found;
+            memd_info("learn: task nsproxy at +%d\n", found);
+        } else {
+            memd_err("learn: task nsproxy ambiguous (%d)\n", n);
+        }
+    }
+    
+    if (fs) {
+        n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, fs, &found);
+        if (n == 1) {
+            memd_learned_ext.t_fs = found;
+            memd_info("learn: task fs at +%d\n", found);
+        } else {
+            memd_err("learn: task fs ambiguous (%d)\n", n);
+        }
+    }
+}
+
+static void memd_learn_mm_extended(void)
+{
+    struct mm_struct *mm = get_task_mm(current);
+    if (!mm)
+        return;
+    
+    struct vm_area_struct *mmap = mm->mmap;
+    if (mmap) {
+        int found = -1, n = 0;
+        for (int i = 0; i + 8 <= 512; i += 8) {
+            u64 v = 0;
+            memcpy(&v, (char *)mm + i, 8);
+            if (v == (u64)mmap) {
+                if (!n)
+                    found = i;
+                n++;
+            }
+        }
+        if (n == 1) {
+            memd_learned_ext.m_mmap = found;
+            memd_info("learn: mm mmap at +%d\n", found);
+        } else {
+            memd_err("learn: mm mmap ambiguous (%d)\n", n);
+        }
+    }
+    
+    mmput(mm);
+}
+
+static void memd_learn_file_extended(void)
+{
+    struct file *f;
+    struct path path;
+    struct dentry *dentry;
+    struct inode *inode;
+    struct super_block *sb;
+    int found, n;
+    
+    f = filp_open("/proc/self/exe", O_RDONLY, 0);
+    if (IS_ERR(f))
+        return;
+    
+    path = memd_f_path(f);
+    dentry = path.dentry;
+    if (dentry) {
+        inode = dentry->d_inode;
+        if (inode) {
+            sb = inode->i_sb;
+            
+            n = memd_scan_for_ptr(f, 512, &path, &found);
+            if (n == 1) {
+                memd_learned_ext.f_fpath = found;
+                memd_info("learn: file f_path at +%d\n", found);
+            }
+            
+            n = memd_scan_for_ptr(f, 512, dentry, &found);
+            if (n == 1) {
+                memd_learned_ext.d_parent = found;
+                memd_info("learn: dentry d_parent at +%d\n", found);
+            }
+            
+            n = memd_scan_for_ptr(dentry, 256, inode, &found);
+            if (n == 1) {
+                memd_learned_ext.d_inode = found;
+                memd_info("learn: dentry d_inode at +%d\n", found);
+            }
+            
+            n = memd_scan_for_ptr(dentry, 256, sb, &found);
+            if (n == 1) {
+                memd_learned_ext.d_sb = found;
+                memd_info("learn: dentry d_sb at +%d\n", found);
+            }
+            
+            n = memd_scan_for_ptr(inode, 512, sb, &found);
+            if (n == 1) {
+                memd_learned_ext.i_sb = found;
+                memd_info("learn: inode i_sb at +%d\n", found);
+            }
+        }
+    }
+    filp_close(f, NULL);
+}
+
+int memd_learn_extended(void)
+{
+    memd_learn_task_extended();
+    memd_learn_mm_extended();
+    memd_learn_file_extended();
+    return 0;
 }
