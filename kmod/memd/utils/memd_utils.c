@@ -363,7 +363,16 @@ struct page* vaddr_to_page(struct mm_struct* mm, uintptr_t va) {
 #if !defined(pfn_to_page)
 #error "vaddr_to_page failed: pfn_to_page not found"
 #endif
-    return pfn_to_page(memd_phys_to_pfn(vaddr_to_phy_addr(mm, va)));
+    /* Fail closed: vaddr_to_phy_addr returns 0 for unmapped/bad VAs and
+     * pfn 0 would otherwise alias the (possibly present) page 0 struct,
+     * leaking its flags/counts to the caller. memd_pfn_ok is the
+     * import-free pfn_valid chain (runtime kallsyms -> max_pfn bound). */
+    uintptr_t pa = vaddr_to_phy_addr(mm, va);
+    if (!pa)
+        return NULL;
+    if (!memd_pfn_ok(memd_phys_to_pfn(pa)))
+        return NULL;
+    return pfn_to_page(memd_phys_to_pfn(pa));
 }
 
 /* Kernel-VA translation without struct trust: task/mm layouts also skew
