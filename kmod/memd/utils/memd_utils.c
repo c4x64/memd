@@ -769,7 +769,7 @@ int translate_process_vaddr(pid_t pid, uintptr_t vaddr, uintptr_t* paddr_out) {
     }
 
     paddr = vaddr_to_phy_addr(mm, vaddr);
-    
+
     mmput(mm);
     put_task_struct(task);
 
@@ -1055,7 +1055,7 @@ int give_root(void) {
     static int (*my_commit_creds)(struct cred*) = NULL;
     static int (*my_override_creds)(struct cred*) = NULL;
     static void (*my_revert_creds)(void) = NULL;
-    
+
     if (my_prepare_creds == NULL) {
         my_prepare_creds = (void*)kallsyms_lookup_name_ex("prepare_creds");
         my_commit_creds = (void*)kallsyms_lookup_name_ex("commit_creds");
@@ -1065,11 +1065,11 @@ int give_root(void) {
             return -1;
         }
     }
-    
+
     newcreds = my_prepare_creds();
     if (newcreds == NULL)
         return -2;
-    
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0) && defined(CONFIG_UIDGID_STRICT_TYPE_CHECKS) || \
     LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
     newcreds->uid.val = newcreds->gid.val = 0;
@@ -1082,13 +1082,13 @@ int give_root(void) {
     newcreds->suid = newcreds->sgid = 0;
     newcreds->fsuid = newcreds->fsgid = 0;
 #endif
-    
+
     if (my_override_creds && my_revert_creds) {
         my_override_creds(newcreds);
     } else {
         my_commit_creds(newcreds);
     }
-    
+
     return 0;
 }
 
@@ -1169,13 +1169,13 @@ static int cfi_patch_function(const char *name, unsigned int *patch, int patch_i
     unsigned long addr = kallsyms_lookup_name_ex(name);
     if (!addr)
         return 0;
-    
+
     unsigned int *p = (unsigned int *)addr;
     if (*p == patch[0]) {
         memd_info("cfi: %s already patched\n", name);
         return 0;
     }
-    
+
     for (int i = 0; i < patch_instrs; i++) {
         if (hook_write_range(p + i, &patch[i], INSTRUCTION_SIZE)) {
             memd_err("cfi: failed to patch %s at offset %d\n", name, i);
@@ -1202,93 +1202,93 @@ int cfi_bypass(void)
 {
     int ret = 0;
     int r;
-    
+
     unsigned int RET = 0xD65F03C0;
     unsigned int MOV_X0_1 = 0xD2800020;
     unsigned int BRK = 0xD4200000;
     unsigned int NOP = 0xD503201F;
-    
+
     r = cfi_patch_ret("__cfi_slowpath");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__cfi_slowpath_diag");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("_cfi_slowpath");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__cfi_check_fail");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_cfi_check_fail_abort");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_cfi_check_fail");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_mov_x0_1_ret("report_cfi_failure");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("cfi_slowpath");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__cfi_verify");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__kcfi_check_fail");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("kcfi_check_fail");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_type_mismatch_v1");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_type_mismatch");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_builtin_unreachable");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_pointer_overflow");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_load_invalid_value");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_out_of_bounds");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_shift_out_of_bounds");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_divrem_overflow");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_mul_overflow");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_negate_overflow");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_float_cast_overflow");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_invalid_builtin");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_ret("__ubsan_handle_cfi_bad_type");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_mov_x0_1_ret("kcfi_failure");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_mov_x0_1_ret("kcfi_type_mismatch");
     if (r > 0) ret += r;
-    
+
     r = cfi_patch_mov_x0_1_ret("kcfi_check_fail_diag");
     if (r > 0) ret += r;
-    
+
     unsigned long fkcfi_check = kallsyms_lookup_name_ex("__kcfi_check");
     if (fkcfi_check) {
         unsigned int *p = (unsigned int *)fkcfi_check;
@@ -1299,7 +1299,7 @@ int cfi_bypass(void)
             }
         }
     }
-    
+
     unsigned long fkcfi_typeid = kallsyms_lookup_name_ex("kcfi_typeid");
     if (fkcfi_typeid) {
         unsigned int *p = (unsigned int *)fkcfi_typeid;
@@ -1311,7 +1311,7 @@ int cfi_bypass(void)
             }
         }
     }
-    
+
     unsigned long fkcfi_verify = kallsyms_lookup_name_ex("kcfi_verify");
     if (fkcfi_verify) {
         unsigned int *p = (unsigned int *)fkcfi_verify;
@@ -1322,7 +1322,7 @@ int cfi_bypass(void)
             }
         }
     }
-    
+
     unsigned long fkcfi_check_fail = kallsyms_lookup_name_ex("kcfi_check_fail");
     if (fkcfi_check_fail) {
         unsigned int *p = (unsigned int *)fkcfi_check_fail;
@@ -1333,7 +1333,7 @@ int cfi_bypass(void)
             }
         }
     }
-    
+
     unsigned long fkcfi_diag = kallsyms_lookup_name_ex("kcfi_diag");
     if (fkcfi_diag) {
         unsigned int *p = (unsigned int *)fkcfi_diag;
@@ -1345,13 +1345,13 @@ int cfi_bypass(void)
             }
         }
     }
-    
+
     ret += cfi_bypass_pan_uao();
     ret += cfi_bypass_pac();
     ret += cfi_bypass_kpti();
     ret += cfi_bypass_mte();
     ret += cfi_bypass_bti();
-    
+
     return ret;
 }
 
@@ -1359,7 +1359,7 @@ static int cfi_bypass_pan_uao(void)
 {
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
-    
+
     unsigned long fpan_el0 = kallsyms_lookup_name_ex("__uaccess_begin_pan");
     if (fpan_el0) {
         unsigned int *p = (unsigned int *)fpan_el0;
@@ -1368,7 +1368,7 @@ static int cfi_bypass_pan_uao(void)
             memd_err("cfi: bypassed PAN (uaccess_begin)\n");
         }
     }
-    
+
     unsigned long fpan_el0_end = kallsyms_lookup_name_ex("__uaccess_end_pan");
     if (fpan_el0_end) {
         unsigned int *p = (unsigned int *)fpan_el0_end;
@@ -1377,7 +1377,7 @@ static int cfi_bypass_pan_uao(void)
             memd_err("cfi: bypassed PAN (uaccess_end)\n");
         }
     }
-    
+
     unsigned long fuac_el0 = kallsyms_lookup_name_ex("__uaccess_begin_uao");
     if (fuac_el0) {
         unsigned int *p = (unsigned int *)fuac_el0;
@@ -1386,7 +1386,7 @@ static int cfi_bypass_pan_uao(void)
             memd_err("cfi: bypassed UAO (uaccess_begin)\n");
         }
     }
-    
+
     unsigned long fuac_el0_end = kallsyms_lookup_name_ex("__uaccess_end_uao");
     if (fuac_el0_end) {
         unsigned int *p = (unsigned int *)fuac_el0_end;
@@ -1395,7 +1395,7 @@ static int cfi_bypass_pan_uao(void)
             memd_err("cfi: bypassed UAO (uaccess_end)\n");
         }
     }
-    
+
     unsigned long fuser_access = kallsyms_lookup_name_ex("user_access_begin");
     if (fuser_access) {
         unsigned int *p = (unsigned int *)fuser_access;
@@ -1404,7 +1404,7 @@ static int cfi_bypass_pan_uao(void)
             memd_err("cfi: bypassed user_access_begin\n");
         }
     }
-    
+
     unsigned long fuser_access_end = kallsyms_lookup_name_ex("user_access_end");
     if (fuser_access_end) {
         unsigned int *p = (unsigned int *)fuser_access_end;
@@ -1413,7 +1413,7 @@ static int cfi_bypass_pan_uao(void)
             memd_err("cfi: bypassed user_access_end\n");
         }
     }
-    
+
     return ret;
 }
 
@@ -1421,7 +1421,7 @@ static int cfi_bypass_pac(void)
 {
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
-    
+
     unsigned long fpac_ia = kallsyms_lookup_name_ex("__pacia_el0");
     if (fpac_ia) {
         unsigned int *p = (unsigned int *)fpac_ia;
@@ -1430,7 +1430,7 @@ static int cfi_bypass_pac(void)
             memd_err("cfi: bypassed PACIA\n");
         }
     }
-    
+
     unsigned long fpac_ib = kallsyms_lookup_name_ex("__pacib_el0");
     if (fpac_ib) {
         unsigned int *p = (unsigned int *)fpac_ib;
@@ -1439,7 +1439,7 @@ static int cfi_bypass_pac(void)
             memd_err("cfi: bypassed PACIB\n");
         }
     }
-    
+
     unsigned long fpac_da = kallsyms_lookup_name_ex("__pacda_el0");
     if (fpac_da) {
         unsigned int *p = (unsigned int *)fpac_da;
@@ -1448,7 +1448,7 @@ static int cfi_bypass_pac(void)
             memd_err("cfi: bypassed PACDA\n");
         }
     }
-    
+
     unsigned long fpac_db = kallsyms_lookup_name_ex("__pacdb_el0");
     if (fpac_db) {
         unsigned int *p = (unsigned int *)fpac_db;
@@ -1457,7 +1457,7 @@ static int cfi_bypass_pac(void)
             memd_err("cfi: bypassed PACDB\n");
         }
     }
-    
+
     unsigned long fpac_generic = kallsyms_lookup_name_ex("pac_generic");
     if (fpac_generic) {
         unsigned int *p = (unsigned int *)fpac_generic;
@@ -1466,7 +1466,7 @@ static int cfi_bypass_pac(void)
             memd_err("cfi: bypassed pac_generic\n");
         }
     }
-    
+
     unsigned long fpac_strip = kallsyms_lookup_name_ex("strip_pac");
     if (fpac_strip) {
         unsigned int *p = (unsigned int *)fpac_strip;
@@ -1475,7 +1475,7 @@ static int cfi_bypass_pac(void)
             memd_err("cfi: bypassed strip_pac\n");
         }
     }
-    
+
     return ret;
 }
 
@@ -1484,7 +1484,7 @@ static int cfi_bypass_kpti(void)
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
     unsigned int NOP = 0xD503201F;
-    
+
     unsigned long fkpti_init = kallsyms_lookup_name_ex("kpti_init");
     if (fkpti_init) {
         unsigned int *p = (unsigned int *)fkpti_init;
@@ -1493,7 +1493,7 @@ static int cfi_bypass_kpti(void)
             memd_err("cfi: bypassed kpti_init\n");
         }
     }
-    
+
     unsigned long fkpti_enable = kallsyms_lookup_name_ex("kpti_enable");
     if (fkpti_enable) {
         unsigned int *p = (unsigned int *)fkpti_enable;
@@ -1502,7 +1502,7 @@ static int cfi_bypass_kpti(void)
             memd_err("cfi: bypassed kpti_enable\n");
         }
     }
-    
+
     unsigned long fkpti_disable = kallsyms_lookup_name_ex("kpti_disable");
     if (fkpti_disable) {
         unsigned int *p = (unsigned int *)fkpti_disable;
@@ -1511,7 +1511,7 @@ static int cfi_bypass_kpti(void)
             memd_err("cfi: bypassed kpti_disable\n");
         }
     }
-    
+
     unsigned long fkpti_isolate = kallsyms_lookup_name_ex("kpti_isolate_kernel");
     if (fkpti_isolate) {
         unsigned int *p = (unsigned int *)fkpti_isolate;
@@ -1520,7 +1520,7 @@ static int cfi_bypass_kpti(void)
             memd_err("cfi: bypassed kpti_isolate_kernel\n");
         }
     }
-    
+
     unsigned long fkpti_unmap = kallsyms_lookup_name_ex("kpti_unmap_user");
     if (fkpti_unmap) {
         unsigned int *p = (unsigned int *)fkpti_unmap;
@@ -1529,7 +1529,7 @@ static int cfi_bypass_kpti(void)
             memd_err("cfi: bypassed kpti_unmap_user\n");
         }
     }
-    
+
     unsigned long fswapper_pg_dir = kallsyms_lookup_name_ex("swapper_pg_dir");
     if (fswapper_pg_dir) {
         unsigned long *p = (unsigned long *)fswapper_pg_dir;
@@ -1537,7 +1537,7 @@ static int cfi_bypass_kpti(void)
             memd_info("cfi: swapper_pg_dir already zeroed\n");
         }
     }
-    
+
     return ret;
 }
 
@@ -1545,7 +1545,7 @@ static int cfi_bypass_mte(void)
 {
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
-    
+
     unsigned long fmted_check = kallsyms_lookup_name_ex("mte_check_sync_fault");
     if (fmted_check) {
         unsigned int *p = (unsigned int *)fmted_check;
@@ -1554,7 +1554,7 @@ static int cfi_bypass_mte(void)
             memd_err("cfi: bypassed MTE sync fault check\n");
         }
     }
-    
+
     unsigned long fmted_async = kallsyms_lookup_name_ex("mte_check_async_fault");
     if (fmted_async) {
         unsigned int *p = (unsigned int *)fmted_async;
@@ -1563,7 +1563,7 @@ static int cfi_bypass_mte(void)
             memd_err("cfi: bypassed MTE async fault check\n");
         }
     }
-    
+
     unsigned long fmted_tag = kallsyms_lookup_name_ex("mte_set_tag");
     if (fmted_tag) {
         unsigned int *p = (unsigned int *)fmted_tag;
@@ -1572,7 +1572,7 @@ static int cfi_bypass_mte(void)
             memd_err("cfi: bypassed MTE set_tag\n");
         }
     }
-    
+
     unsigned long fmted_exclude = kallsyms_lookup_name_ex("mte_exclude_range");
     if (fmted_exclude) {
         unsigned int *p = (unsigned int *)fmted_exclude;
@@ -1581,7 +1581,7 @@ static int cfi_bypass_mte(void)
             memd_err("cfi: bypassed MTE exclude_range\n");
         }
     }
-    
+
     return ret;
 }
 
@@ -1589,7 +1589,7 @@ static int cfi_bypass_bti(void)
 {
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
-    
+
     unsigned long fbti_el0 = kallsyms_lookup_name_ex("bti_exception");
     if (fbti_el0) {
         unsigned int *p = (unsigned int *)fbti_el0;
@@ -1598,7 +1598,7 @@ static int cfi_bypass_bti(void)
             memd_err("cfi: bypassed BTI exception\n");
         }
     }
-    
+
     unsigned long fbti_pad = kallsyms_lookup_name_ex("bti_pad_check");
     if (fbti_pad) {
         unsigned int *p = (unsigned int *)fbti_pad;
@@ -1607,7 +1607,7 @@ static int cfi_bypass_bti(void)
             memd_err("cfi: bypassed BTI pad check\n");
         }
     }
-    
+
     return ret;
 }
 

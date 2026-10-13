@@ -24,12 +24,12 @@ int memd_hide_get_hidden_pids(pid_t *buf, size_t buf_size, size_t *count)
 {
     if (!buf || !count)
         return -EINVAL;
-    
+
     struct memd_hide_entry *entry;
     size_t copied = 0;
-    
+
     *count = 0;
-    
+
     spin_lock(&hide_lock);
     for (int i = 0; i < MEMD_HIDE_HASH_SIZE; i++) {
         hlist_for_each_entry(entry, &hide_hash[i], node) {
@@ -40,7 +40,7 @@ int memd_hide_get_hidden_pids(pid_t *buf, size_t buf_size, size_t *count)
     }
     *count = copied;
     spin_unlock(&hide_lock);
-    
+
     return 0;
 }
 
@@ -48,12 +48,12 @@ int memd_hide_get_ns_hidden_pids(pid_t *buf, size_t buf_size, size_t *count, str
 {
     if (!buf || !count || !ns)
         return -EINVAL;
-    
+
     struct memd_hide_entry *entry;
     size_t copied = 0;
-    
+
     *count = 0;
-    
+
     spin_lock(&hide_lock);
     for (int i = 0; i < MEMD_HIDE_HASH_SIZE; i++) {
         hlist_for_each_entry(entry, &hide_hash[i], node) {
@@ -64,6 +64,6 @@ int memd_hide_get_ns_hidden_pids(pid_t *buf, size_t buf_size, size_t *count, str
     }
     *count = copied;
     spin_unlock(&hide_lock);
-    
+
     return 0;
 }

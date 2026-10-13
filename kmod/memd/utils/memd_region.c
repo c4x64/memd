@@ -118,7 +118,7 @@ void memd_region_cleanup(void)
 {
     unsigned long flags;
     struct unsafe_region_area *area, *tmp;
-    
+
     spin_lock_irqsave(&g_region_tree->lock, flags);
     if (g_region_tree) {
         list_for_each_entry_safe(area, tmp, &g_region_tree->all_regions, list) {
@@ -135,7 +135,7 @@ int memd_add_unsafe_region(pid_t session, uid_t uid, uintptr_t start, size_t num
 {
     struct unsafe_region_area *area;
     unsigned long flags;
-    
+
     if (num_page == 0 || num_page > (1UL << 20))
         return -EINVAL;
     if (start & (PAGE_SIZE - 1))
@@ -146,7 +146,7 @@ int memd_add_unsafe_region(pid_t session, uid_t uid, uintptr_t start, size_t num
         memd_err("failed to allocate memory for unsafe region area\n");
         return -ENOMEM;
     }
-    
+
     area->addr = start;
     area->nums_page = num_page;
     area->uid = uid;
@@ -156,15 +156,15 @@ int memd_add_unsafe_region(pid_t session, uid_t uid, uintptr_t start, size_t num
     area->start_time = ktime_get_real_ns();
     area->access_count = 0;
     INIT_LIST_HEAD(&area->list);
-    
+
     spin_lock_irqsave(&g_region_tree->lock, flags);
-    
+
     if (!g_region_tree) {
         spin_unlock_irqrestore(&g_region_tree->lock, flags);
         kfree(area);
         return -ENODEV;
     }
-    
+
     /* Check per-session quota */
     u32 session_count = 0;
     struct unsafe_region_area *iter;
@@ -177,13 +177,13 @@ int memd_add_unsafe_region(pid_t session, uid_t uid, uintptr_t start, size_t num
         kfree(area);
         return -ENOSPC;
     }
-    
+
     if (region_overlaps(area)) {
         spin_unlock_irqrestore(&g_region_tree->lock, flags);
         kfree(area);
         return -EEXIST;
     }
-    
+
     region_insert(area);
     spin_unlock_irqrestore(&g_region_tree->lock, flags);
     return 0;
@@ -193,14 +193,14 @@ int memd_del_unsafe_region(pid_t pid)
 {
     unsigned long flags;
     int removed = 0;
-    
+
     spin_lock_irqsave(&g_region_tree->lock, flags);
-    
+
     if (!g_region_tree) {
         spin_unlock_irqrestore(&g_region_tree->lock, flags);
         return -ENODEV;
     }
-    
+
     struct unsafe_region_area *area, *tmp;
     list_for_each_entry_safe(area, tmp, &g_region_tree->all_regions, list) {
         if (area->session_pid == pid) {
@@ -209,7 +209,7 @@ int memd_del_unsafe_region(pid_t pid)
             removed++;
         }
     }
-    
+
     spin_unlock_irqrestore(&g_region_tree->lock, flags);
     return removed ? 0 : -ENOENT;
 }
@@ -220,7 +220,7 @@ int memd_find_region(uintptr_t addr, struct unsafe_region_area *out)
 {
     unsigned long flags;
     struct unsafe_region_area *area;
-    
+
     spin_lock_irqsave(&g_region_tree->lock, flags);
     area = region_find(addr);
     if (area) {
@@ -239,7 +239,7 @@ int memd_region_iterate(int (*callback)(struct unsafe_region_area *area, void *d
     unsigned long flags;
     struct unsafe_region_area *area;
     int ret = 0;
-    
+
     spin_lock_irqsave(&g_region_tree->lock, flags);
     list_for_each_entry(area, &g_region_tree->all_regions, list) {
         area->access_count++;

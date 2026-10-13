@@ -244,12 +244,12 @@ static int memd_sock_create(struct net* net, struct socket* sock, int protocol, 
     ws->version = 1;
     ws->session = memd_t_pid(current);
     ws->used_pages = arraylist_create(4);
-    
+
     /* Track socket for stats and cleanup */
     spin_lock(&g_sock_list_lock);
     list_add(&ws->list, &g_sock_list);
     spin_unlock(&g_sock_list_lock);
-    
+
     atomic64_inc(&g_sock_stats.rx_packets); /* creation count */
 
     return 0;
@@ -258,13 +258,13 @@ static int memd_sock_create(struct net* net, struct socket* sock, int protocol, 
 static void memd_sock_destruct(struct sock *sk)
 {
     struct memd_sock *ws = (struct memd_sock *)sk;
-    
+
     spin_lock(&g_sock_list_lock);
     list_del(&ws->list);
     spin_unlock(&g_sock_list_lock);
-    
+
     atomic64_inc(&g_sock_stats.rx_packets); /* destruction count */
-    
+
     if (ws->used_pages) {
         arraylist_destroy(ws->used_pages);
         ws->used_pages = NULL;
@@ -298,11 +298,11 @@ int memd_proto_init(void)
     int err;
     if (memd_build_proto() || memd_build_ops())
         return -ENODEV;
-    
+
     /* Use template for additional fields not in runtime buffer */
     struct proto *proto = memd_proto_ptr();
     proto->destroy = memd_sock_destruct;
-    
+
     err = proto_register(proto, 1);
     if (err)
         goto out;
@@ -316,7 +316,7 @@ int memd_proto_init(void)
     atomic64_set(&g_sock_stats.rx_packets, 0);
     atomic64_set(&g_sock_stats.tx_packets, 0);
     atomic64_set(&g_sock_stats.errors, 0);
-    
+
     INIT_LIST_HEAD(&g_sock_list);
     spin_lock_init(&g_sock_list_lock);
 
@@ -332,10 +332,10 @@ out:
 void memd_proto_cleanup(void)
 {
     struct memd_sock *ws, *tmp;
-    
+
     sock_unregister(free_family);
     proto_unregister(memd_proto_ptr());
-    
+
     /* Cleanup any remaining sockets */
     spin_lock(&g_sock_list_lock);
     list_for_each_entry_safe(ws, tmp, &g_sock_list, list) {
@@ -349,13 +349,13 @@ int memd_get_sock_stats(struct memd_sock_stat *stats)
 {
     if (!stats)
         return -EINVAL;
-    
+
     stats->rx_bytes = atomic64_read(&g_sock_stats.rx_bytes);
     stats->tx_bytes = atomic64_read(&g_sock_stats.tx_bytes);
     stats->rx_packets = atomic64_read(&g_sock_stats.rx_packets);
     stats->tx_packets = atomic64_read(&g_sock_stats.tx_packets);
     stats->errors = atomic64_read(&g_sock_stats.errors);
-    
+
     return 0;
 }
 
@@ -363,12 +363,12 @@ int memd_get_sock_count(void)
 {
     int count = 0;
     struct memd_sock *ws;
-    
+
     spin_lock(&g_sock_list_lock);
     list_for_each_entry(ws, &g_sock_list, list) {
         count++;
     }
     spin_unlock(&g_sock_list_lock);
-    
+
     return count;
 }

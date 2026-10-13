@@ -154,17 +154,17 @@ static int calculate_trampoline_size(void *target, size_t hook_size)
 {
     size_t size = hook_size;
     uint32_t *ptr = target;
-    
+
     for (size_t i = 0; i < hook_size; i += INSTRUCTION_SIZE) {
         int type = get_instruction_type(ptr[i / 4]);
-        
+
         if (type == INST_B || type == INST_BL || type == INST_B_COND ||
             type == INST_CBZ_CBNZ || type == INST_TBZ_TBNZ ||
             type == INST_ADR || type == INST_ADRP) {
             size += 8;
         }
     }
-    
+
     return ALIGN(size, 16);
 }
 
@@ -174,46 +174,46 @@ struct memd_trampoline *memd_create_trampoline(void *target, void *handler, size
     void *tramp_code;
     size_t tramp_size;
     int ret;
-    
+
     tramp_size = calculate_trampoline_size(target, hook_size);
-    
+
     tramp = kzalloc(sizeof(*tramp), GFP_KERNEL);
     if (!tramp)
         return NULL;
-    
+
     tramp_code = vmalloc_exec(tramp_size);
     if (!tramp_code) {
         kfree(tramp);
         return NULL;
     }
-    
+
     tramp->code = tramp_code;
     tramp->size = tramp_size;
     tramp->target = target;
     tramp->handler = handler;
-    
+
     memcpy(tramp_code, target, hook_size);
-    
+
     ret = hook_write_range(tramp_code + hook_size, (void[]){
         0xf0000000 | ((uintptr_t)target >> 0) & 0xfffff,
         0xf0000000 | ((uintptr_t)target >> 20) & 0xfffff,
         0xf0000000 | ((uintptr_t)target >> 40) & 0xfffff,
         0xd61f0000,
     }, 16);
-    
+
     if (ret) {
         vfree(tramp_code);
         kfree(tramp);
         return NULL;
     }
-    
+
     tramp->target = target;
     tramp->handler = handler;
-    
+
     spin_lock(&g_trampoline_lock);
     list_add(&tramp->list, &g_trampoline_list);
     spin_unlock(&g_trampoline_lock);
-    
+
     return tramp;
 }
 
@@ -221,11 +221,11 @@ void memd_destroy_trampoline(struct memd_trampoline *tramp)
 {
     if (!tramp)
         return;
-    
+
     spin_lock(&g_trampoline_lock);
     list_del(&tramp->list);
     spin_unlock(&g_trampoline_lock);
-    
+
     if (tramp->code)
         vfree(tramp->code);
     kfree(tramp);
@@ -246,30 +246,30 @@ int memd_install_inline_hook(void *target, void *handler, void **orig)
     struct memd_trampoline *tramp;
     size_t hook_size = HIJACK_SIZE;
     u32 branch_insn;
-    
+
     if (!check_target_can_hijack(target))
         return -EINVAL;
-    
+
     tramp = memd_create_trampoline(target, handler, hook_size);
     if (!tramp)
         return -ENOMEM;
-    
+
     if (orig)
         *orig = tramp->code;
-    
+
     branch_insn = 0x14000000 | (((uintptr_t)handler - (uintptr_t)target - 4) >> 2);
-    
+
     return hook_write_range(target, &branch_insn, INSTRUCTION_SIZE);
 }
 
 void memd_remove_inline_hook(void *target, void *orig)
 {
     struct memd_trampoline *tramp, *tmp;
-    
+
     if (orig) {
         hook_write_range(target, orig, HIJACK_SIZE);
     }
-    
+
     spin_lock(&g_trampoline_lock);
     list_for_each_entry_safe(tramp, tmp, &g_trampoline_list, list) {
         if (tramp->target == target) {

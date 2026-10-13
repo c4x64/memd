@@ -27,7 +27,7 @@ struct memd_sock {
     pid_t session;
 
     struct karray_list* used_pages;
-    
+
     struct list_head list;
 };
 

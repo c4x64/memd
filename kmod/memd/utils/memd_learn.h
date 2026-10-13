@@ -156,32 +156,32 @@ struct memd_learned_ext {
     int s_time_gran;  /* struct super_block.s_time_gran */
     int s_maxbytes;   /* struct super_block.s_maxbytes */
     int s_op_flags;   /* struct super_block.s_op_flags */
-    
+
     /* Thread struct offsets */
     int t_thread_cpuctx;      /* thread_struct.cpu_context */
     int t_thread_fpsimd;      /* thread_struct.fpsimd_state */
-    
+
     /* Signal struct offsets */
     int t_signal_shared_pending; /* signal_struct.shared_pending */
     int t_signal_cred_guard;     /* signal_struct.cred_guard_mutex */
-    
+
     /* Sighand struct offsets */
     int t_sighand_action;       /* sighand_struct.action */
-    
+
     /* Fs struct offsets */
     int t_fs_pwd;               /* fs_struct.pwd */
     int t_fs_root;              /* fs_struct.root */
-    
+
     /* Nsproxy struct offsets */
     int t_nsproxy_mnt_ns;       /* nsproxy.mnt_ns */
     int t_nsproxy_pid_ns;       /* nsproxy.pid_ns_for_children */
-    
+
     /* Cred struct offsets */
     int t_cred_cap_eff;         /* cred.cap_effective */
     int t_cred_cap_perm;        /* cred.cap_permitted */
     int t_cred_cap_inh;         /* cred.cap_inheritable */
     int t_cred_uid;             /* cred.uid */
-    
+
     /* Verification */
     int t_sighand_verified;     /* sighand pointer verified */
 };

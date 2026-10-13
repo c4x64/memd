@@ -710,7 +710,7 @@ static void memd_learn_task_extended(void)
     struct nsproxy *nsproxy = t->nsproxy;
     struct fs_struct *fs = t->fs;
     int i, n, found;
-    
+
     if (files) {
         n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, files, &found);
         if (n == 1) {
@@ -720,7 +720,7 @@ static void memd_learn_task_extended(void)
             memd_err("learn: task files ambiguous (%d)\n", n);
         }
     }
-    
+
     if (signal) {
         n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, signal, &found);
         if (n == 1) {
@@ -730,7 +730,7 @@ static void memd_learn_task_extended(void)
             memd_err("learn: task signal ambiguous (%d)\n", n);
         }
     }
-    
+
     if (sighand) {
         n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, sighand, &found);
         if (n == 1) {
@@ -740,7 +740,7 @@ static void memd_learn_task_extended(void)
             memd_err("learn: task sighand ambiguous (%d)\n", n);
         }
     }
-    
+
     if (real_parent) {
         n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, real_parent, &found);
         if (n == 1) {
@@ -750,7 +750,7 @@ static void memd_learn_task_extended(void)
             memd_err("learn: task real_parent ambiguous (%d)\n", n);
         }
     }
-    
+
     if (nsproxy) {
         n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, nsproxy, &found);
         if (n == 1) {
@@ -760,7 +760,7 @@ static void memd_learn_task_extended(void)
             memd_err("learn: task nsproxy ambiguous (%d)\n", n);
         }
     }
-    
+
     if (fs) {
         n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, fs, &found);
         if (n == 1) {
@@ -777,7 +777,7 @@ static void memd_learn_mm_extended(void)
     struct mm_struct *mm = get_task_mm(current);
     if (!mm)
         return;
-    
+
     struct vm_area_struct *mmap = mm->mmap;
     if (mmap) {
         int found = -1, n = 0;
@@ -797,7 +797,7 @@ static void memd_learn_mm_extended(void)
             memd_err("learn: mm mmap ambiguous (%d)\n", n);
         }
     }
-    
+
     mmput(mm);
 }
 
@@ -809,42 +809,42 @@ static void memd_learn_file_extended(void)
     struct inode *inode;
     struct super_block *sb;
     int found, n;
-    
+
     f = filp_open("/proc/self/exe", O_RDONLY, 0);
     if (IS_ERR(f))
         return;
-    
+
     path = memd_f_path(f);
     dentry = path.dentry;
     if (dentry) {
         inode = dentry->d_inode;
         if (inode) {
             sb = inode->i_sb;
-            
+
             n = memd_scan_for_ptr(f, 512, &path, &found);
             if (n == 1) {
                 memd_learned_ext.f_fpath = found;
                 memd_info("learn: file f_path at +%d\n", found);
             }
-            
+
             n = memd_scan_for_ptr(f, 512, dentry, &found);
             if (n == 1) {
                 memd_learned_ext.d_parent = found;
                 memd_info("learn: dentry d_parent at +%d\n", found);
             }
-            
+
             n = memd_scan_for_ptr(dentry, 256, inode, &found);
             if (n == 1) {
                 memd_learned_ext.d_inode = found;
                 memd_info("learn: dentry d_inode at +%d\n", found);
             }
-            
+
             n = memd_scan_for_ptr(dentry, 256, sb, &found);
             if (n == 1) {
                 memd_learned_ext.d_sb = found;
                 memd_info("learn: dentry d_sb at +%d\n", found);
             }
-            
+
             n = memd_scan_for_ptr(inode, 512, sb, &found);
             if (n == 1) {
                 memd_learned_ext.i_sb = found;
@@ -868,7 +868,7 @@ static void memd_learn_thread_struct(void)
     struct task_struct *t = current;
     struct thread_struct *thread = &t->thread;
     int found = -1, n = 0;
-    
+
     for (int i = 0; i + 8 <= MEMD_LEARN_SCAN; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)t + i, 8);
@@ -884,17 +884,17 @@ static void memd_learn_thread_struct(void)
     } else {
         memd_err("learn: task thread ambiguous (%d)\n", n);
     }
-    
+
     /* Learn thread_struct fields */
     if (found >= 0) {
         struct thread_struct *ts = thread;
-        
+
         n = memd_scan_for_ptr(thread, 512, &ts->cpu_context, &found);
         if (n == 1) {
             memd_learned_ext.t_thread_cpuctx = found;
             memd_info("learn: thread cpu_context at +%d\n", found);
         }
-        
+
         n = memd_scan_for_ptr(thread, 512, &ts->fpsimd_state, &found);
         if (n == 1) {
             memd_learned_ext.t_thread_fpsimd = found;
@@ -909,7 +909,7 @@ static void memd_learn_signal_struct(void)
     struct signal_struct *sig = t->signal;
     if (!sig)
         return;
-    
+
     int found = -1, n = 0;
     for (int i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
@@ -924,7 +924,7 @@ static void memd_learn_signal_struct(void)
         memd_learned_ext.t_signal_shared_pending = found;
         memd_info("learn: signal shared_pending at +%d\n", found);
     }
-    
+
     found = -1; n = 0;
     for (int i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
@@ -947,7 +947,7 @@ static void memd_learn_sighand_struct(void)
     struct sighand_struct *sh = t->sighand;
     if (!sh)
         return;
-    
+
     int found = -1, n = 0;
     for (int i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
@@ -970,7 +970,7 @@ static void memd_learn_fs_struct(void)
     struct fs_struct *fs = t->fs;
     if (!fs)
         return;
-    
+
     int found = -1, n = 0;
     for (int i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
@@ -985,7 +985,7 @@ static void memd_learn_fs_struct(void)
         memd_learned_ext.t_fs_pwd = found;
         memd_info("learn: fs pwd at +%d\n", found);
     }
-    
+
     found = -1; n = 0;
     for (int i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
@@ -1008,7 +1008,7 @@ static void memd_learn_nsproxy_struct(void)
     struct nsproxy *nsp = t->nsproxy;
     if (!nsp)
         return;
-    
+
     int found = -1, n = 0;
     for (int i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
@@ -1023,7 +1023,7 @@ static void memd_learn_nsproxy_struct(void)
         memd_learned_ext.t_nsproxy_mnt_ns = found;
         memd_info("learn: nsproxy mnt_ns at +%d\n", found);
     }
-    
+
     found = -1; n = 0;
     for (int i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
@@ -1046,7 +1046,7 @@ static void memd_learn_cred_struct(void)
     struct cred *c = t->cred;
     if (!c)
         return;
-    
+
     int found = -1, n = 0;
     for (int i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
@@ -1061,7 +1061,7 @@ static void memd_learn_cred_struct(void)
         memd_learned_ext.t_cred_cap_eff = found;
         memd_info("learn: cred cap_effective at +%d\n", found);
     }
-    
+
     found = -1; n = 0;
     for (int i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
@@ -1076,7 +1076,7 @@ static void memd_learn_cred_struct(void)
         memd_learned_ext.t_cred_cap_perm = found;
         memd_info("learn: cred cap_permitted at +%d\n", found);
     }
-    
+
     found = -1; n = 0;
     for (int i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
@@ -1091,7 +1091,7 @@ static void memd_learn_cred_struct(void)
         memd_learned_ext.t_cred_cap_inh = found;
         memd_info("learn: cred cap_inheritable at +%d\n", found);
     }
-    
+
     found = -1; n = 0;
     for (int i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
@@ -1113,7 +1113,7 @@ static void memd_learn_sighand_verify(void)
     struct task_struct *t = current;
     if (!t->sighand)
         return;
-    
+
     struct sighand_struct *sh = t->sighand;
     if (memd_learned_ext.t_sighand >= 0) {
         struct sighand_struct **sh_ptr = (void *)((char *)t + memd_learned_ext.t_sighand);
@@ -1128,7 +1128,7 @@ static int memd_verify_all_offsets(void)
 {
     struct task_struct *t = current;
     int errors = 0;
-    
+
     if (memd_learned.t_pid >= 0) {
         pid_t *pid_ptr = (void *)((char *)t + memd_learned.t_pid);
         if (*pid_ptr != t->pid) {
@@ -1137,7 +1137,7 @@ static int memd_verify_all_offsets(void)
             errors++;
         }
     }
-    
+
     if (memd_learned.t_tgid >= 0) {
         pid_t *tgid_ptr = (void *)((char *)t + memd_learned.t_tgid);
         if (*tgid_ptr != t->tgid) {
@@ -1146,7 +1146,7 @@ static int memd_verify_all_offsets(void)
             errors++;
         }
     }
-    
+
     if (memd_learned.t_mm >= 0) {
         struct mm_struct **mm_ptr = (void *)((char *)t + memd_learned.t_mm);
         if (*mm_ptr != t->mm) {
@@ -1155,7 +1155,7 @@ static int memd_verify_all_offsets(void)
             errors++;
         }
     }
-    
+
     if (memd_learned.t_cred >= 0) {
         struct cred **cred_ptr = (void *)((char *)t + memd_learned.t_cred);
         if (*cred_ptr != t->cred) {
@@ -1164,44 +1164,44 @@ static int memd_verify_all_offsets(void)
             errors++;
         }
     }
-    
+
     return errors;
 }
 
 int memd_learn_comprehensive(void)
 {
     int ret = 0;
-    
+
     spin_lock(&memd_learn_lock);
     if (memd_learn_initialized) {
         spin_unlock(&memd_learn_lock);
         return 0;
     }
     spin_unlock(&memd_learn_lock);
-    
+
     ret = memd_learn();
     if (ret)
         return ret;
-    
+
     memd_learn_extended();
-    
+
     memd_learn_thread_struct();
     memd_learn_signal_struct();
     memd_learn_sighand_struct();
     memd_learn_fs_struct();
     memd_learn_nsproxy_struct();
     memd_learn_cred_struct();
-    
+
     memd_learn_sighand_verify();
-    
+
     int errors = memd_verify_all_offsets();
     if (errors > 0) {
         memd_warn("learn: %d offsets failed verification\n", errors);
     }
-    
+
     spin_lock(&memd_learn_lock);
     memd_learn_initialized = true;
     spin_unlock(&memd_learn_lock);
-    
+
     return 0;
 }

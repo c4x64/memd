@@ -52,7 +52,7 @@ static int verify_module_loaded(const char *module_name)
     FILE *f = fopen("/proc/modules", "r");
     if (!f)
         return -1;
-    
+
     char line[512];
     while (fgets(line, sizeof(line), f)) {
         if (strstr(line, module_name)) {
@@ -74,7 +74,7 @@ int main(int argc, char **argv)
     int opt_idx = 1;
     char *module_path = NULL;
     char *module_name = NULL;
-    
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--dry-run") == 0) {
             dry_run = 1;
@@ -97,40 +97,40 @@ int main(int argc, char **argv)
             return 2;
         }
     }
-    
+
     if (!module_path) {
         fprintf(stderr, "Error: module path required\n");
         print_usage(argv[0]);
         return 2;
     }
-    
+
     if (verbose) {
         printf("finit-force: loading %s\n", module_path);
         if (dry_run)
             printf("  [DRY RUN] Would load with flags: IGNORE_MODVERSIONS | IGNORE_VERMAGIC\n");
     }
-    
+
     if (dry_run) {
         printf("rc=0 (dry run)\n");
         return 0;
     }
-    
+
     /* Extract module name for verification */
     char *slash = strrchr(module_path, '/');
     module_name = slash ? slash + 1 : module_path;
     char *dot = strrchr(module_name, '.');
     if (dot) *dot = '\0';
-    
+
     fd = open(module_path, O_RDONLY);
     if (fd < 0) {
         fprintf(stderr, "rc=-1 open: %s\n", strerror(errno));
         return 1;
     }
-    
+
     if (verbose)
-        printf("  finit_module(fd=%d, flags=0x%x)...\n", fd, 
+        printf("  finit_module(fd=%d, flags=0x%x)...\n", fd,
                MODULE_INIT_IGNORE_MODVERSIONS | MODULE_INIT_IGNORE_VERMAGIC);
-    
+
     long r = syscall(__NR_finit_module, fd, "",
                      (long)(MODULE_INIT_IGNORE_MODVERSIONS |
                             MODULE_INIT_IGNORE_VERMAGIC));
@@ -145,7 +145,7 @@ int main(int argc, char **argv)
         return 1;
     }
     close(fd);
-    
+
     if (!no_verify) {
         if (verbose)
             printf("  verifying module '%s' in /proc/modules...\n", module_name);
