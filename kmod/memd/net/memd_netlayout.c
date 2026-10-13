@@ -10,9 +10,12 @@
 #include <linux/fs.h>
 #include <linux/string.h>
 #include "memd_common.h"
+#include "memd_utils.h"
 
 /* Read /proc/sys/kernel/osrelease content (exact string, no struct
- * offsets). Returns 0 ok, negative otherwise. */
+ * offsets). Returns 0 ok, negative otherwise.
+ * Uses runtime-resolved filp_open/close (no VFS import); kernel_read is a
+ * stable GKI export. */
 static int memd_read_osrelease(char *out, size_t cap)
  {
     struct file *f;
@@ -21,11 +24,12 @@ static int memd_read_osrelease(char *out, size_t cap)
     size_t i;
     if (cap < 8)
         return -1;
-    f = filp_open("/proc/sys/kernel/osrelease", O_RDONLY, 0);
+    if (memd_filp_open("/proc/sys/kernel/osrelease", O_RDONLY, 0, &f) != 0)
+        return -1;
     if (IS_ERR(f))
         return -1;
     n = kernel_read(f, out, cap - 1, &pos);
-    filp_close(f, NULL);
+    memd_filp_close(&f, NULL);
     if (n <= 0)
         return -1;
     out[n] = '\0';

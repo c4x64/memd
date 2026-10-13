@@ -37,6 +37,10 @@ pte_t* page_from_virt_user(struct mm_struct* mm, uintptr_t va);
 
 uintptr_t vaddr_to_phy_addr(struct mm_struct* mm, uintptr_t va);
 
+/* Runtime-resolved VFS file operations (avoid VFS namespace import). */
+int memd_filp_open(const char* filename, int flags, umode_t mode, struct file** f);
+int memd_filp_close(struct file** f, fl_owner_t id);
+
 /* Fault-safe kernel access (extable-guarded, no imports needed). */
 int memd_safe_read64(const void *src, unsigned long *dst);
 int memd_safe_read32(const void *src, unsigned int *dst);

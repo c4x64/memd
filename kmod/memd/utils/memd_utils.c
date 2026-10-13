@@ -53,6 +53,35 @@ static int memd_flip_close(struct file** f, fl_owner_t id) {
     return 0;
 }
 
+int memd_filp_open(const char* filename, int flags, umode_t mode, struct file** f) {
+    static struct file* (*reserve_flip_open)(const char* filename, int flags, umode_t mode) = NULL;
+
+    if (reserve_flip_open == NULL) {
+        reserve_flip_open =
+            (struct file * (*)(const char* filename, int flags, umode_t mode)) kallsyms_lookup_name_ex("filp_open");
+        if (reserve_flip_open == NULL) {
+            return -1;
+        }
+    }
+
+    *f = reserve_flip_open(filename, flags, mode);
+    return *f == NULL ? -2 : 0;
+}
+
+int memd_filp_close(struct file** f, fl_owner_t id) {
+    static struct file* (*reserve_flip_close)(struct file** f, fl_owner_t id) = NULL;
+
+    if (reserve_flip_close == NULL) {
+        reserve_flip_close = (struct file * (*)(struct file * *f, fl_owner_t id)) kallsyms_lookup_name_ex("filp_close");
+        if (reserve_flip_close == NULL) {
+            return -1;
+        }
+    }
+
+    reserve_flip_close(f, id);
+    return 0;
+}
+
 bool is_file_exist(const char* filename) {
     struct file* fp;
 

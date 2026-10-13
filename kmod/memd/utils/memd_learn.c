@@ -20,8 +20,6 @@
 #include "memd_utils.h"
 #include "memd_netlayout.h"
 
-MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
-
 static bool memd_learn_initialized = false;
 static DEFINE_SPINLOCK(memd_learn_lock);
 
@@ -423,7 +421,11 @@ static void memd_learn_vma(void)
         memd_err("learn: no mm for vma\n");
         return;
     }
-    f = filp_open("/proc/self/maps", O_RDONLY, 0);
+    if (memd_filp_open("/proc/self/maps", O_RDONLY, 0, &f) != 0) {
+        memd_err("learn: no self maps\n");
+        mmput(mm);
+        return;
+    }
     if (IS_ERR(f)) {
         memd_err("learn: no self maps\n");
         mmput(mm);
@@ -431,7 +433,7 @@ static void memd_learn_vma(void)
     }
     if (memd_maps_line(f, &pos, &s1, &e1, b1, sizeof(b1))) {
         memd_err("learn: maps parse failed\n");
-        filp_close(f, NULL);
+        memd_filp_close(&f, NULL);
         mmput(mm);
         return;
     }
@@ -445,7 +447,7 @@ static void memd_learn_vma(void)
         s2 = e2 = 0;
         b2[0] = '\0';
     }
-    filp_close(f, NULL);
+    memd_filp_close(&f, NULL);
     if (!memd_find_vma_pair(mm, s1, &a, &b) &&
         s2 && !memd_find_vma_pair(mm, s2, &c, &d) && a == c && b == d &&
         a >= 0) {
@@ -810,7 +812,8 @@ static void memd_learn_file_extended(void)
     struct super_block *sb;
     int found, n;
 
-    f = filp_open("/proc/self/exe", O_RDONLY, 0);
+    if (memd_filp_open("/proc/self/exe", O_RDONLY, 0, &f) != 0)
+        return;
     if (IS_ERR(f))
         return;
 
@@ -852,7 +855,7 @@ static void memd_learn_file_extended(void)
             }
         }
     }
-    filp_close(f, NULL);
+    memd_filp_close(&f, NULL);
 }
 
 int memd_learn_extended(void)

@@ -8,7 +8,6 @@
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/notifier.h>
-#include <linux/kallsyms.h>
 #include <asm/debug-monitors.h>
 #include <asm/ptrace.h>
 #include <asm/sysreg.h>
