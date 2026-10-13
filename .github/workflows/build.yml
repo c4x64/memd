@@ -265,48 +265,12 @@ jobs:
           ls dl/kmod/ 2>/dev/null || ls dl/ 2>/dev/null
           
           # Generate dynamic list of KOs from matrix
-          python3 -c "
-import json, os, sys
-matrix = json.loads(os.environ['MATRIX'])
-kos = []
-for job in matrix['include']:
-    kmi = job['kmi']
-    if kmi.startswith('universal'):
-        continue
-    kos.append(f'dl/kmod/rwbridge-{kmi}.ko')
-kos.sort()
-with open('/tmp/ko_list.txt', 'w') as f:
-    f.write(' '.join(kos))
-print('KOs to pack:', kos)
-"
+          python3 .github/scripts/gen_ko_list.py
           KO_LIST=$(cat /tmp/ko_list.txt)
           
-          python3 - \
-            dl/kmod/rwbridge-universal.ko \
+          python3 .github/scripts/gen_blobs.py \
             $KO_LIST \
-            run.sh blobs.c <<'PYEOF'
-          import sys
-          def emit(name, path):
-              d = open(path, 'rb').read()
-              sym = name.replace('.', '_').replace('-', '_')
-              L = ['const unsigned char %s_start[] = {' % sym]
-              L.append(','.join(str(b) for b in d))
-              L.append('};')
-              L.append('const unsigned long %s_len = %d;' % (sym, len(d)))
-              return '\n'.join(L)
-          *kos, sh, out = sys.argv[1:]
-          short = {}
-          for k in kos:
-              base = k.split('rwbridge-')[1].rsplit('.ko', 1)[0]
-              short[base] = base.replace('-', '_').replace('.', '_')
-          parts = [emit('_binary_rwbridge_' + short[k.split('rwbridge-')[1].rsplit('.ko', 1)[0]] + '_ko', k)
-                   for k in kos]
-          parts.append(emit('_binary_runsh', sh))
-          open(out, 'w').write('\n'.join(parts) + '\n')
-          print(f'blobs written: universal + {len(kos)} artifacts + run.sh')
-          PYEOF
-          grep -c "_binary_rwbridge_.*_start" blobs.c
-          aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o rwbridge-spx kmod/spx.c blobs.c
+            run.sh blobs.c
           
           # Compress final SPX binary with LZ4 (90%+ compression)
           lz4 -9 rwbridge-spx rwbridge-spx.lz4
