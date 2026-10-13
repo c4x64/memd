@@ -238,6 +238,9 @@ jobs:
     name: Pack SPX Binary
     needs: [generate-matrix, build]
     runs-on: ubuntu-latest
+    # Releases need an explicit grant (repo default token is restricted).
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -325,4 +328,3 @@ jobs:
             rwbridge-spx.lz4
             dl/kmod/spx_decompress
             shell-bundle/*
-          generate_release_notes: true
