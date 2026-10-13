@@ -249,8 +249,8 @@ void memd_raster_composite_layers(__u32 *fb, __u32 w, __u32 h,
                 /* Apply layer alpha */
                 if (alpha != 255) {
                     __u8 sa = alpha;
-                    src = ((src & 0xFF00FF00) * sa / 255) & 0xFF00FF00 |
-                          ((src & 0x00FF00FF) * sa / 255) & 0x00FF00FF;
+                    src = (((src & 0xFF00FF00) * sa / 255) & 0xFF00FF00) |
+                          (((src & 0x00FF00FF) * sa / 255) & 0x00FF00FF);
                 }
 
                 *dst = alpha_blend(src, *dst);
