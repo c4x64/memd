@@ -3,6 +3,7 @@
 #include <linux/errno.h>
 #include <linux/spinlock.h>
 #include <linux/pid_namespace.h>
+#include <linux/sched/task.h>
 #include <linux/hash.h>
 #include <linux/slab.h>
 #include <linux/rcupdate.h>
@@ -70,7 +71,9 @@ int memd_hide_add(pid_t pid)
         rcu_read_unlock();
         return -ESRCH;
     }
-    ns = get_pid_ns(task->pid_ns);
+    /* No task->pid_ns member exists upstream; the active namespace
+     * (nsproxy->pid_ns_for_children) is the scoping equivalent. */
+    ns = get_pid_ns(task_active_pid_ns(task));
     rcu_read_unlock();
 
     if (!ns)
@@ -181,7 +184,9 @@ int memd_hide_del(pid_t pid)
         rcu_read_unlock();
         return -ESRCH;
     }
-    ns = get_pid_ns(task->pid_ns);
+    /* No task->pid_ns member exists upstream; the active namespace
+     * (nsproxy->pid_ns_for_children) is the scoping equivalent. */
+    ns = get_pid_ns(task_active_pid_ns(task));
     rcu_read_unlock();
 
     if (!ns)
@@ -224,8 +229,10 @@ int memd_hide_del(pid_t pid)
 
 void memd_hide_clear(void)
  {
-    struct memd_hide_entry *entry, *tmp;
-    struct memd_hide_ns_entry *ns_entry, *ns_tmp;
+    struct memd_hide_entry *entry;
+    struct hlist_node *tmp;
+    struct memd_hide_ns_entry *ns_entry;
+    struct hlist_node *ns_tmp;
     unsigned long flags;
     int i;
 
@@ -276,7 +283,9 @@ bool memd_hide_contains(pid_t pid)
         rcu_read_unlock();
         return false;
     }
-    ns = get_pid_ns(task->pid_ns);
+    /* No task->pid_ns member exists upstream; the active namespace
+     * (nsproxy->pid_ns_for_children) is the scoping equivalent. */
+    ns = get_pid_ns(task_active_pid_ns(task));
     rcu_read_unlock();
 
     if (!ns)
