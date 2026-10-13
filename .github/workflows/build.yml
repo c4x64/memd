@@ -278,6 +278,12 @@ jobs:
             $KO_LIST \
             run.sh blobs.c
           
+          # Link the SPX packed loader against the generated blobs
+          # (see kmod/spx.c header for the documented command)
+          aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o rwbridge-spx \
+            kmod/spx.c blobs.c
+          file rwbridge-spx
+          
           # Compress final SPX binary with LZ4 (90%+ compression)
           lz4 -9 rwbridge-spx rwbridge-spx.lz4
           echo "Original: $(wc -c < rwbridge-spx) bytes"

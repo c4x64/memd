@@ -1,5 +1,6 @@
-/* spx.c — SPX packed loader: ONE native binary carrying the 8 KMI LKM
- * artifacts plus run.sh, responsible for external patching and loading.
+/* spx.c — SPX packed loader: ONE native binary carrying the universal
+ * plus per-KMI LKM artifacts plus run.sh, responsible for external
+ * patching and loading.
  *
  * Flow: detect kernel (uname -r) -> select artifacts whose (kver+generation)
  * match, exact matches first, kver-only siblings after -> patch embedded
@@ -44,46 +45,26 @@
 /* blobs.c provides these (generated, never committed) */
 extern const unsigned char _binary_rwbridge_universal_ko_start[];
 extern const unsigned long _binary_rwbridge_universal_ko_len;
-extern const unsigned char _binary_rwbridge_a11_5_4_ko_start[];
-extern const unsigned long _binary_rwbridge_a11_5_4_ko_len;
-extern const unsigned char _binary_rwbridge_a12_5_10_ko_start[];
-extern const unsigned long _binary_rwbridge_a12_5_10_ko_len;
-extern const unsigned char _binary_rwbridge_a13_5_10_ko_start[];
-extern const unsigned long _binary_rwbridge_a13_5_10_ko_len;
-extern const unsigned char _binary_rwbridge_a13_5_10_dbg_ko_start[];
-extern const unsigned long _binary_rwbridge_a13_5_10_dbg_ko_len;
-extern const unsigned char _binary_rwbridge_a13_5_15_ko_start[];
-extern const unsigned long _binary_rwbridge_a13_5_15_ko_len;
-extern const unsigned char _binary_rwbridge_a13_5_15_dbg_ko_start[];
-extern const unsigned long _binary_rwbridge_a13_5_15_dbg_ko_len;
-extern const unsigned char _binary_rwbridge_a14_5_15_ko_start[];
-extern const unsigned long _binary_rwbridge_a14_5_15_ko_len;
-extern const unsigned char _binary_rwbridge_a14_5_15_dbg_ko_start[];
-extern const unsigned long _binary_rwbridge_a14_5_15_dbg_ko_len;
-extern const unsigned char _binary_rwbridge_a14_6_1_ko_start[];
-extern const unsigned long _binary_rwbridge_a14_6_1_ko_len;
-extern const unsigned char _binary_rwbridge_a14_6_1_dbg_ko_start[];
+extern const unsigned char _binary_rwbridge_android13_5_10_ko_start[];
+extern const unsigned long _binary_rwbridge_android13_5_10_ko_len;
+extern const unsigned char _binary_rwbridge_android13_5_10_dbg_ko_start[];
+extern const unsigned long _binary_rwbridge_android13_5_10_dbg_ko_len;
+extern const unsigned char _binary_rwbridge_android13_5_15_ko_start[];
+extern const unsigned long _binary_rwbridge_android13_5_15_ko_len;
+extern const unsigned char _binary_rwbridge_android13_5_15_dbg_ko_start[];
+extern const unsigned long _binary_rwbridge_android13_5_15_dbg_ko_len;
+extern const unsigned char _binary_rwbridge_android14_5_15_ko_start[];
+extern const unsigned long _binary_rwbridge_android14_5_15_ko_len;
+extern const unsigned char _binary_rwbridge_android14_5_15_dbg_ko_start[];
+extern const unsigned long _binary_rwbridge_android14_5_15_dbg_ko_len;
+extern const unsigned char _binary_rwbridge_android14_6_1_ko_start[];
+extern const unsigned long _binary_rwbridge_android14_6_1_ko_len;
+extern const unsigned char _binary_rwbridge_android14_6_1_dbg_ko_start[];
 extern const unsigned long _binary_rwbridge_a14_6_1_dbg_ko_len;
-extern const unsigned char _binary_rwbridge_a15_6_1_ko_start[];
-extern const unsigned long _binary_rwbridge_a15_6_1_ko_len;
-extern const unsigned char _binary_rwbridge_a15_6_1_dbg_ko_start[];
-extern const unsigned long _binary_rwbridge_a15_6_1_dbg_ko_len;
-extern const unsigned char _binary_rwbridge_a15_6_6_ko_start[];
-extern const unsigned long _binary_rwbridge_a15_6_6_ko_len;
-extern const unsigned char _binary_rwbridge_a15_6_6_dbg_ko_start[];
-extern const unsigned long _binary_rwbridge_a15_6_6_dbg_ko_len;
-extern const unsigned char _binary_rwbridge_a16_6_6_ko_start[];
-extern const unsigned long _binary_rwbridge_a16_6_6_ko_len;
-extern const unsigned char _binary_rwbridge_a16_6_6_dbg_ko_start[];
-extern const unsigned long _binary_rwbridge_a16_6_6_dbg_ko_len;
-extern const unsigned char _binary_rwbridge_a16_6_12_ko_start[];
-extern const unsigned long _binary_rwbridge_a16_6_12_ko_len;
-extern const unsigned char _binary_rwbridge_a16_6_12_dbg_ko_start[];
-extern const unsigned long _binary_rwbridge_a16_6_12_dbg_ko_len;
-extern const unsigned char _binary_rwbridge_a17_6_12_ko_start[];
-extern const unsigned long _binary_rwbridge_a17_6_12_ko_len;
-extern const unsigned char _binary_rwbridge_a17_6_12_dbg_ko_start[];
-extern const unsigned long _binary_rwbridge_a17_6_12_dbg_ko_len;
+extern const unsigned char _binary_rwbridge_android16_6_12_ko_start[];
+extern const unsigned long _binary_rwbridge_android16_6_12_ko_len;
+extern const unsigned char _binary_rwbridge_android16_6_12_dbg_ko_start[];
+extern const unsigned long _binary_rwbridge_android16_6_12_dbg_ko_len;
 extern const unsigned char _binary_runsh_start[];
 extern const unsigned long _binary_runsh_len;
 
@@ -107,9 +88,11 @@ static void jlog(const char *op, const char *msg)
     }
 }
 
-/* ---- state: attempt counting across reboots ---- */
+/* ---- state: attempt counting across reboots (one slot per flavor) ---- */
+#define SPX_NFLAVORS 11
+
 struct state {
-    int tried[21];
+    int tried[SPX_NFLAVORS];
 };
 
 static void state_load(struct state *s)
@@ -120,11 +103,11 @@ static void state_load(struct state *s)
     if (!f)
         return;
     int count = 0;
-    for (int i = 0; i < 21; i++) {
+    for (int i = 0; i < SPX_NFLAVORS; i++) {
         if (fscanf(f, "%d", &s->tried[i]) != 1) break;
         count++;
     }
-    if (count != 21) {
+    if (count != SPX_NFLAVORS) {
         memset(s->tried, 0, sizeof(s->tried));
     }
     fclose(f);
@@ -135,8 +118,8 @@ static void state_save(const struct state *s)
     FILE *f = fopen(STATE_PATH, "w");
     if (!f)
         return;
-    for (int i = 0; i < 21; i++) {
-        fprintf(f, "%d%c", s->tried[i], (i == 20) ? '\n' : ' ');
+    for (int i = 0; i < SPX_NFLAVORS; i++) {
+        fprintf(f, "%d%c", s->tried[i], (i == SPX_NFLAVORS - 1) ? '\n' : ' ');
     }
     fflush(f);
     fsync(fileno(f));
@@ -691,7 +674,9 @@ static int proto_live(void)
 }
 
 
-/* ---- flavor blobs ---- */
+/* ---- flavor blobs (exactly the set gen_blobs.py packs: universal +
+ * the matrix KOs; every extern here must exist in blobs.c or the link
+ * fails — keep this table in lockstep with generate_matrix.py) ---- */
 struct blob {
     const char *name;
     const char *kver;
@@ -708,9 +693,9 @@ int main(int argc, char **argv)
     const unsigned char *bd;
     long bn;
     unsigned char *work;
-    struct blob flavors[21];
-    int order[21], norder = 0;
-    int force_ok[21] = {0}; /* finit_module force allowed (version-magic
+    struct blob flavors[SPX_NFLAVORS];
+    int order[SPX_NFLAVORS], norder = 0;
+    int force_ok[SPX_NFLAVORS] = {0}; /* finit_module force allowed (version-magic
         only): universal always; matrix only on exact kver+gen matches
         (a wrong generation forced past vermagic could mis-walk). */
     /* struct-layout discovery (once per run): OEM kernels with a modified
@@ -745,69 +730,39 @@ int main(int argc, char **argv)
     }
     jlog("spx", "start");
 
-    flavors[0].name = "a11-5.4"; flavors[0].kver = "5.4"; flavors[0].gen = "android11";
-    flavors[0].d = _binary_rwbridge_a11_5_4_ko_start;
-    flavors[0].n = (long)_binary_rwbridge_a11_5_4_ko_len;
-    flavors[1].name = "a12-5.10"; flavors[1].kver = "5.10"; flavors[1].gen = "android12";
-    flavors[1].d = _binary_rwbridge_a12_5_10_ko_start;
-    flavors[1].n = (long)_binary_rwbridge_a12_5_10_ko_len;
-    flavors[2].name = "a13-5.10"; flavors[2].kver = "5.10"; flavors[2].gen = "android13";
-    flavors[2].d = _binary_rwbridge_a13_5_10_ko_start;
-    flavors[2].n = (long)_binary_rwbridge_a13_5_10_ko_len;
-    flavors[3].name = "a13-5.10-dbg"; flavors[3].kver = "5.10"; flavors[3].gen = "android13";
-    flavors[3].d = _binary_rwbridge_a13_5_10_dbg_ko_start;
-    flavors[3].n = (long)_binary_rwbridge_a13_5_10_dbg_ko_len;
-    flavors[4].name = "a13-5.15"; flavors[4].kver = "5.15"; flavors[4].gen = "android13";
-    flavors[4].d = _binary_rwbridge_a13_5_15_ko_start;
-    flavors[4].n = (long)_binary_rwbridge_a13_5_15_ko_len;
-    flavors[5].name = "a13-5.15-dbg"; flavors[5].kver = "5.15"; flavors[5].gen = "android13";
-    flavors[5].d = _binary_rwbridge_a13_5_15_dbg_ko_start;
-    flavors[5].n = (long)_binary_rwbridge_a13_5_15_dbg_ko_len;
-    flavors[6].name = "a14-5.15"; flavors[6].kver = "5.15"; flavors[6].gen = "android14";
-    flavors[6].d = _binary_rwbridge_a14_5_15_ko_start;
-    flavors[6].n = (long)_binary_rwbridge_a14_5_15_ko_len;
-    flavors[7].name = "a14-5.15-dbg"; flavors[7].kver = "5.15"; flavors[7].gen = "android14";
-    flavors[7].d = _binary_rwbridge_a14_5_15_dbg_ko_start;
-    flavors[7].n = (long)_binary_rwbridge_a14_5_15_dbg_ko_len;
-    flavors[8].name = "a14-6.1"; flavors[8].kver = "6.1"; flavors[8].gen = "android14";
-    flavors[8].d = _binary_rwbridge_a14_6_1_ko_start;
-    flavors[8].n = (long)_binary_rwbridge_a14_6_1_ko_len;
-    flavors[9].name = "a14-6.1-dbg"; flavors[9].kver = "6.1"; flavors[9].gen = "android14";
-    flavors[9].d = _binary_rwbridge_a14_6_1_dbg_ko_start;
-    flavors[9].n = (long)_binary_rwbridge_a14_6_1_dbg_ko_len;
-    flavors[10].name = "a15-6.1"; flavors[10].kver = "6.1"; flavors[10].gen = "android15";
-    flavors[10].d = _binary_rwbridge_a15_6_1_ko_start;
-    flavors[10].n = (long)_binary_rwbridge_a15_6_1_ko_len;
-    flavors[11].name = "a15-6.1-dbg"; flavors[11].kver = "6.1"; flavors[11].gen = "android15";
-    flavors[11].d = _binary_rwbridge_a15_6_1_dbg_ko_start;
-    flavors[11].n = (long)_binary_rwbridge_a15_6_1_dbg_ko_len;
-    flavors[12].name = "a15-6.6"; flavors[12].kver = "6.6"; flavors[12].gen = "android15";
-    flavors[12].d = _binary_rwbridge_a15_6_6_ko_start;
-    flavors[12].n = (long)_binary_rwbridge_a15_6_6_ko_len;
-    flavors[13].name = "a15-6.6-dbg"; flavors[13].kver = "6.6"; flavors[13].gen = "android15";
-    flavors[13].d = _binary_rwbridge_a15_6_6_dbg_ko_start;
-    flavors[13].n = (long)_binary_rwbridge_a15_6_6_dbg_ko_len;
-    flavors[14].name = "a16-6.6"; flavors[14].kver = "6.6"; flavors[14].gen = "android16";
-    flavors[14].d = _binary_rwbridge_a16_6_6_ko_start;
-    flavors[14].n = (long)_binary_rwbridge_a16_6_6_ko_len;
-    flavors[15].name = "a16-6.6-dbg"; flavors[15].kver = "6.6"; flavors[15].gen = "android16";
-    flavors[15].d = _binary_rwbridge_a16_6_6_dbg_ko_start;
-    flavors[15].n = (long)_binary_rwbridge_a16_6_6_dbg_ko_len;
-    flavors[16].name = "a16-6.12"; flavors[16].kver = "6.12"; flavors[16].gen = "android16";
-    flavors[16].d = _binary_rwbridge_a16_6_12_ko_start;
-    flavors[16].n = (long)_binary_rwbridge_a16_6_12_ko_len;
-    flavors[17].name = "a16-6.12-dbg"; flavors[17].kver = "6.12"; flavors[17].gen = "android16";
-    flavors[17].d = _binary_rwbridge_a16_6_12_dbg_ko_start;
-    flavors[17].n = (long)_binary_rwbridge_a16_6_12_dbg_ko_len;
-    flavors[18].name = "a17-6.12"; flavors[18].kver = "6.12"; flavors[18].gen = "android17";
-    flavors[18].d = _binary_rwbridge_a17_6_12_ko_start;
-    flavors[18].n = (long)_binary_rwbridge_a17_6_12_ko_len;
-    flavors[19].name = "a17-6.12-dbg"; flavors[19].kver = "6.12"; flavors[19].gen = "android17";
-    flavors[19].d = _binary_rwbridge_a17_6_12_dbg_ko_start;
-    flavors[19].n = (long)_binary_rwbridge_a17_6_12_dbg_ko_len;
-    flavors[20].name = "universal"; flavors[20].kver = "any"; flavors[20].gen = "any";
-    flavors[20].d = _binary_rwbridge_universal_ko_start;
-    flavors[20].n = (long)_binary_rwbridge_universal_ko_len;
+    flavors[0].name = "a13-5.10"; flavors[0].kver = "5.10"; flavors[0].gen = "android13";
+    flavors[0].d = _binary_rwbridge_android13_5_10_ko_start;
+    flavors[0].n = (long)_binary_rwbridge_android13_5_10_ko_len;
+    flavors[1].name = "a13-5.10-dbg"; flavors[1].kver = "5.10"; flavors[1].gen = "android13";
+    flavors[1].d = _binary_rwbridge_android13_5_10_dbg_ko_start;
+    flavors[1].n = (long)_binary_rwbridge_android13_5_10_dbg_ko_len;
+    flavors[2].name = "a13-5.15"; flavors[2].kver = "5.15"; flavors[2].gen = "android13";
+    flavors[2].d = _binary_rwbridge_android13_5_15_ko_start;
+    flavors[2].n = (long)_binary_rwbridge_android13_5_15_ko_len;
+    flavors[3].name = "a13-5.15-dbg"; flavors[3].kver = "5.15"; flavors[3].gen = "android13";
+    flavors[3].d = _binary_rwbridge_android13_5_15_dbg_ko_start;
+    flavors[3].n = (long)_binary_rwbridge_android13_5_15_dbg_ko_len;
+    flavors[4].name = "a14-5.15"; flavors[4].kver = "5.15"; flavors[4].gen = "android14";
+    flavors[4].d = _binary_rwbridge_android14_5_15_ko_start;
+    flavors[4].n = (long)_binary_rwbridge_android14_5_15_ko_len;
+    flavors[5].name = "a14-5.15-dbg"; flavors[5].kver = "5.15"; flavors[5].gen = "android14";
+    flavors[5].d = _binary_rwbridge_android14_5_15_dbg_ko_start;
+    flavors[5].n = (long)_binary_rwbridge_android14_5_15_dbg_ko_len;
+    flavors[6].name = "a14-6.1"; flavors[6].kver = "6.1"; flavors[6].gen = "android14";
+    flavors[6].d = _binary_rwbridge_android14_6_1_ko_start;
+    flavors[6].n = (long)_binary_rwbridge_android14_6_1_ko_len;
+    flavors[7].name = "a14-6.1-dbg"; flavors[7].kver = "6.1"; flavors[7].gen = "android14";
+    flavors[7].d = _binary_rwbridge_android14_6_1_dbg_ko_start;
+    flavors[7].n = (long)_binary_rwbridge_android14_6_1_dbg_ko_len;
+    flavors[8].name = "a16-6.12"; flavors[8].kver = "6.12"; flavors[8].gen = "android16";
+    flavors[8].d = _binary_rwbridge_android16_6_12_ko_start;
+    flavors[8].n = (long)_binary_rwbridge_android16_6_12_ko_len;
+    flavors[9].name = "a16-6.12-dbg"; flavors[9].kver = "6.12"; flavors[9].gen = "android16";
+    flavors[9].d = _binary_rwbridge_android16_6_12_dbg_ko_start;
+    flavors[9].n = (long)_binary_rwbridge_android16_6_12_dbg_ko_len;
+    flavors[10].name = "universal"; flavors[10].kver = "any"; flavors[10].gen = "any";
+    flavors[10].d = _binary_rwbridge_universal_ko_start;
+    flavors[10].n = (long)_binary_rwbridge_universal_ko_len;
 
     major = kernel_major();
     snprintf(msg, sizeof(msg), "kernel major=%d", major);
@@ -818,8 +773,8 @@ int main(int argc, char **argv)
      * releases without an android tag). kver compares NUMERICALLY
      * (major.minor) so 6.1 never matches 6.12. Cross-generation attempts
      * are refused outright: a wrong generation's structs would mis-walk,
-     * strictly worse than not loading. flavors[4] (a14-6.1-dbg) is the
-     * forensics build and is NEVER auto-selected — explicit --ko only. */
+     * strictly worse than not loading. All -dbg forensics builds are
+     * NEVER auto-selected — explicit --ko only. */
     state_load(&st);
     {
         struct utsname u;
@@ -837,13 +792,13 @@ int main(int argc, char **argv)
             g_kmaj = 0;
             g_kmin = 0;
         }
-        for (pass = 0; pass < 2 && norder < 20; pass++) {
-            for (f = 0; f < 20 && norder < 20; f++) {
+        for (pass = 0; pass < 2 && norder < SPX_NFLAVORS - 1; pass++) {
+            for (f = 0; f < SPX_NFLAVORS - 1 && norder < SPX_NFLAVORS - 1; f++) {
                 int kvmaj = 0, kvmin = 0, ok = 0;
                 /* Skip all -dbg forensics builds: explicit --ko only */
                 if (strstr(flavors[f].name, "-dbg"))
                     continue;
-                if (f == 20)
+                if (f == SPX_NFLAVORS - 1)
                     continue; /* universal ordered separately below */
                 if (!rel[0]) continue;
                 if (sscanf(rel, "%d.%d", &kvmaj, &kvmin) != 2) continue;
@@ -879,7 +834,7 @@ int main(int argc, char **argv)
     }
     if (force_name) {
         norder = 0;
-        for (i = 0; i < 21; i++) {
+        for (i = 0; i < SPX_NFLAVORS; i++) {
             if (!strcmp(flavors[i].name, force_name)) {
                 order[norder++] = i;
                 break;
@@ -904,16 +859,16 @@ int main(int argc, char **argv)
         return 1;
     }
     if (!force_name) {
-        /* Universal first (KPM-grade): one runtime-adapting image for all
-         * of 5.4-6.12; the matrix stays as fallback. Shift right, slot 0. */
+        /* Universal first (KPM-grade): one runtime-adapting image,
+         * matrix fallback after. Shift right, slot 0. */
         int k;
-        for (k = norder; k > 0 && k < 21; k--) {
+        for (k = norder; k > 0 && k < SPX_NFLAVORS; k--) {
             order[k] = order[k - 1];
             force_ok[k] = force_ok[k - 1];
         }
-        if (norder < 21)
+        if (norder < SPX_NFLAVORS)
             norder++;
-        order[0] = 20;
+        order[0] = SPX_NFLAVORS - 1;
         force_ok[0] = 1;
         jlog("select", "universal ordered first, matrix fallback after");
     }
