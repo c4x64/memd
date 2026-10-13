@@ -50,7 +50,7 @@ int memd_build_proto(void)
     int g = memd_net_gen();
     const struct memd_proto_off *o;
     unsigned int obj_size;
-    if (g < 0) {
+    if (g < 0 || g >= MEMD_GEN_N) {
         memd_err("netlayout: unknown kernel generation (no socket)\n");
         return -1;
     }
@@ -76,7 +76,24 @@ int memd_build_proto(void)
  * mm and vma layouts are learned live (memd_learn.c), never trusted
  * from headers. */
 #include <linux/fs.h>
-#if MEMD_GEN_CUR == MEMD_GEN_510
+#if MEMD_GEN_CUR == MEMD_GEN_54
+_Static_assert(offsetof(struct proto, obj_size) == MEMD_P_54_OBJ, "p54 obj");
+_Static_assert(offsetof(struct proto, slab) == MEMD_P_54_SLAB, "p54 slab");
+_Static_assert(offsetof(struct proto, name) == MEMD_P_54_NAME, "p54 name");
+_Static_assert(offsetof(struct proto_ops, release) == MEMD_O_54_REL, "o54 rel");
+_Static_assert(offsetof(struct proto_ops, mmap) == MEMD_O_54_MMAP, "o54 mmap");
+_Static_assert(offsetof(struct net_proto_family, create) == 8, "family create");
+_Static_assert(offsetof(struct socket, state) == 0, "sock state");
+_Static_assert(offsetof(struct socket, type) == 4, "sock type");
+_Static_assert(offsetof(struct socket, sk) == 24, "sock sk");
+_Static_assert(offsetof(struct socket, ops) == 32, "sock ops");
+_Static_assert(offsetof(struct dir_context, pos) == 8, "dctx pos");
+_Static_assert(sizeof(struct dir_context) == 16, "dctx size");
+_Static_assert(offsetof(struct dentry, d_name) == 32, "dentry name");
+_Static_assert(offsetof(struct file, f_path) == 16, "file path");
+_Static_assert(offsetof(struct file, f_op) == 40, "file op");
+_Static_assert(offsetof(struct file_operations, iterate_shared) == 64, "fo iter");
+#elif MEMD_GEN_CUR == MEMD_GEN_510
 _Static_assert(offsetof(struct proto, obj_size) == MEMD_P_510_OBJ, "p510 obj");
 _Static_assert(offsetof(struct proto, slab) == MEMD_P_510_SLAB, "p510 slab");
 _Static_assert(offsetof(struct proto, name) == MEMD_P_510_NAME, "p510 name");

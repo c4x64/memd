@@ -149,7 +149,7 @@ int memd_build_ops(void)
  {
     int g = memd_net_gen();
     const struct memd_ops_off *o;
-    if (g < 0)
+    if (g < 0 || g >= MEMD_GEN_N)
         return -1;
     o = &memd_ops_offs[g];
     memset(memd_ops_buf, 0, sizeof(memd_ops_buf));

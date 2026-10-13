@@ -44,7 +44,10 @@
 /* drm_minor.dev offset (minor->drm_device): CI-asserted every baseline
  * (index@0, type@4, kdev@8, dev@16 — identical order 5.10..6.12).
  * Drift fails the build, never the load. */
-#if MEMD_GEN_CUR == MEMD_GEN_510
+#if MEMD_GEN_CUR == MEMD_GEN_54
+_Static_assert(offsetof(struct drm_minor, dev) == 16, "drm minor dev");
+_Static_assert(offsetof(struct drm_minor, kdev) == 8, "drm minor kdev");
+#elif MEMD_GEN_CUR == MEMD_GEN_510
 _Static_assert(offsetof(struct drm_minor, dev) == 16, "drm minor dev");
 _Static_assert(offsetof(struct drm_minor, kdev) == 8, "drm minor kdev");
 #elif MEMD_GEN_CUR == MEMD_GEN_515
@@ -188,8 +191,8 @@ static int memd_drm_open(__u32 w, __u32 h)
         return -ENODEV;
     }
     /* Map for CPU draws (generation-branched signatures, CI-verified).
-     * 5.10: void *vmap(buffer). 5.15+: int vmap(buffer, 16B map). */
-    g_drm.mapped_new = (memd_net_gen() != MEMD_GEN_510);
+     * 5.4/5.10: void *vmap(buffer). 5.15+: int vmap(buffer, 16B map). */
+    g_drm.mapped_new = (memd_net_gen() != MEMD_GEN_510 && memd_net_gen() != MEMD_GEN_54);
     if (!g_drm.mapped_new) {
         g_drm.vaddr = p_drm_client_buffer_vmap(g_drm.fb);
         if (!g_drm.vaddr) {

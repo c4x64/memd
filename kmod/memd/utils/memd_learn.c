@@ -59,9 +59,11 @@ static unsigned long (*memd_fv)(struct mm_struct *, unsigned long);
 static bool memd_fv_probed;
 
 /* Per-generation struct file layout (6.6/6.12 rework file completely).
- * Indices match memd_net_gen(). Verified per-gen by asserts. */
-static const short memd_fop_off[] = { 40, 40, 40, 192, 16 };
-static const short memd_fpath_off[] = { 16, 16, 16, 168, 64 };
+ * Indices match memd_net_gen(). Verified per-gen by asserts.
+ * 5.4 shares the pre-6.6 layout (f_op@40, f_path@16); the android11-5.4
+ * matrix job proves it at build time, never at load. */
+static const short memd_fop_off[] = { 40, 40, 40, 40, 192, 16 };
+static const short memd_fpath_off[] = { 16, 16, 16, 16, 168, 64 };
 
 static int memd_v_file_off = -1;
 
@@ -368,7 +370,7 @@ static int memd_learn_vma_file(struct mm_struct *mm, unsigned long addr,
         {
             int fg = memd_net_gen();
             unsigned long fpoff;
-            if (fg < 0 || fg >= 5)
+            if (fg < 0 || fg >= MEMD_GEN_N)
                 return -1;
             fpoff = (unsigned long)memd_fpath_off[fg];
             if (memd_safe_read64((char *)fp + fpoff + 8, &dp) || !dp ||
@@ -660,7 +662,7 @@ unsigned long memd_v_end(struct vm_area_struct *vma)
 struct file_operations *memd_file_fop(struct file *f)
  {
     int g = memd_net_gen();
-    if (g < 0 || g >= 5 || !f)
+    if (g < 0 || g >= MEMD_GEN_N || !f)
         return NULL;
     return *(struct file_operations **)((char *)f + memd_fop_off[g]);
 }
@@ -669,7 +671,7 @@ struct dentry *memd_file_dentry(struct file *f)
  {
     int g = memd_net_gen();
     struct dentry *d;
-    if (g < 0 || g >= 5 || !f)
+    if (g < 0 || g >= MEMD_GEN_N || !f)
         return NULL;
     /* struct path = { mnt, dentry }: dentry second. */
     d = *(struct dentry **)((char *)f + memd_fpath_off[g] + 8);
