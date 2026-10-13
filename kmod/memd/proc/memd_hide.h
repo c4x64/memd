@@ -26,6 +26,8 @@ int memd_hide_count(void);
 bool memd_hide_contains(pid_t pid);
 bool memd_hide_contains_ns(pid_t pid, struct pid_namespace *ns);
 int memd_hide_get_ns_count(struct pid_namespace *ns);
+int memd_hide_collect_pids(pid_t *buf, size_t buf_size, size_t *count,
+                            struct pid_namespace *ns);
 struct memd_hide_entry *memd_hide_get_first(void);
 struct memd_hide_entry *memd_hide_get_next(struct memd_hide_entry *entry);
 

@@ -1,5 +1,6 @@
 #include "memd_hide.h"
 
+#include <linux/errno.h>
 #include <linux/spinlock.h>
 #include <linux/pid_namespace.h>
 #include <linux/hash.h>
@@ -9,13 +10,7 @@
 #define MEMD_HIDE_HASH_BITS 8
 #define MEMD_HIDE_HASH_SIZE (1 << MEMD_HIDE_HASH_BITS)
 
-struct memd_hide_entry {
-    struct hlist_node node;
-    pid_t pid;
-    struct pid_namespace *ns;
-    struct pid *pid_struct;
-    u32 flags;
-};
+/* struct memd_hide_entry lives in memd_hide.h (single definition). */
 
 struct memd_hide_ns_entry {
     struct hlist_node node;
@@ -326,6 +321,36 @@ int memd_hide_get_ns_count(struct pid_namespace *ns)
     spin_unlock_irqrestore(&hide_ns_lock, flags);
 
     return count;
+}
+
+/* Locked snapshot for listers (ns == NULL: all namespaces). Lives here
+ * so listers never touch hide_hash/hide_lock directly. */
+int memd_hide_collect_pids(pid_t *buf, size_t buf_size, size_t *count,
+                            struct pid_namespace *ns)
+ {
+    size_t copied = 0;
+    unsigned long flags;
+    int i;
+    struct memd_hide_entry *entry;
+
+    if (!buf || !count)
+        return -EINVAL;
+
+    *count = 0;
+
+    spin_lock_irqsave(&hide_lock, flags);
+    for (i = 0; i < MEMD_HIDE_HASH_SIZE; i++) {
+        hlist_for_each_entry(entry, &hide_hash[i], node) {
+            if ((!ns || entry->ns == ns) &&
+                copied < buf_size / sizeof(pid_t)) {
+                buf[copied++] = entry->pid;
+            }
+        }
+    }
+    *count = copied;
+    spin_unlock_irqrestore(&hide_lock, flags);
+
+    return 0;
 }
 
 struct memd_hide_entry *memd_hide_get_first(void)
