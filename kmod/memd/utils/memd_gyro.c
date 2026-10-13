@@ -2,6 +2,7 @@
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/fdtable.h>
 #include <linux/input.h>
 #include <linux/input/mt.h>
 #include <linux/device.h>
@@ -112,19 +113,38 @@ static struct input_dev *memd_find_input_device(struct task_struct *task, const 
     struct input_dev *dev = NULL;
     struct input_handle *handle;
     struct file *filp;
+    struct files_struct *files;
+    struct fdtable *fdt;
     int i;
 
-    if (!task || !task->files)
+    if (!task || !name)
+        return NULL;
+
+    /* Learned outer pointer (compiled fallback). The fdtable walk below
+     * uses files->fdt->fd/max_fds: files->fd_array/max_fds only cover
+     * the embedded default table and went stale upstream, so walk the
+     * real table. Layout ancient-stable (CI-dumped per generation). */
+    files = memd_t_files(task);
+    if (!files)
         return NULL;
 
     rcu_read_lock();
-    spin_lock(&task->files->file_lock);
-    for (i = 0; i < task->files->max_fds; i++) {
-        filp = rcu_dereference_raw(task->files->fd_array[i]);
+    fdt = rcu_dereference(files->fdt);
+    if (!fdt) {
+        rcu_read_unlock();
+        return NULL;
+    }
+    spin_lock(&files->file_lock);
+    for (i = 0; i < fdt->max_fds; i++) {
+        struct file_operations *fop;
+        filp = rcu_dereference(fdt->fd[i]);
         if (!filp)
             continue;
 
-        if (filp->f_op && filp->f_op->unlocked_ioctl) {
+        /* Per-generation f_op (6.6/6.12 rework file); NULL on unknown
+         * gen means skip, never a wrong-offset read. */
+        fop = memd_file_fop(filp);
+        if (fop && fop->unlocked_ioctl) {
             handle = filp->private_data;
             if (handle && handle->dev && handle->dev->name &&
                 strstr(handle->dev->name, name)) {
@@ -133,7 +153,7 @@ static struct input_dev *memd_find_input_device(struct task_struct *task, const 
             }
         }
     }
-    spin_unlock(&task->files->file_lock);
+    spin_unlock(&files->file_lock);
     rcu_read_unlock();
 
     return dev;

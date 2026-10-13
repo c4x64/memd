@@ -157,6 +157,10 @@ jobs:
               grep -n "iterate_shared;" "$HDR/include/linux/fs.h" | head -3
               echo "=== fs_struct def header ($IMG) ==="
               grep -rln "^struct fs_struct {" "$HDR/include/" 2>/dev/null | head -3 || echo "fs_struct def not found ($IMG)"
+              echo "=== struct files_struct ($IMG) ==="
+              grep -rn -A22 "^struct files_struct {" "$HDR/include/linux/" 2>/dev/null | head -28 || echo "files_struct not found ($IMG)"
+              echo "=== struct fdtable ($IMG) ==="
+              grep -rn -A12 "^struct fdtable {" "$HDR/include/linux/" 2>/dev/null | head -16 || echo "fdtable not found ($IMG)"
               break
             fi
           done

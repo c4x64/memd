@@ -3,6 +3,8 @@
 
 #include <linux/types.h>
 
+struct task_struct;
+
 #define MEMD_GYRO_AXIS_X 0
 #define MEMD_GYRO_AXIS_Y 1
 #define MEMD_GYRO_AXIS_Z 2
