@@ -267,8 +267,8 @@ static int walk_pte_level_ctx(pmd_t *pmd, unsigned long addr, unsigned long end,
 
             if (ctx->flags & PAGE_WALK_TYPE) {
                 bool is_file = false;
-                struct vm_area_struct *vma = find_vma(ctx->mm, current_addr);
-                if (vma && vma->vm_file)
+                struct vm_area_struct *vma = memd_find_vma(ctx->mm, current_addr);
+                if (vma && memd_v_file(vma))
                     is_file = true;
                 if (ctx->stats) {
                     if (is_file)

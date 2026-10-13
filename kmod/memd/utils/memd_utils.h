@@ -63,6 +63,11 @@ int memd_pfn_ok(unsigned long pfn);
 
 struct task_struct* get_target_task(pid_t pid);
 
+/* find_vma without the import: name differs by generation (find_vma vs
+ * __find_vma), so resolve both at runtime. Fail-soft NULL when neither
+ * resolves (callers treat as "no vma"). */
+struct vm_area_struct* memd_find_vma(struct mm_struct* mm, unsigned long addr);
+
 void compare_pt_regs(struct pt_regs* regs1, struct pt_regs* regs2);
 void compare_task_struct(struct task_struct* task1, struct task_struct* task2);
 

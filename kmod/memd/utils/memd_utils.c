@@ -261,6 +261,25 @@ struct task_struct* get_target_task(pid_t pid) {
     return task;
 }
 
+struct vm_area_struct* memd_find_vma(struct mm_struct* mm, unsigned long addr) {
+    static struct vm_area_struct* (*vma_find)(struct mm_struct*, unsigned long) = NULL;
+    static bool vma_probed = false;
+    if (!mm) {
+        return NULL;
+    }
+    if (!vma_probed) {
+        vma_probed = true;
+        vma_find = (void*)kallsyms_lookup_name_ex("find_vma");
+        if (!vma_find) {
+            vma_find = (void*)kallsyms_lookup_name_ex("__find_vma");
+        }
+    }
+    if (!vma_find) {
+        return NULL;
+    }
+    return vma_find(mm, addr);
+}
+
 void compare_pt_regs(struct pt_regs* regs1, struct pt_regs* regs2) {
 #if CONFIG_COMPARE_PT_REGS == 1
     memd_info("==> Comparing pt_regs:\n");
@@ -854,23 +873,10 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
     /* find_vma() is stable + exported on 5.10 through 6.12 (list walk
      * below, maple walk above): mm->mmap / vma_iterator would pin the
      * image to one side of 6.1. The name differs by generation
-     * (find_vma vs __find_vma): resolve both at runtime. */
+     * (find_vma vs __find_vma): resolved at runtime via memd_find_vma()
+     * (fail-soft NULL when neither resolves: loop below just ends). */
     {
-        static struct vm_area_struct *(*vma_find)(struct mm_struct *,
-                                                  unsigned long) = NULL;
-        static bool vma_probed = false;
-        if (!vma_probed) {
-            vma_probed = true;
-            vma_find = (void *)kallsyms_lookup_name_ex("find_vma");
-            if (!vma_find)
-                vma_find = (void *)kallsyms_lookup_name_ex("__find_vma");
-        }
-        if (!vma_find) {
-            /* no mmap_lock: universal image (offset varies); mm pinned + fail-closed walk */
-            mmput(mm);
-            return 0;
-        }
-        for (addr = 0; (vma = vma_find(mm, addr)) != NULL;
+        for (addr = 0; (vma = memd_find_vma(mm, addr)) != NULL;
              addr = memd_v_end(vma)) {
             if (addr >= memd_v_end(vma))
                 break; /* wrapped or stuck: never spin */
