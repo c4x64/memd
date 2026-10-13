@@ -125,6 +125,7 @@ def generate_matrix():
         
         # Add debug variant for all major stable releases
         if kmi in [
+            "android11-5.4",
             "android13-5.10", "android13-5.15",
             "android14-5.15", "android14-6.1",
             "android15-6.1", "android15-6.6",

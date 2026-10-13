@@ -41,6 +41,50 @@ static const char *memd_wanted[] = {
     "max_pfn",
     "find_vma",
     "__find_vma",
+    /* Page table allocation (ioctl/memd_ioctl.c) */
+    "__pmd_alloc",
+    "__pte_alloc",
+    /* CFI bypass symbols (utils/memd_utils.c) */
+    "__kcfi_check",
+    "kcfi_typeid",
+    "kcfi_verify",
+    "kcfi_check_fail",
+    "kcfi_diag",
+    /* PAN/UAO symbols (utils/memd_utils.c) */
+    "__uaccess_begin_pan",
+    "__uaccess_end_pan",
+    "__uaccess_begin_uao",
+    "__uaccess_end_uao",
+    "user_access_begin",
+    "user_access_end",
+    /* PAC symbols (utils/memd_utils.c) */
+    "__pacia_el0",
+    "__pacib_el0",
+    "__pacda_el0",
+    "__pacdb_el0",
+    "pac_generic",
+    "strip_pac",
+    /* KPTI symbols (utils/memd_utils.c) */
+    "kpti_init",
+    "kpti_enable",
+    "kpti_disable",
+    "kpti_isolate_kernel",
+    "kpti_unmap_user",
+    "swapper_pg_dir",
+    /* MTE symbols (utils/memd_utils.c) */
+    "mte_check_sync_fault",
+    "mte_check_async_fault",
+    "mte_set_tag",
+    "mte_exclude_range",
+    /* BTI symbols (utils/memd_utils.c) */
+    "bti_exception",
+    "bti_pad_check",
+    /* Credential override symbols (utils/memd_utils.c) */
+    "override_creds",
+    "revert_creds",
+    /* Commented-out but reserved for future use (ioctl/memd_ioctl.c) */
+    "wake_up_new_task",
+    "copy_process",
 };
 
 #define MEMD_NWANT (sizeof(memd_wanted) / sizeof(memd_wanted[0]))

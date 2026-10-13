@@ -25,17 +25,20 @@
 #include <linux/version.h>
 
 /* Generation index by (major, minor). */
-#define MEMD_GEN_510 0
-#define MEMD_GEN_515 1
-#define MEMD_GEN_61  2
-#define MEMD_GEN_66  3
-#define MEMD_GEN_612 4
-#define MEMD_GEN_N 5
+#define MEMD_GEN_54   0
+#define MEMD_GEN_510  1
+#define MEMD_GEN_515  2
+#define MEMD_GEN_61   3
+#define MEMD_GEN_66   4
+#define MEMD_GEN_612  5
+#define MEMD_GEN_N    6
 
 /* Current compile-time generation (for static asserts only). */
 #define MEMD_MAJ (((LINUX_VERSION_CODE) >> 16) & 0xff)
 #define MEMD_MIN (((LINUX_VERSION_CODE) >> 8) & 0xff)
-#if MEMD_MAJ == 5 && MEMD_MIN == 10
+#if MEMD_MAJ == 5 && MEMD_MIN == 4
+#define MEMD_GEN_CUR MEMD_GEN_54
+#elif MEMD_MAJ == 5 && MEMD_MIN == 10
 #define MEMD_GEN_CUR MEMD_GEN_510
 #elif MEMD_MAJ == 5 && MEMD_MIN == 15
 #define MEMD_GEN_CUR MEMD_GEN_515
@@ -51,6 +54,11 @@
 
 /* struct proto field offsets per generation. Owner is a reserved hole
  * on 5.10 (MEMD_P_510_HAS_OWNER 0): do not write it there. */
+#define MEMD_P_54_NAME 344
+#define MEMD_P_54_HAS_OWNER 1
+#define MEMD_P_54_OWNER 336
+#define MEMD_P_54_OBJ 288
+#define MEMD_P_54_SLAB 280
 #define MEMD_P_510_NAME 360
 #define MEMD_P_510_HAS_OWNER 1
 #define MEMD_P_510_OWNER 352
@@ -79,6 +87,22 @@
 
 /* struct proto_ops callback slots per generation (owner unwritten on
  * 5.10: reserved hole). family is 0 everywhere (asserted). */
+#define MEMD_O_54_REL 16
+#define MEMD_O_54_BIND 24
+#define MEMD_O_54_CONN 32
+#define MEMD_O_54_PAIR 40
+#define MEMD_O_54_ACCEPT 48
+#define MEMD_O_54_GETNAME 56
+#define MEMD_O_54_POLL 64
+#define MEMD_O_54_IOCTL 72
+#define MEMD_O_54_LISTEN 96
+#define MEMD_O_54_SHUT 104
+#define MEMD_O_54_SETOPT 112
+#define MEMD_O_54_GETOPT 120
+#define MEMD_O_54_SEND 136
+#define MEMD_O_54_RECV 144
+#define MEMD_O_54_MMAP 152
+#define MEMD_O_54_OWNER 8
 #define MEMD_O_510_REL 16
 #define MEMD_O_510_BIND 24
 #define MEMD_O_510_CONN 32
@@ -199,6 +223,7 @@ struct memd_ops_off {
       MEMD_O_##sfx##_OWNER }
 
 static const struct memd_proto_off memd_proto_offs[MEMD_GEN_N] = {
+    MEMD_MKPROTO(54),
     MEMD_MKPROTO(510),
     MEMD_MKPROTO(515),
     MEMD_MKPROTO(61),
@@ -207,6 +232,7 @@ static const struct memd_proto_off memd_proto_offs[MEMD_GEN_N] = {
 };
 
 static const struct memd_ops_off memd_ops_offs[MEMD_GEN_N] = {
+    MEMD_MKOPS(54),
     MEMD_MKOPS(510),
     MEMD_MKOPS(515),
     MEMD_MKOPS(61),

@@ -80,7 +80,9 @@ int memd_net_gen(void)
     }
     if (i >= 64 || !rel[i])
         return gen;
-    if (maj == 5 && min == 10)
+    if (maj == 5 && min == 4)
+        gen = MEMD_GEN_54;
+    else if (maj == 5 && min == 10)
         gen = MEMD_GEN_510;
     else if (maj == 5 && min == 15)
         gen = MEMD_GEN_515;
