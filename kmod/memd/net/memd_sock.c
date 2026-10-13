@@ -97,7 +97,7 @@ static int memd_recvmsg(struct socket* sock, struct msghdr* m, size_t len, int f
 static int memd_sendmsg(struct socket* sock, struct msghdr* m, size_t len) { return -EOPNOTSUPP; }
 
 static int memd_socketpair(struct socket *sock1, struct socket *sock2)
-{
+ {
 	return -EOPNOTSUPP;
 }
 
@@ -107,22 +107,22 @@ static int memd_socketpair(struct socket *sock1, struct socket *sock2)
  * Stored as a raw pointer (no C-level conversion involved). */
 static int memd_accept(struct socket *sock, struct socket *newsock, int flags,
 		   bool kern)
-{
+ {
 	return -EOPNOTSUPP;
 }
 
 static int memd_listen(struct socket *sock, int backlog)
-{
+ {
 	return -EOPNOTSUPP;
 }
 
 static int memd_shutdown(struct socket *sock, int how)
-{
+ {
 	return -EOPNOTSUPP;
 }
 
 static int memd_mmap(struct file *file, struct socket *sock, struct vm_area_struct *vma)
-{
+ {
 	/* Mirror missing mmap method error code */
 	return -ENODEV;
 }
@@ -135,18 +135,18 @@ static int memd_mmap(struct file *file, struct socket *sock, struct vm_area_stru
 static unsigned char memd_ops_buf[MEMD_OPS_BUF];
 
 struct proto_ops *memd_ops_ptr(void)
-{
+ {
     return (struct proto_ops *)memd_ops_buf;
 }
 
 static void memd_put64(int off, unsigned long v)
-{
+ {
     unsigned long x = v;
     memcpy(memd_ops_buf + off, &x, 8);
 }
 
 int memd_build_ops(void)
-{
+ {
     int g = memd_net_gen();
     const struct memd_ops_off *o;
     if (g < 0)
@@ -174,7 +174,7 @@ int memd_build_ops(void)
 }
 
 void memd_ops_set_family(int family)
-{
+ {
     int f = family;
     memcpy(memd_ops_buf, &f, 4);
 }

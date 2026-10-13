@@ -74,7 +74,7 @@ struct memd_winmap {
 
 static const struct memd_winmap memd_winmaps[] = {
     {
-        .compat = "samsung,exynos8895-decon",
+        .compat = "samsung, exynos8895-decon",
         .rev_off = 0x0,
         .rev_expect = 0x0,
         .wincon_off = 0x0,
@@ -88,7 +88,7 @@ static const struct memd_winmap memd_winmaps[] = {
         .win_disable_bit = 0,
     },
     {
-        .compat = "samsung,exynos9810-decon",
+        .compat = "samsung, exynos9810-decon",
         .rev_off = 0x0,
         .rev_expect = 0x0,
         .wincon_off = 0x0,
@@ -102,7 +102,7 @@ static const struct memd_winmap memd_winmaps[] = {
         .win_disable_bit = 0,
     },
     {
-        .compat = "samsung,exynos9820-decon",
+        .compat = "samsung, exynos9820-decon",
         .rev_off = 0x0,
         .rev_expect = 0x0,
         .wincon_off = 0x0,
@@ -122,7 +122,7 @@ static const struct memd_winmap memd_winmaps[] = {
 /* Full probe with hazard ordering. Returns 0 with *map set (never
  * today), negative errno otherwise. Retains nothing on any path. */
 static int memd_decon_probe(const struct memd_winmap **map_out)
-{
+ {
     struct device_node *np = NULL;
     struct platform_device *pdev = NULL;
     struct resource res;
@@ -135,7 +135,7 @@ static int memd_decon_probe(const struct memd_winmap **map_out)
     bool claimed = false;
 
     *map_out = NULL;
-    np = of_find_compatible_node(NULL, NULL, "samsung,exynos-decon");
+    np = of_find_compatible_node(NULL, NULL, "samsung, exynos-decon");
     if (!np)
         return -ENODEV;
     {
@@ -253,7 +253,7 @@ out_put:
 }
 
 static int memd_decon_open(__u32 w, __u32 h)
-{
+ {
     const struct memd_winmap *map = NULL;
     int rc;
     (void)w;
@@ -273,13 +273,13 @@ static int memd_decon_open(__u32 w, __u32 h)
 }
 
 static void memd_decon_close(void)
-{
+ {
     g_decon.last_errno = 0;
 }
 
 static int memd_decon_present(const __u32 *fb, __u32 w, __u32 h,
                               const struct memd_dirty *dirty)
-{
+ {
     /* Probe-only: rasterize only, never display (no map, no plane). */
     (void)fb;
     (void)w;
@@ -289,12 +289,12 @@ static int memd_decon_present(const __u32 *fb, __u32 w, __u32 h,
 }
 
 static int memd_decon_active(void)
-{
+ {
     return 0;
 }
 
 static void memd_decon_status(__u32 *w, __u32 *h, __u32 *err)
-{
+ {
     if (w)
         *w = 0;
     if (h)
@@ -315,23 +315,23 @@ const struct memd_disp_backend memd_be_exynos = {
 
 /* Entry points (ioctl layer calls these; signatures unchanged). */
 int memd_disp_install(__u32 backend, __u32 width, __u32 height)
-{
+ {
     return memd_core_install(backend, width, height);
 }
 
 int memd_disp_uninstall(void)
-{
+ {
     int rc = memd_core_uninstall();
     return rc == -ENODEV ? -ENODEV : rc;
 }
 
 int memd_disp_active(void)
-{
+ {
     return memd_core_active();
 }
 
 int memd_disp_status(struct memd_disp_status_cmd *out)
-{
+ {
     __u32 be = 0, w = 0, h = 0, e = 0;
     if (!out)
         return -EINVAL;
@@ -345,6 +345,6 @@ int memd_disp_status(struct memd_disp_status_cmd *out)
 }
 
 int memd_disp_frame(const struct memd_disp_op *ops, __u32 count)
-{
+ {
     return memd_core_frame(ops, count);
 }

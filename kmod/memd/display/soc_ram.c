@@ -24,7 +24,7 @@ static struct {
 } g_ram;
 
 static int memd_ram_open(__u32 w, __u32 h)
-{
+ {
     size_t px = 0, bytes = 0;
     if (!w || !h)
         return -EINVAL;
@@ -41,7 +41,7 @@ static int memd_ram_open(__u32 w, __u32 h)
 }
 
 static void memd_ram_close(void)
-{
+ {
     if (g_ram.fb)
         vfree(g_ram.fb);
     g_ram.fb = NULL;
@@ -50,7 +50,7 @@ static void memd_ram_close(void)
 
 static int memd_ram_present(const __u32 *fb, __u32 w, __u32 h,
                             const struct memd_dirty *dirty)
-{
+ {
     __u32 y0, y1, y;
     if (!g_ram.fb || !fb || !dirty || !dirty->valid)
         return -ENODEV;
@@ -70,12 +70,12 @@ static int memd_ram_present(const __u32 *fb, __u32 w, __u32 h,
 }
 
 static int memd_ram_active(void)
-{
+ {
     return g_ram.fb ? 1 : 0;
 }
 
 static void memd_ram_status(__u32 *w, __u32 *h, __u32 *err)
-{
+ {
     if (w)
         *w = g_ram.w;
     if (h)

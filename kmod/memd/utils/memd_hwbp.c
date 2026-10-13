@@ -38,7 +38,7 @@ static int max_brps, max_wrps;
 static struct notifier_block task_exit_nb;
 
 static int hwbp_task_exit_notify(struct notifier_block *nb, unsigned long action, void *data)
-{
+ {
     struct task_struct *task = data;
     int i;
     unsigned long flags;
@@ -70,7 +70,7 @@ static int hwbp_task_exit_notify(struct notifier_block *nb, unsigned long action
 }
 
 static int get_debug_monitor_state(struct task_struct *task, struct debug_monitor_state **out)
-{
+ {
     if (!task)
         return -EINVAL;
 
@@ -83,7 +83,7 @@ static int get_debug_monitor_state(struct task_struct *task, struct debug_monito
 }
 
 static void hwbp_context_save(struct task_struct *task)
-{
+ {
     struct debug_monitor_state *dms = task->thread.debug_monitors;
     int i;
 
@@ -121,7 +121,7 @@ static void hwbp_context_save(struct task_struct *task)
 }
 
 static void hwbp_context_restore(struct task_struct *task)
-{
+ {
     struct debug_monitor_state *dms = task->thread.debug_monitors;
     int i;
 
@@ -158,7 +158,7 @@ static void hwbp_context_restore(struct task_struct *task)
 }
 
 int memd_hwbp_init(void)
-{
+ {
     u64 mdscr_el1, id_aa64dfr0_el1;
 
     hwbp_supported = false;
@@ -192,7 +192,7 @@ int memd_hwbp_init(void)
 }
 
 void memd_hwbp_cleanup(void)
-{
+ {
     int i;
     unsigned long flags;
 
@@ -221,7 +221,7 @@ void memd_hwbp_cleanup(void)
 }
 
 int memd_hwbp_get_info(struct memd_hwbp_info_cmd *info)
-{
+ {
     if (!hwbp_supported) {
         info->num_brps = 0;
         info->num_wrps = 0;
@@ -239,7 +239,7 @@ int memd_hwbp_get_info(struct memd_hwbp_info_cmd *info)
 }
 
 static int hwbp_encode_len(u32 len)
-{
+ {
     switch (len) {
         case 1: return 0;
         case 2: return 1;
@@ -250,7 +250,7 @@ static int hwbp_encode_len(u32 len)
 }
 
 static int hwbp_encode_type(u32 type, u32 len_enc, u64 *dbgwcr, u64 *dbgbcr)
-{
+ {
     *dbgwcr = 0;
     *dbgbcr = 0;
 
@@ -273,7 +273,7 @@ static int hwbp_encode_type(u32 type, u32 len_enc, u64 *dbgwcr, u64 *dbgbcr)
 }
 
 int memd_hwbp_set(struct task_struct *task, struct memd_hwbp_set_cmd *cmd)
-{
+ {
     int i, slot = -1;
     unsigned long flags;
     u64 dbgwcr, dbgbcr;
@@ -355,7 +355,7 @@ int memd_hwbp_set(struct task_struct *task, struct memd_hwbp_set_cmd *cmd)
 }
 
 int memd_hwbp_remove(struct task_struct *task, u32 hwbp_id)
-{
+ {
     int slot = hwbp_id - 1;
     unsigned long flags;
     struct debug_monitor_state *dms;
@@ -399,7 +399,7 @@ int memd_hwbp_remove(struct task_struct *task, u32 hwbp_id)
 }
 
 int memd_hwbp_list(struct task_struct *task, struct memd_hwbp_list_cmd *cmd)
-{
+ {
     int i, count = 0;
     unsigned long flags;
     struct debug_monitor_state *dms;

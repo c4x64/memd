@@ -30,12 +30,12 @@ static DEFINE_SPINLOCK(hide_ns_lock);
 static int hide_total_count = 0;
 
 static inline unsigned int hide_hash_fn(pid_t pid, struct pid_namespace *ns)
-{
+ {
     return hash_long((unsigned long)pid ^ (unsigned long)ns, MEMD_HIDE_HASH_BITS);
 }
 
 static struct memd_hide_entry *hide_find_entry(pid_t pid, struct pid_namespace *ns)
-{
+ {
     struct memd_hide_entry *entry;
     unsigned int hash = hide_hash_fn(pid, ns);
 
@@ -47,7 +47,7 @@ static struct memd_hide_entry *hide_find_entry(pid_t pid, struct pid_namespace *
 }
 
 static struct memd_hide_ns_entry *hide_find_ns(struct pid_namespace *ns)
-{
+ {
     struct memd_hide_ns_entry *entry;
     unsigned int hash = hash_long((unsigned long)ns, MEMD_HIDE_HASH_BITS);
 
@@ -59,7 +59,7 @@ static struct memd_hide_ns_entry *hide_find_ns(struct pid_namespace *ns)
 }
 
 int memd_hide_add(pid_t pid)
-{
+ {
     struct memd_hide_entry *entry;
     struct memd_hide_ns_entry *ns_entry;
     struct pid_namespace *ns;
@@ -132,7 +132,7 @@ int memd_hide_add(pid_t pid)
 }
 
 int memd_hide_add_ns(pid_t pid, struct pid_namespace *ns)
-{
+ {
     struct memd_hide_entry *entry;
     unsigned long flags;
     unsigned int hash;
@@ -172,7 +172,7 @@ int memd_hide_add_ns(pid_t pid, struct pid_namespace *ns)
 }
 
 int memd_hide_del(pid_t pid)
-{
+ {
     struct memd_hide_entry *entry;
     struct pid_namespace *ns;
     unsigned long flags;
@@ -228,7 +228,7 @@ int memd_hide_del(pid_t pid)
 }
 
 void memd_hide_clear(void)
-{
+ {
     struct memd_hide_entry *entry, *tmp;
     struct memd_hide_ns_entry *ns_entry, *ns_tmp;
     unsigned long flags;
@@ -259,7 +259,7 @@ void memd_hide_clear(void)
 }
 
 int memd_hide_count(void)
-{
+ {
     int n;
     unsigned long flags;
 
@@ -270,7 +270,7 @@ int memd_hide_count(void)
 }
 
 bool memd_hide_contains(pid_t pid)
-{
+ {
     struct pid_namespace *ns;
     bool found = false;
     unsigned long flags;
@@ -296,7 +296,7 @@ bool memd_hide_contains(pid_t pid)
 }
 
 bool memd_hide_contains_ns(pid_t pid, struct pid_namespace *ns)
-{
+ {
     bool found = false;
     unsigned long flags;
 
@@ -311,7 +311,7 @@ bool memd_hide_contains_ns(pid_t pid, struct pid_namespace *ns)
 }
 
 int memd_hide_get_ns_count(struct pid_namespace *ns)
-{
+ {
     struct memd_hide_ns_entry *entry;
     int count = 0;
     unsigned long flags;
@@ -329,7 +329,7 @@ int memd_hide_get_ns_count(struct pid_namespace *ns)
 }
 
 struct memd_hide_entry *memd_hide_get_first(void)
-{
+ {
     int i;
     struct memd_hide_entry *entry;
 
@@ -342,7 +342,7 @@ struct memd_hide_entry *memd_hide_get_first(void)
 }
 
 struct memd_hide_entry *memd_hide_get_next(struct memd_hide_entry *entry)
-{
+ {
     struct memd_hide_entry *next;
     unsigned int hash;
 

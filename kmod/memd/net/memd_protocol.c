@@ -41,12 +41,12 @@ static LIST_HEAD(g_sock_list);
 static unsigned char memd_proto_buf[MEMD_PROTO_BUF];
 
 struct proto *memd_proto_ptr(void)
-{
+ {
     return (struct proto *)memd_proto_buf;
 }
 
 int memd_build_proto(void)
-{
+ {
     int g = memd_net_gen();
     const struct memd_proto_off *o;
     unsigned int obj_size;
@@ -256,7 +256,7 @@ static int memd_sock_create(struct net* net, struct socket* sock, int protocol, 
 }
 
 static void memd_sock_destruct(struct sock *sk)
-{
+ {
     struct memd_sock *ws = (struct memd_sock *)sk;
 
     spin_lock(&g_sock_list_lock);
@@ -294,7 +294,7 @@ static struct proto memd_proto_template = {
 };
 
 int memd_proto_init(void)
-{
+ {
     int err;
     if (memd_build_proto() || memd_build_ops())
         return -ENODEV;
@@ -330,7 +330,7 @@ out:
 }
 
 void memd_proto_cleanup(void)
-{
+ {
     struct memd_sock *ws, *tmp;
 
     sock_unregister(free_family);
@@ -346,7 +346,7 @@ void memd_proto_cleanup(void)
 }
 
 int memd_get_sock_stats(struct memd_sock_stat *stats)
-{
+ {
     if (!stats)
         return -EINVAL;
 
@@ -360,7 +360,7 @@ int memd_get_sock_stats(struct memd_sock_stat *stats)
 }
 
 int memd_get_sock_count(void)
-{
+ {
     int count = 0;
     struct memd_sock *ws;
 

@@ -215,7 +215,7 @@ void traverse_page_tables(struct mm_struct* mm, struct page_walk_stats* stats) {
 
 static int walk_pte_level_ctx(pmd_t *pmd, unsigned long addr, unsigned long end,
                                struct page_walk_context *ctx)
-{
+ {
     pte_t *ptep;
     unsigned long pte_end;
     int ret = 0;
@@ -301,7 +301,7 @@ out:
 
 static int walk_pmd_level_ctx(pud_t *pud, unsigned long addr, unsigned long end,
                                struct page_walk_context *ctx)
-{
+ {
     pmd_t *pmd;
     unsigned long next;
     int ret = 0;
@@ -350,7 +350,7 @@ static int walk_pmd_level_ctx(pud_t *pud, unsigned long addr, unsigned long end,
 
 static int walk_pud_level_ctx(p4d_t *p4d, unsigned long addr, unsigned long end,
                                struct page_walk_context *ctx)
-{
+ {
     pud_t *pud;
     unsigned long next;
     int ret = 0;
@@ -399,7 +399,7 @@ static int walk_pud_level_ctx(p4d_t *p4d, unsigned long addr, unsigned long end,
 
 static int walk_p4d_level_ctx(pgd_t *pgd, unsigned long addr, unsigned long end,
                                struct page_walk_context *ctx)
-{
+ {
     p4d_t *p4d;
     unsigned long next;
     int ret = 0;
@@ -426,7 +426,7 @@ static int walk_p4d_level_ctx(pgd_t *pgd, unsigned long addr, unsigned long end,
 
 static int walk_pgd_level_ctx(struct mm_struct *mm, unsigned long start, unsigned long end,
                                struct page_walk_context *ctx)
-{
+ {
     pgd_t *pgd;
     unsigned long addr = start;
     unsigned long next;
@@ -458,7 +458,7 @@ static int walk_pgd_level_ctx(struct mm_struct *mm, unsigned long start, unsigne
 }
 
 int memd_page_walk(struct mm_struct *mm, struct page_walk_context *ctx)
-{
+ {
     if (!mm || !ctx)
         return -EINVAL;
 
@@ -477,7 +477,7 @@ int memd_page_walk(struct mm_struct *mm, struct page_walk_context *ctx)
 }
 
 int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_info *info)
-{
+ {
     pte_t *ptep;
     pmd_t *pmd;
     pud_t *pud;
@@ -553,11 +553,11 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
 int memd_walk_page_range(struct mm_struct *mm, unsigned long start, unsigned long end,
                           int (*callback)(pte_t *pte, unsigned long addr, unsigned long end, void *data),
                           void *data)
-{
+ {
     struct page_walk_context ctx = {
         .mm = mm,
-        .region_start = (unsigned long[]){-1UL},
-        .region_end = (unsigned long[]){-1UL},
+        .region_start = (unsigned long[]) {-1UL},
+        .region_end = (unsigned long[]) {-1UL},
         .pte_callback = callback,
         .data = data,
         .flags = PAGE_WALK_REGIONS,

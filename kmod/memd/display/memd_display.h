@@ -40,9 +40,9 @@ struct memd_disp_install_cmd {
 /* Numeric draw ops. Coordinates are framebuffer pixels. Color is
  * ARGB8888. Glyph is a printable-ASCII index (32..126). */
 #define MEMD_DISP_CLEAR  0  /* color = clear color */
-#define MEMD_DISP_RECT   1  /* x,y,w,h,color */
-#define MEMD_DISP_LINE   2  /* x,y -> w,h endpoints, color */
-#define MEMD_DISP_GLYPH  3  /* glyph index at x,y in color on transparent bg */
+#define MEMD_DISP_RECT   1  /* x, y, w, h, color */
+#define MEMD_DISP_LINE   2  /* x, y -> w, h endpoints, color */
+#define MEMD_DISP_GLYPH  3  /* glyph index at x, y in color on transparent bg */
 #define MEMD_DISP_NOP    4
 
 struct memd_disp_op {

@@ -36,7 +36,7 @@ static DECLARE_WAIT_QUEUE_HEAD(sigforce_worker_wq);
 static atomic_t sigforce_pending_count = ATOMIC_INIT(0);
 
 static int memd_sigforce_worker(void *data)
-{
+ {
     struct sigforce_pending *pending;
 
     while (!kthread_should_stop()) {
@@ -80,7 +80,7 @@ static int memd_sigforce_worker(void *data)
 }
 
 int memd_sigforce_init(void)
-{
+ {
     sigforce_initialized = true;
 
     sigforce_worker_task = kthread_run(memd_sigforce_worker, NULL, "memd_sigforce");
@@ -95,7 +95,7 @@ int memd_sigforce_init(void)
 }
 
 void memd_sigforce_cleanup(void)
-{
+ {
     struct sigforce_pending *pending, *tmp;
 
     if (sigforce_worker_task) {
@@ -116,7 +116,7 @@ void memd_sigforce_cleanup(void)
 }
 
 static int memd_sigforce_deliver_sync(struct task_struct *task, int sig, int force)
-{
+ {
     struct siginfo info;
     unsigned long flags;
     int ret = 0;
@@ -170,7 +170,7 @@ static int memd_sigforce_deliver_sync(struct task_struct *task, int sig, int for
 }
 
 static int memd_sigforce_deliver_async(struct task_struct *task, int sig, int force)
-{
+ {
     struct sigforce_pending *pending;
     struct siginfo info;
     int ret;
@@ -216,7 +216,7 @@ static int memd_sigforce_deliver_async(struct task_struct *task, int sig, int fo
 }
 
 int memd_sigforce_send(struct task_struct *task, int sig, int force)
-{
+ {
     if (!sigforce_initialized)
         return -ENODEV;
 
@@ -224,7 +224,7 @@ int memd_sigforce_send(struct task_struct *task, int sig, int force)
 }
 
 int memd_sigforce_send_async(struct task_struct *task, int sig, int force)
-{
+ {
     if (!sigforce_initialized)
         return -ENODEV;
 
@@ -232,7 +232,7 @@ int memd_sigforce_send_async(struct task_struct *task, int sig, int force)
 }
 
 int memd_sigforce_send_group(struct task_struct *task, int sig, int force)
-{
+ {
     struct task_struct *p;
     int ret = 0;
 

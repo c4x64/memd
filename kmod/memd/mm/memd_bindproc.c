@@ -103,7 +103,7 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
                 return -EINVAL;
             }
 
-            if(pgprot_val(new_prot) != pgprot_val(private_data->prot)) {
+            if (pgprot_val(new_prot) != pgprot_val(private_data->prot)) {
                 /* Clear existing mappings if protection changes */
                 size_t i;
 

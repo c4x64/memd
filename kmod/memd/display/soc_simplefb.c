@@ -36,7 +36,7 @@ static struct {
 } g_sfb;
 
 static int memd_sfb_open(__u32 w, __u32 h)
-{
+ {
     struct device_node *np = NULL;
     const char *fmt = NULL;
     __u32 pw = 0, ph = 0, stride = 0;
@@ -95,7 +95,7 @@ static int memd_sfb_open(__u32 w, __u32 h)
 }
 
 static void memd_sfb_close(void)
-{
+ {
     if (g_sfb.base)
         memunmap(g_sfb.base);
     g_sfb.base = NULL;
@@ -107,7 +107,7 @@ static void memd_sfb_close(void)
 
 static int memd_sfb_present(const __u32 *fb, __u32 w, __u32 h,
                             const struct memd_dirty *dirty)
-{
+ {
     __u32 y0, y1, y;
     if (!g_sfb.base || !fb || !dirty || !dirty->valid)
         return -ENODEV;
@@ -127,12 +127,12 @@ static int memd_sfb_present(const __u32 *fb, __u32 w, __u32 h,
 }
 
 static int memd_sfb_active(void)
-{
+ {
     return g_sfb.base ? 1 : 0;
 }
 
 static void memd_sfb_status(__u32 *w, __u32 *h, __u32 *err)
-{
+ {
     if (w)
         *w = g_sfb.w;
     if (h)

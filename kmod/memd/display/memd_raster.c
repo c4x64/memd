@@ -102,13 +102,13 @@ static const unsigned char memd_font[95][8] = {
 
 static inline void put(__u32 *fb, __u32 w, __u32 h,
                        __u32 x, __u32 y, __u32 c)
-{
+ {
     if (x < w && y < h)
         fb[y * w + x] = c;
 }
 
 void memd_raster_clear(__u32 *fb, __u32 w, __u32 h, __u32 color)
-{
+ {
     __u32 i, n = w * h;
     for (i = 0; i < n; i++)
         fb[i] = color;
@@ -116,7 +116,7 @@ void memd_raster_clear(__u32 *fb, __u32 w, __u32 h, __u32 color)
 
 void memd_raster_rect(__u32 *fb, __u32 w, __u32 h,
                       __u32 x, __u32 y, __u32 rw, __u32 rh, __u32 color)
-{
+ {
     __u32 ix, iy;
     if (!rw || !rh || x >= w || y >= h)
         return;
@@ -131,7 +131,7 @@ void memd_raster_rect(__u32 *fb, __u32 w, __u32 h,
 
 void memd_raster_line(__u32 *fb, __u32 w, __u32 h,
                       __u32 x0, __u32 y0, __u32 x1, __u32 y1, __u32 color)
-{
+ {
     long dx, dy, sx, sy, err, e2, x, y;
     if (!w || !h)
         return;
@@ -161,7 +161,7 @@ void memd_raster_line(__u32 *fb, __u32 w, __u32 h,
 
 void memd_raster_glyph(__u32 *fb, __u32 w, __u32 h,
                        __u32 x, __u32 y, __u32 glyph, __u32 color)
-{
+ {
     unsigned row, col;
     if (glyph < 32 || glyph > 126 || x >= w || y >= h)
         return;
@@ -176,7 +176,7 @@ void memd_raster_glyph(__u32 *fb, __u32 w, __u32 h,
 
 /* Alpha blend a pixel (src over dst) */
 static inline __u32 alpha_blend(__u32 src, __u32 dst)
-{
+ {
     __u8 sa = (src >> 24) & 0xFF;
     __u8 sr = (src >> 16) & 0xFF;
     __u8 sg = (src >> 8) & 0xFF;
@@ -206,7 +206,7 @@ static inline __u32 alpha_blend(__u32 src, __u32 dst)
 
 void memd_raster_composite_layers(__u32 *fb, __u32 w, __u32 h,
                                   struct memd_disp_layer *layers, __u32 layer_count)
-{
+ {
     if (!fb || !layers || layer_count == 0)
         return;
 
@@ -261,7 +261,7 @@ void memd_raster_composite_layers(__u32 *fb, __u32 w, __u32 h,
 void memd_raster_composite_cursor(__u32 *fb, __u32 w, __u32 h,
                                   const __u32 *cursor_fb, __u32 cw, __u32 ch,
                                   __u32 x, __u32 y)
-{
+ {
     if (!fb || !cursor_fb || cw == 0 || ch == 0)
         return;
 
@@ -289,7 +289,7 @@ void memd_raster_composite_cursor(__u32 *fb, __u32 w, __u32 h,
 void memd_raster_apply_gamma(__u32 *fb, __u32 w, __u32 h,
                              const __u32 *lut_r, const __u32 *lut_g, const __u32 *lut_b,
                              __u32 size)
-{
+ {
     if (!fb || !lut_r || !lut_g || !lut_b || size == 0)
         return;
 

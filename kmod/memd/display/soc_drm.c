@@ -93,7 +93,7 @@ static struct {
 } g_drm;
 
 static int memd_drm_match(struct device *dev, const void *data)
-{
+ {
     const char *n;
     (void)data;
     n = dev_name(dev);
@@ -105,12 +105,12 @@ static int memd_drm_match(struct device *dev, const void *data)
 }
 
 static void *memd_drm_resolve(const char *name)
-{
+ {
     return (void *)(uintptr_t)memd_kallsyms(name);
 }
 
 static int memd_drm_open(__u32 w, __u32 h)
-{
+ {
     unsigned long cls_addr;
     struct class *cls = NULL;
     struct device *d = NULL;
@@ -229,7 +229,7 @@ static int memd_drm_open(__u32 w, __u32 h)
 }
 
 static void memd_drm_close(void)
-{
+ {
     if (g_drm.client && p_drm_client_buffer_vunmap && g_drm.fb)
         p_drm_client_buffer_vunmap(g_drm.fb);
     /* NOTE: framebuffer delete API lands with the next forensics pass
@@ -251,7 +251,7 @@ static void memd_drm_close(void)
 
 static int memd_drm_present(const __u32 *fb, __u32 w, __u32 h,
                             const struct memd_dirty *dirty)
-{
+ {
     __u32 y0, y1, y;
     (void)h;
     if (!g_drm.client || !g_drm.vaddr || !fb || !dirty || !dirty->valid)
@@ -276,12 +276,12 @@ static int memd_drm_present(const __u32 *fb, __u32 w, __u32 h,
 }
 
 static int memd_drm_active(void)
-{
+ {
     return g_drm.client ? 1 : 0;
 }
 
 static void memd_drm_status(__u32 *w, __u32 *h, __u32 *err)
-{
+ {
     if (w)
         *w = g_drm.w;
     if (h)

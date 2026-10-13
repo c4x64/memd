@@ -50,7 +50,7 @@ static bool memd_parsed;
 static bool memd_unavailable;
 
 static int memd_want_index(const char *name)
-{
+ {
     unsigned long i;
     for (i = 0; i < MEMD_NWANT; i++) {
         if (!strcmp(name, memd_wanted[i]))
@@ -61,7 +61,7 @@ static int memd_want_index(const char *name)
 
 /* Parse one "addr type name" line. Returns 1 when it filled an entry. */
 static int memd_parse_line(const char *line, size_t len)
-{
+ {
     unsigned long addr = 0;
     size_t i = 0, j;
     int idx;
@@ -111,7 +111,7 @@ static int memd_parse_line(const char *line, size_t len)
 }
 
 static void memd_do_parse(void)
-{
+ {
     struct file *f;
     char *buf;
     loff_t pos = 0;
@@ -179,7 +179,7 @@ static void memd_do_parse(void)
 }
 
 unsigned long memd_kallsyms(const char *name)
-{
+ {
     int idx;
     if (!name)
         return 0;

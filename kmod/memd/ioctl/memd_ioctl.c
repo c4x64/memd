@@ -1121,7 +1121,7 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
 }
 
 int do_hwbp_info(struct socket* sock, void __user* arg)
-{
+ {
     struct memd_hwbp_info_cmd cmd;
     int ret;
     (void)sock;
@@ -1136,7 +1136,7 @@ int do_hwbp_info(struct socket* sock, void __user* arg)
 }
 
 int do_hwbp_set(struct socket* sock, void __user* arg)
-{
+ {
     struct memd_hwbp_set_cmd cmd;
     struct task_struct *task;
     int ret;
@@ -1158,7 +1158,7 @@ int do_hwbp_set(struct socket* sock, void __user* arg)
 }
 
 int do_hwbp_remove(struct socket* sock, void __user* arg)
-{
+ {
     struct memd_hwbp_remove_cmd cmd;
     struct task_struct *task;
     int ret;
@@ -1176,7 +1176,7 @@ int do_hwbp_remove(struct socket* sock, void __user* arg)
 }
 
 int do_hwbp_list(struct socket* sock, void __user* arg)
-{
+ {
     struct memd_hwbp_list_cmd cmd;
     struct task_struct *task;
     int ret;
@@ -1198,7 +1198,7 @@ int do_hwbp_list(struct socket* sock, void __user* arg)
 }
 
 int do_gyro_prepare(struct socket* sock, void __user* arg)
-{
+ {
     struct memd_gyro_prepare_cmd cmd;
     struct task_struct *task;
     int ret;
@@ -1216,7 +1216,7 @@ int do_gyro_prepare(struct socket* sock, void __user* arg)
 }
 
 int do_touch_init(struct socket* sock, void __user* arg)
-{
+ {
     struct memd_touch_init_cmd cmd;
     struct task_struct *task;
     int ret;
@@ -1234,7 +1234,7 @@ int do_touch_init(struct socket* sock, void __user* arg)
 }
 
 int do_touch_inject(struct socket* sock, void __user* arg)
-{
+ {
     struct memd_touch_inject_cmd cmd;
     struct task_struct *task;
     int ret;
@@ -1252,7 +1252,7 @@ int do_touch_inject(struct socket* sock, void __user* arg)
 }
 
 int do_gyro_inject(struct socket* sock, void __user* arg)
-{
+ {
     struct memd_gyro_inject_cmd cmd;
     struct task_struct *task;
     int ret;
@@ -1270,7 +1270,7 @@ int do_gyro_inject(struct socket* sock, void __user* arg)
 }
 
 int do_sigforce(struct socket* sock, void __user* arg)
-{
+ {
     struct memd_sigforce_cmd cmd;
     struct task_struct *task;
     int ret;
@@ -1297,7 +1297,7 @@ int do_sigforce(struct socket* sock, void __user* arg)
 }
 
 int do_gyro_calibrate(struct socket* sock, void __user* arg)
-{
+ {
     struct memd_gyro_calibrate_cmd cmd;
     struct task_struct *task;
     int ret;
@@ -1317,7 +1317,7 @@ int do_gyro_calibrate(struct socket* sock, void __user* arg)
 }
 
 int do_touch_calibrate(struct socket* sock, void __user* arg)
-{
+ {
     struct memd_touch_calibrate_cmd cmd;
     struct task_struct *task;
     int ret;
@@ -1337,7 +1337,7 @@ int do_touch_calibrate(struct socket* sock, void __user* arg)
 }
 
 int do_virtual_input_create(struct socket* sock, void __user* arg)
-{
+ {
     struct memd_virtual_input_cmd cmd;
     struct task_struct *task;
     int ret;

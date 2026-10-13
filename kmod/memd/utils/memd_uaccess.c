@@ -14,7 +14,7 @@
 
 static unsigned long memd_uc_copy(char *dst, const char *src,
                                   unsigned long len, int to_user)
-{
+ {
     unsigned long done = 0;
     if (!len)
         return 0;
@@ -42,12 +42,12 @@ static unsigned long memd_uc_copy(char *dst, const char *src,
 }
 
 unsigned long memd_copy_from_user(void *dst, const void *src, unsigned long len)
-{
+ {
     return memd_uc_copy((char *)dst, (const char *)src, len, 0);
 }
 
 unsigned long memd_copy_to_user(void *dst, const void *src, unsigned long len)
-{
+ {
     return memd_uc_copy((char *)dst, (const char *)src, len, 1);
 }
 
@@ -56,7 +56,7 @@ unsigned long memd_copy_to_user(void *dst, const void *src, unsigned long len)
 static unsigned long memd_task_copy(struct task_struct *t, char *kbuf,
                                     unsigned long uaddr, unsigned long len,
                                     int to_task)
-{
+ {
     unsigned long done = 0;
     if (!t || !kbuf || !len)
         return len;
@@ -82,13 +82,13 @@ static unsigned long memd_task_copy(struct task_struct *t, char *kbuf,
 
 unsigned long memd_copy_from_task(struct task_struct *t, void *dst_kernel,
                                   unsigned long src_user, unsigned long len)
-{
+ {
     return memd_task_copy(t, (char *)dst_kernel, src_user, len, 0);
 }
 
 unsigned long memd_copy_to_task(struct task_struct *t, unsigned long dst_user,
                                 const void *src_kernel, unsigned long len)
-{
+ {
     /* access_process_vm takes non-const buf; our src is kernel-read, safe. */
     return memd_task_copy(t, (char *)src_kernel, dst_user, len, 1);
 }
@@ -97,7 +97,7 @@ unsigned long memd_copy_to_task(struct task_struct *t, unsigned long dst_user,
 
 int memd_copy_from_user_full(void *dst, const void *src, unsigned long len,
                              unsigned long *bytes_copied)
-{
+ {
     unsigned long remaining = memd_copy_from_user(dst, src, len);
     if (bytes_copied)
         *bytes_copied = len - remaining;
@@ -106,7 +106,7 @@ int memd_copy_from_user_full(void *dst, const void *src, unsigned long len,
 
 int memd_copy_to_user_full(void *dst, const void *src, unsigned long len,
                            unsigned long *bytes_copied)
-{
+ {
     unsigned long remaining = memd_copy_to_user(dst, src, len);
     if (bytes_copied)
         *bytes_copied = len - remaining;
@@ -116,7 +116,7 @@ int memd_copy_to_user_full(void *dst, const void *src, unsigned long len,
 int memd_copy_from_task_full(struct task_struct *t, void *dst_kernel,
                              unsigned long src_user, unsigned long len,
                              unsigned long *bytes_copied)
-{
+ {
     unsigned long remaining = memd_copy_from_task(t, dst_kernel, src_user, len);
     if (bytes_copied)
         *bytes_copied = len - remaining;
@@ -126,7 +126,7 @@ int memd_copy_from_task_full(struct task_struct *t, void *dst_kernel,
 int memd_copy_to_task_full(struct task_struct *t, unsigned long dst_user,
                            const void *src_kernel, unsigned long len,
                            unsigned long *bytes_copied)
-{
+ {
     unsigned long remaining = memd_copy_to_task(t, dst_user, src_kernel, len);
     if (bytes_copied)
         *bytes_copied = len - remaining;
@@ -136,7 +136,7 @@ int memd_copy_to_task_full(struct task_struct *t, unsigned long dst_user,
 /* Safe string copying */
 
 int memd_strncpy_from_user(char *dst, const void *src, size_t max_len)
-{
+ {
     if (!dst || !src || max_len == 0)
         return -EINVAL;
 
@@ -155,7 +155,7 @@ int memd_strncpy_from_user(char *dst, const void *src, size_t max_len)
 }
 
 int memd_strncpy_to_user(void *dst, const char *src, size_t max_len)
-{
+ {
     if (!dst || !src || max_len == 0)
         return -EINVAL;
 
@@ -176,7 +176,7 @@ int memd_strncpy_to_user(void *dst, const char *src, size_t max_len)
 /* Memory region validation */
 
 bool memd_uaccess_validate_range(unsigned long addr, unsigned long len)
-{
+ {
     if (len == 0)
         return true;
 
@@ -192,7 +192,7 @@ bool memd_uaccess_validate_range(unsigned long addr, unsigned long len)
 
 bool memd_task_uaccess_validate_range(struct task_struct *t,
                                       unsigned long addr, unsigned long len)
-{
+ {
     if (!t || !t->mm)
         return false;
 
@@ -214,7 +214,7 @@ bool memd_task_uaccess_validate_range(struct task_struct *t,
 int memd_copy_from_user_iovec(void *dst, const struct iovec *iov,
                               unsigned long nr_segs, unsigned long len,
                               unsigned long *bytes_copied)
-{
+ {
     if (!dst || !iov || nr_segs == 0)
         return -EINVAL;
 
@@ -248,7 +248,7 @@ int memd_copy_from_user_iovec(void *dst, const struct iovec *iov,
 int memd_copy_to_user_iovec(void *dst, const struct iovec *iov,
                             unsigned long nr_segs, unsigned long len,
                             unsigned long *bytes_copied)
-{
+ {
     if (!dst || !iov || nr_segs == 0)
         return -EINVAL;
 

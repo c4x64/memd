@@ -15,8 +15,8 @@
  * serving thread itself; stop is kthread_stop (no cross-thread close:
  * accept/recv poll with MSG_DONTWAIT + should_stop checks).
  *
- * Stable APIs only: sock_create_kern / kernel_{bind,listen,accept,
- * sendmsg,recvmsg} / sock_release (ancient, CI-verified 5.10-6.12).
+ * Stable APIs only: sock_create_kern / kernel_ {bind, listen, accept,
+ * sendmsg, recvmsg} / sock_release (ancient, CI-verified 5.10-6.12).
  */
 #include "disp_core.h"
 #include "memd_display.h"
@@ -48,13 +48,13 @@ static const __u8 g_vnc_pixfmt[16] = {
 };
 
 static void memd_vnc_put16(__u8 *p, __u32 v)
-{
+ {
     p[0] = (__u8)(v >> 8);
     p[1] = (__u8)v;
 }
 
 static void memd_vnc_put32(__u8 *p, __u32 v)
-{
+ {
     p[0] = (__u8)(v >> 24);
     p[1] = (__u8)(v >> 16);
     p[2] = (__u8)(v >> 8);
@@ -62,7 +62,7 @@ static void memd_vnc_put32(__u8 *p, __u32 v)
 }
 
 static int memd_vnc_send_all(struct socket *s, const void *buf, size_t len)
-{
+ {
     struct msghdr msg;
     struct kvec vec;
     size_t done = 0;
@@ -84,7 +84,7 @@ static int memd_vnc_send_all(struct socket *s, const void *buf, size_t len)
 /* Blocking-ish receive with stop checks (MSG_DONTWAIT + poll). >0 bytes,
  * 0 on orderly disconnect, negative errno (EINTR when stopping). */
 static int memd_vnc_recv_all(struct socket *s, void *buf, size_t len)
-{
+ {
     struct msghdr msg;
     struct kvec vec;
     size_t done = 0;
@@ -110,7 +110,7 @@ static int memd_vnc_recv_all(struct socket *s, void *buf, size_t len)
 
 /* Serve one connected viewer until disconnect/stop. 0 served cleanly. */
 static int memd_vnc_serve(struct socket *cs, __u32 *wire)
-{
+ {
     static const __u8 ver[] = "RFB 003.008\n";
     static const __u8 sec[] = { 1, 1 };
     __u8 tmp[32];
@@ -245,7 +245,7 @@ static int memd_vnc_serve(struct socket *cs, __u32 *wire)
 }
 
 static int memd_vnc_fn(void *data)
-{
+ {
     struct socket *ls = NULL, *cs = NULL;
     struct sockaddr_in addr;
     __u32 *wire = NULL;
@@ -307,7 +307,7 @@ static int memd_vnc_fn(void *data)
 
 /* Called with g_core_mu held (matches refresh thread discipline). */
 void memd_vnc_start(void)
-{
+ {
     if (g_vnc_task)
         return;
     g_vnc_task = kthread_run(memd_vnc_fn, NULL, "memd_vnc");
@@ -317,7 +317,7 @@ void memd_vnc_start(void)
 
 /* Called WITHOUT g_core_mu held (kthread_stop sleeps). */
 void memd_vnc_stop(void)
-{
+ {
     struct task_struct *t = g_vnc_task;
     g_vnc_task = NULL;
     if (t)

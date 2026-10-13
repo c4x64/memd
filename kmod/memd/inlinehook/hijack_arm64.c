@@ -53,7 +53,7 @@ static DEFINE_SPINLOCK(g_trampoline_lock);
  * (hook_write_range, cfi_bypass) fail closed per-op when unresolved, so
  * plain memory R/W works on kernels that export nothing extra. */
 int init_arch(void)
-{
+ {
     aarch64_insn_write_ptr = (void *)kallsyms_lookup_name_ex("aarch64_insn_write");
     flush_icache_range_ptr = (void *)kallsyms_lookup_name_ex("caches_clean_inval_pou");
     if (!flush_icache_range_ptr) {
@@ -65,7 +65,7 @@ int init_arch(void)
 }
 
 __nocfi int hook_write_range(void *target, void *source, int size)
-{
+ {
     int ret = 0, i;
 
     if (!aarch64_insn_write_ptr || !flush_icache_range_ptr)
@@ -83,7 +83,7 @@ __nocfi int hook_write_range(void *target, void *source, int size)
 }
 
 static int get_instruction_type(uint32_t instruction)
-{
+ {
     if ((instruction & 0xfc000000) == 0x14000000) return INST_B;
     if ((instruction & 0xfc000000) == 0x94000000) return INST_BL;
     if ((instruction & 0xff000000) == 0x54000000) return INST_B_COND;
@@ -115,7 +115,7 @@ static int get_instruction_type(uint32_t instruction)
 }
 
 static bool check_instruction_can_hijack(uint32_t instruction)
-{
+ {
     bool ret = true;
     int type = get_instruction_type(instruction);
 
@@ -151,7 +151,7 @@ static bool check_instruction_can_hijack(uint32_t instruction)
 }
 
 static int calculate_trampoline_size(void *target, size_t hook_size)
-{
+ {
     size_t size = hook_size;
     uint32_t *ptr = target;
 
@@ -169,7 +169,7 @@ static int calculate_trampoline_size(void *target, size_t hook_size)
 }
 
 struct memd_trampoline *memd_create_trampoline(void *target, void *handler, size_t hook_size)
-{
+ {
     struct memd_trampoline *tramp;
     void *tramp_code;
     size_t tramp_size;
@@ -194,7 +194,7 @@ struct memd_trampoline *memd_create_trampoline(void *target, void *handler, size
 
     memcpy(tramp_code, target, hook_size);
 
-    ret = hook_write_range(tramp_code + hook_size, (void[]){
+    ret = hook_write_range(tramp_code + hook_size, (void[]) {
         0xf0000000 | ((uintptr_t)target >> 0) & 0xfffff,
         0xf0000000 | ((uintptr_t)target >> 20) & 0xfffff,
         0xf0000000 | ((uintptr_t)target >> 40) & 0xfffff,
@@ -218,7 +218,7 @@ struct memd_trampoline *memd_create_trampoline(void *target, void *handler, size
 }
 
 void memd_destroy_trampoline(struct memd_trampoline *tramp)
-{
+ {
     if (!tramp)
         return;
 
@@ -232,7 +232,7 @@ void memd_destroy_trampoline(struct memd_trampoline *tramp)
 }
 
 bool check_target_can_hijack(void *target)
-{
+ {
     int offset = 0;
     for (; offset < HOOK_TARGET_OFFSET + HIJACK_SIZE; offset += INSTRUCTION_SIZE) {
         if (!check_instruction_can_hijack(*(uint32_t *)((char *)target + offset)))
@@ -242,7 +242,7 @@ bool check_target_can_hijack(void *target)
 }
 
 int memd_install_inline_hook(void *target, void *handler, void **orig)
-{
+ {
     struct memd_trampoline *tramp;
     size_t hook_size = HIJACK_SIZE;
     u32 branch_insn;
@@ -263,7 +263,7 @@ int memd_install_inline_hook(void *target, void *handler, void **orig)
 }
 
 void memd_remove_inline_hook(void *target, void *orig)
-{
+ {
     struct memd_trampoline *tramp, *tmp;
 
     if (orig) {

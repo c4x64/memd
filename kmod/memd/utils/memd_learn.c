@@ -70,7 +70,7 @@ static int memd_v_file_off = -1;
 /* Count 8-byte-aligned u64 matches. */
 static int memd_count_u64(const void *base, size_t len, u64 val,
                           int *first_off)
-{
+ {
     size_t n = len / 8, i;
     int hits = 0;
     for (i = 0; i < n; i++) {
@@ -86,7 +86,7 @@ static int memd_count_u64(const void *base, size_t len, u64 val,
 }
 
 static void memd_learn_task(void)
-{
+ {
     struct task_struct *t = current;
     pid_t pid = task_pid_vnr(t);
     pid_t tgid = task_tgid_vnr(t);
@@ -204,7 +204,7 @@ static void memd_learn_task(void)
 static int memd_pgd_shape_ok(u64 phys);
 
 static void memd_learn_pgd(void)
-{
+ {
     struct mm_struct *mm;
     u64 ttbr, want;
     mm = get_task_mm(current);
@@ -253,7 +253,7 @@ static void memd_learn_pgd(void)
 
 /* Validate that phys page looks like a pgd (guarded reads only). */
 static int memd_pgd_shape_ok(u64 phys)
-{
+ {
     int i, zeros = 0, valid = 0;
     void *kv;
     if (phys < 0x40000000UL || phys >= (64UL << 30))
@@ -283,7 +283,7 @@ static int memd_pgd_shape_ok(u64 phys)
 /* Read one maps line: start, end (hex), perms[0]. Returns 0 ok. */
 static int memd_maps_line(struct file *f, loff_t *pos, unsigned long *start,
                           unsigned long *end, char *base, size_t basecap)
-{
+ {
     char buf[256];
     ssize_t n;
     int i = 0, j;
@@ -347,7 +347,7 @@ static int memd_find_vma_pair(struct mm_struct *mm, unsigned long addr,
  * matches the known maps basename (all reads guarded). */
 static int memd_learn_vma_file(struct mm_struct *mm, unsigned long addr,
                                const char *base)
-{
+ {
     struct vm_area_struct *vma;
     size_t bl;
     int i, found = -1, n = 0;
@@ -411,7 +411,7 @@ static int memd_learn_vma_file(struct mm_struct *mm, unsigned long addr,
 }
 
 static void memd_learn_vma(void)
-{
+ {
     struct mm_struct *mm;
     struct file *f;
     loff_t pos = 0;
@@ -467,7 +467,7 @@ static void memd_learn_vma(void)
 /* find_vma by runtime address (dual name), then pair-scan. */
 static int memd_find_vma_pair(struct mm_struct *mm, unsigned long addr,
                               int *start_off, int *end_off)
-{
+ {
     struct vm_area_struct *vma;
     int i;
     if (!memd_fv_probed) {
@@ -481,7 +481,7 @@ static int memd_find_vma_pair(struct mm_struct *mm, unsigned long addr,
     vma = memd_fv(mm, addr);
     if (!vma)
         return -1;
-    /* adjacent u64 pair (a,b): a<=addr<b, sane span, page-aligned a */
+    /* adjacent u64 pair (a, b): a<=addr<b, sane span, page-aligned a */
     for (i = 0; i + 16 <= 512; i += 8) {
         u64 x, y;
         memcpy(&x, (char *)vma + i, 8);
@@ -511,7 +511,7 @@ static int memd_find_vma_pair(struct mm_struct *mm, unsigned long addr,
 }
 
 int memd_learn(void)
-{
+ {
     memd_learn_task();
     memd_learn_pgd();
     return 0;
@@ -519,7 +519,7 @@ int memd_learn(void)
 
 /* Lazy vma learning on first get_module_base (target task context). */
 void memd_learn_vma_once(void)
-{
+ {
     static bool done = false;
     if (done)
         return;
@@ -528,33 +528,33 @@ void memd_learn_vma_once(void)
 }
 
 pid_t memd_t_pid(struct task_struct *t)
-{
+ {
     if (memd_learned.t_pid >= 0)
         return *(pid_t *)((char *)t + memd_learned.t_pid);
     return t->pid;
 }
 
 pid_t memd_t_tgid(struct task_struct *t)
-{
+ {
     if (memd_learned.t_tgid >= 0)
         return *(pid_t *)((char *)t + memd_learned.t_tgid);
     return t->tgid;
 }
 
 struct mm_struct *memd_t_mm(struct task_struct *t)
-{
+ {
     if (memd_learned.t_mm >= 0)
         return *(struct mm_struct **)((char *)t + memd_learned.t_mm);
     return t->mm;
 }
 
 int memd_t_mm_null(struct task_struct *t)
-{
+ {
     return memd_t_mm(t) == NULL;
 }
 
 void memd_t_comm(struct task_struct *t, char *buf, size_t cap)
-{
+ {
     if (memd_learned.t_comm >= 0 && cap > 0) {
         size_t n = cap - 1;
         if (n > 15)
@@ -576,14 +576,14 @@ void memd_t_comm(struct task_struct *t, char *buf, size_t cap)
 }
 
 unsigned long memd_m_pgd(struct mm_struct *mm)
-{
+ {
     if (memd_learned.m_pgd >= 0)
         return *(unsigned long *)((char *)mm + memd_learned.m_pgd);
     return mm->pgd;
 }
 
 unsigned long memd_valid_pgd(struct mm_struct *mm)
-{
+ {
     unsigned long va, pa;
     if (!mm)
         return 0;
@@ -601,7 +601,7 @@ unsigned long memd_valid_pgd(struct mm_struct *mm)
 #define MEMD_CRED_CAP_EFF 56
 
 static unsigned long memd_task_cred(struct task_struct *t)
-{
+ {
     unsigned long c = 0;
     if (memd_learned.t_cred < 0 || !t)
         return 0;
@@ -613,7 +613,7 @@ static unsigned long memd_task_cred(struct task_struct *t)
 }
 
 int memd_capable(int cap)
-{
+ {
     unsigned long c = memd_task_cred(current);
     u32 eff = 0;
     unsigned int v = 0;
@@ -626,7 +626,7 @@ int memd_capable(int cap)
 }
 
 unsigned int memd_uid(void)
-{
+ {
     unsigned long c = memd_task_cred(current);
     unsigned int v = 0;
     if (!c)
@@ -637,14 +637,14 @@ unsigned int memd_uid(void)
 }
 
 unsigned long memd_v_start(struct vm_area_struct *vma)
-{
+ {
     if (memd_learned.v_start >= 0)
         return *(unsigned long *)((char *)vma + memd_learned.v_start);
     return vma->vm_start;
 }
 
 unsigned long memd_v_end(struct vm_area_struct *vma)
-{
+ {
     if (memd_learned.v_end >= 0)
         return *(unsigned long *)((char *)vma + memd_learned.v_end);
     return vma->vm_end;
@@ -656,7 +656,7 @@ unsigned long memd_v_end(struct vm_area_struct *vma)
 /* Per-generation struct file f_path offset (6.6/6.12 rework file).
  * Indices match memd_net_gen(). Verified per-gen by asserts. */
 struct file_operations *memd_file_fop(struct file *f)
-{
+ {
     int g = memd_net_gen();
     if (g < 0 || g >= 5 || !f)
         return NULL;
@@ -664,7 +664,7 @@ struct file_operations *memd_file_fop(struct file *f)
 }
 
 struct dentry *memd_file_dentry(struct file *f)
-{
+ {
     int g = memd_net_gen();
     struct dentry *d;
     if (g < 0 || g >= 5 || !f)
@@ -675,7 +675,7 @@ struct dentry *memd_file_dentry(struct file *f)
 }
 
 unsigned long memd_v_file(struct vm_area_struct *vma)
-{
+ {
     if (memd_v_file_off >= 0)
         return *(unsigned long *)((char *)vma + memd_v_file_off);
     return (unsigned long)vma->vm_file;
@@ -684,7 +684,7 @@ unsigned long memd_v_file(struct vm_area_struct *vma)
 /* Extended offset learning for more universality */
 static int memd_scan_for_ptr(const void *base, size_t len, const void *target,
                              int *first_off)
-{
+ {
     size_t n = len / 8, i;
     int hits = 0;
     for (i = 0; i < n; i++) {
@@ -700,7 +700,7 @@ static int memd_scan_for_ptr(const void *base, size_t len, const void *target,
 }
 
 static void memd_learn_task_extended(void)
-{
+ {
     struct task_struct *t = current;
     struct files_struct *files = t->files;
     struct signal_struct *signal = t->signal;
@@ -773,7 +773,7 @@ static void memd_learn_task_extended(void)
 }
 
 static void memd_learn_mm_extended(void)
-{
+ {
     struct mm_struct *mm = get_task_mm(current);
     if (!mm)
         return;
@@ -802,7 +802,7 @@ static void memd_learn_mm_extended(void)
 }
 
 static void memd_learn_file_extended(void)
-{
+ {
     struct file *f;
     struct path path;
     struct dentry *dentry;
@@ -856,7 +856,7 @@ static void memd_learn_file_extended(void)
 }
 
 int memd_learn_extended(void)
-{
+ {
     memd_learn_task_extended();
     memd_learn_mm_extended();
     memd_learn_file_extended();
@@ -864,7 +864,7 @@ int memd_learn_extended(void)
 }
 
 static void memd_learn_thread_struct(void)
-{
+ {
     struct task_struct *t = current;
     struct thread_struct *thread = &t->thread;
     int found = -1, n = 0;
@@ -904,7 +904,7 @@ static void memd_learn_thread_struct(void)
 }
 
 static void memd_learn_signal_struct(void)
-{
+ {
     struct task_struct *t = current;
     struct signal_struct *sig = t->signal;
     if (!sig)
@@ -942,7 +942,7 @@ static void memd_learn_signal_struct(void)
 }
 
 static void memd_learn_sighand_struct(void)
-{
+ {
     struct task_struct *t = current;
     struct sighand_struct *sh = t->sighand;
     if (!sh)
@@ -965,7 +965,7 @@ static void memd_learn_sighand_struct(void)
 }
 
 static void memd_learn_fs_struct(void)
-{
+ {
     struct task_struct *t = current;
     struct fs_struct *fs = t->fs;
     if (!fs)
@@ -1003,7 +1003,7 @@ static void memd_learn_fs_struct(void)
 }
 
 static void memd_learn_nsproxy_struct(void)
-{
+ {
     struct task_struct *t = current;
     struct nsproxy *nsp = t->nsproxy;
     if (!nsp)
@@ -1041,7 +1041,7 @@ static void memd_learn_nsproxy_struct(void)
 }
 
 static void memd_learn_cred_struct(void)
-{
+ {
     struct task_struct *t = current;
     struct cred *c = t->cred;
     if (!c)
@@ -1109,7 +1109,7 @@ static void memd_learn_cred_struct(void)
 }
 
 static void memd_learn_sighand_verify(void)
-{
+ {
     struct task_struct *t = current;
     if (!t->sighand)
         return;
@@ -1125,7 +1125,7 @@ static void memd_learn_sighand_verify(void)
 }
 
 static int memd_verify_all_offsets(void)
-{
+ {
     struct task_struct *t = current;
     int errors = 0;
 
@@ -1169,7 +1169,7 @@ static int memd_verify_all_offsets(void)
 }
 
 int memd_learn_comprehensive(void)
-{
+ {
     int ret = 0;
 
     spin_lock(&memd_learn_lock);

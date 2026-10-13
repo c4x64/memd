@@ -38,7 +38,7 @@
 #endif
 
 static void print_usage(const char *prog)
-{
+ {
     printf("usage: %s [options] /path/to.ko\n", prog);
     printf("options:\n");
     printf("  --dry-run     Print what would be done without loading\n");
@@ -48,7 +48,7 @@ static void print_usage(const char *prog)
 }
 
 static int verify_module_loaded(const char *module_name)
-{
+ {
     FILE *f = fopen("/proc/modules", "r");
     if (!f)
         return -1;
@@ -65,7 +65,7 @@ static int verify_module_loaded(const char *module_name)
 }
 
 int main(int argc, char **argv)
-{
+ {
     int fd;
     long r;
     int dry_run = 0;

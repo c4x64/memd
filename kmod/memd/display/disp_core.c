@@ -105,7 +105,7 @@ static struct {
  * immune to LMK/force-stop, outlives userspace death; only rmmod or
  * uninstall stops it. Per-tick work is one locked full present. */
 static int memd_refresh_fn(void *data)
-{
+ {
     (void)data;
     while (!kthread_should_stop()) {
         struct memd_dirty full;
@@ -129,7 +129,7 @@ static int memd_refresh_fn(void *data)
 
 
 static void memd_dirty_add(__u32 x, __u32 y, __u32 w, __u32 h)
-{
+ {
     __u32 x1, y1;
     if (!w || !h || x >= g_core.w || y >= g_core.h)
         return;
@@ -158,17 +158,17 @@ static void memd_dirty_add(__u32 x, __u32 y, __u32 w, __u32 h)
 }
 
 static inline int64_t ktime_to_ns(ktime_t kt)
-{
+ {
     return ktime_to_ns(kt);
 }
 
 static int64_t memd_get_time_ns(void)
-{
+ {
     return ktime_get_real_ns();
 }
 
 static void memd_vsync_init(void)
-{
+ {
     g_core.vsync.enabled = g_core.tear_free;
     if (g_core.frame_interval_ns > 0)
         g_core.vsync.frame_interval_ns = g_core.frame_interval_ns;
@@ -180,7 +180,7 @@ static void memd_vsync_init(void)
 }
 
 static int memd_vsync_wait_internal(int64_t timeout_ns)
-{
+ {
     int64_t start = memd_get_time_ns();
     int64_t target = g_core.vsync.next_vsync_ns;
     int64_t deadline = start + timeout_ns;
@@ -215,12 +215,12 @@ static int memd_vsync_wait_internal(int64_t timeout_ns)
 }
 
 static void memd_vsync_notify(void)
-{
+ {
     wake_up_all(&g_core.vsync.wq);
 }
 
 static void memd_flip_work(struct work_struct *work)
-{
+ {
     (void)work;
     mutex_lock(&g_core_mu);
     if (g_core.be && g_core.be->present && g_core.front && g_core.be->present) {
@@ -235,14 +235,14 @@ static void memd_flip_work(struct work_struct *work)
 static DECLARE_WORK(g_flip_work, memd_flip_work);
 
 static int memd_schedule_flip(void)
-{
+ {
     if (!g_flip_wq)
         return -ENODEV;
     return queue_work(g_flip_wq, &g_flip_work) ? 0 : -EBUSY;
 }
 
 static const struct memd_disp_backend *memd_find_be(__u32 id)
-{
+ {
     unsigned long i;
     for (i = 0; i < sizeof(memd_backends) / sizeof(memd_backends[0]); i++) {
         if (memd_backends[i]->id == (int)id)
@@ -254,7 +254,7 @@ static const struct memd_disp_backend *memd_find_be(__u32 id)
 /* Must hold g_core_mu. Starts the refresh thread once (idempotent:
  * kthread_run is non-blocking; the thread blocks on the mutex). */
 static void memd_refresh_start_locked(void)
-{
+ {
     if (g_refresh_task)
         return;
     g_refresh_task = kthread_run(memd_refresh_fn, NULL, "memd_disp");
@@ -267,7 +267,7 @@ static void memd_refresh_start_locked(void)
 }
 
 int memd_core_install(__u32 backend, __u32 width, __u32 height)
-{
+ {
     size_t px = 0, bytes = 0;
     const struct memd_disp_backend *be = NULL;
     unsigned long i;
@@ -418,7 +418,7 @@ fail_open:
 }
 
 int memd_core_uninstall(void)
-{
+ {
     struct task_struct *t;
     mutex_lock(&g_core_mu);
     if (!g_core.be) {
@@ -449,7 +449,7 @@ int memd_core_uninstall(void)
 }
 
 int memd_core_active(void)
-{
+ {
     int a;
     mutex_lock(&g_core_mu);
     a = g_core.be ? 1 : 0;
@@ -458,7 +458,7 @@ int memd_core_active(void)
 }
 
 int memd_core_status(__u32 *backend, __u32 *w, __u32 *h, __u32 *err)
-{
+ {
     mutex_lock(&g_core_mu);
     if (backend)
         *backend = g_core.be ? (__u32)g_core.be->id : 0;
@@ -483,7 +483,7 @@ int memd_core_status(__u32 *backend, __u32 *w, __u32 *h, __u32 *err)
 }
 
 int memd_core_frame(const struct memd_disp_op *ops, __u32 count)
-{
+ {
     __u32 i;
     __u32 *tmp;
     int rc = 0;
@@ -586,7 +586,7 @@ int memd_core_frame(const struct memd_disp_op *ops, __u32 count)
 #include "memd_uaccess.h"
 
 int memd_core_readback(__u64 dst, __u32 size, __u32 *w, __u32 *h)
-{
+ {
     size_t need = 0;
     int rc = 0;
     if (!w || !h)
@@ -614,7 +614,7 @@ int memd_core_readback(__u64 dst, __u32 size, __u32 *w, __u32 *h)
  * the streamer byte-swaps and sends from its own buffer, never under
  * the core lock). */
 int memd_core_copy_front(__u32 *dst, __u32 max_bytes, __u32 *w, __u32 *h)
-{
+ {
     size_t need = 0;
     if (!dst || !w || !h)
         return -EINVAL;
@@ -640,7 +640,7 @@ int memd_core_copy_front(__u32 *dst, __u32 max_bytes, __u32 *w, __u32 *h)
 /* New API implementations */
 
 int memd_core_set_mode(const struct memd_disp_mode *mode)
-{
+ {
     int rc = 0;
 
     if (!mode)
@@ -668,7 +668,7 @@ int memd_core_set_mode(const struct memd_disp_mode *mode)
 }
 
 int memd_core_get_modes(struct memd_disp_mode *modes, __u32 max_modes)
-{
+ {
     int rc = 0;
 
     if (!modes || max_modes == 0)
@@ -695,7 +695,7 @@ int memd_core_get_modes(struct memd_disp_mode *modes, __u32 max_modes)
 }
 
 int memd_core_get_edid(struct memd_disp_edid *edid)
-{
+ {
     int rc = 0;
 
     if (!edid)
@@ -721,7 +721,7 @@ int memd_core_get_edid(struct memd_disp_edid *edid)
 }
 
 int memd_core_dpms(int mode)
-{
+ {
     int rc = 0;
 
     mutex_lock(&g_core_mu);
@@ -743,7 +743,7 @@ int memd_core_dpms(int mode)
 }
 
 int memd_core_vsync_wait(int64_t timeout_ns)
-{
+ {
     if (!g_core.vsync.enabled)
         return 0;
 
@@ -751,7 +751,7 @@ int memd_core_vsync_wait(int64_t timeout_ns)
 }
 
 int memd_core_cursor_set(const __u32 *cursor_fb, __u32 w, __u32 h, __u32 x, __u32 y)
-{
+ {
     int rc = 0;
 
     if (!cursor_fb || w == 0 || h == 0)
@@ -785,7 +785,7 @@ int memd_core_cursor_set(const __u32 *cursor_fb, __u32 w, __u32 h, __u32 x, __u3
 }
 
 int memd_core_cursor_move(__u32 x, __u32 y)
-{
+ {
     mutex_lock(&g_core_mu);
     g_core.cursor_x = x;
     g_core.cursor_y = y;
@@ -797,7 +797,7 @@ int memd_core_cursor_move(__u32 x, __u32 y)
 }
 
 int memd_core_cursor_show(bool show)
-{
+ {
     mutex_lock(&g_core_mu);
     g_core.cursor_visible = show;
     mutex_unlock(&g_core_mu);
@@ -808,7 +808,7 @@ int memd_core_cursor_show(bool show)
 }
 
 int memd_core_layer_add(struct memd_disp_layer *layer)
-{
+ {
     if (!layer || layer->w == 0 || layer->h == 0)
         return -EINVAL;
 
@@ -843,7 +843,7 @@ int memd_core_layer_add(struct memd_disp_layer *layer)
 }
 
 int memd_core_layer_remove(struct memd_disp_layer *layer)
-{
+ {
     if (!layer)
         return -EINVAL;
 
@@ -874,7 +874,7 @@ int memd_core_layer_remove(struct memd_disp_layer *layer)
 }
 
 int memd_core_layer_update(struct memd_disp_layer *layer)
-{
+ {
     if (!layer)
         return -EINVAL;
 
@@ -899,7 +899,7 @@ int memd_core_layer_update(struct memd_disp_layer *layer)
 }
 
 int memd_core_gamma_set(const __u16 *r, const __u16 *g, const __u16 *b, __u32 size)
-{
+ {
     if (!r || !g || !b || size == 0 || size > 256)
         return -EINVAL;
 

@@ -14,14 +14,14 @@ int is_invisible(pid_t pid) {
 }
 
 bool memd_hide_check_visibility(pid_t pid, struct pid_namespace *ns)
-{
+ {
     if (!ns)
         ns = &init_pid_ns;
     return memd_hide_contains_ns(pid, ns);
 }
 
 int memd_hide_get_hidden_pids(pid_t *buf, size_t buf_size, size_t *count)
-{
+ {
     if (!buf || !count)
         return -EINVAL;
 
@@ -45,7 +45,7 @@ int memd_hide_get_hidden_pids(pid_t *buf, size_t buf_size, size_t *count)
 }
 
 int memd_hide_get_ns_hidden_pids(pid_t *buf, size_t buf_size, size_t *count, struct pid_namespace *ns)
-{
+ {
     if (!buf || !count || !ns)
         return -EINVAL;
 

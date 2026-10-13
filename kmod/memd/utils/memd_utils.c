@@ -325,7 +325,7 @@ struct page* vaddr_to_page(struct mm_struct* mm, uintptr_t va) {
  * read is extable-guarded (tables mutate under us). Leaf-aware (kernel
  * text is block-mapped). Read-only; never for kernel-text writes. */
 int memd_safe_read64(const void *src, unsigned long *dst)
-{
+ {
     unsigned long v;
     int err = -EFAULT;
     asm volatile(
@@ -343,7 +343,7 @@ int memd_safe_read64(const void *src, unsigned long *dst)
 }
 
 int memd_safe_read32(const void *src, unsigned int *dst)
-{
+ {
     unsigned int v;
     int err = -EFAULT;
     asm volatile(
@@ -363,7 +363,7 @@ int memd_safe_read32(const void *src, unsigned int *dst)
 /* Guarded u64 store (extable fixup on fault). Used for PTE AP flips and
  * table entries that may be mapped read-only. */
 int memd_safe_write64(void *dst, unsigned long v)
-{
+ {
     int err = -EFAULT;
     asm volatile(
         "1: str %1, [%2]\n"
@@ -384,7 +384,7 @@ int memd_safe_write64(void *dst, unsigned long v)
  * RKP-active kernels may trap the descriptor write itself (accepted
  * owner risk); plain faults become clean errors, never panics. */
 int memd_table_write64(unsigned long entry_va, unsigned long val)
-{
+ {
     unsigned long ttbr, base, v;
     pgd_t pgd;
     p4d_t p4d;
@@ -567,7 +567,7 @@ out_preempt:
 int memd_page_perms(uintptr_t va, uintptr_t *pa_out, unsigned *present_out,
                     unsigned *level_out, unsigned *ap_out, unsigned *xn_out,
                     unsigned long *desc_out)
-{
+ {
     unsigned long ttbr, base, v;
     pgd_t pgd;
     p4d_t p4d;
@@ -664,7 +664,7 @@ int memd_page_perms(uintptr_t va, uintptr_t *pa_out, unsigned *present_out,
 }
 
 static uintptr_t kaddr_to_phy_addr(uintptr_t va)
-{
+ {
     unsigned long ttbr, base, v;
     pgd_t pgd;
     p4d_t p4d;
@@ -1165,7 +1165,7 @@ void __iomem* memd_ioremap_prot(uintptr_t phys_addr, size_t size, pgprot_t prot)
 }
 
 static int cfi_patch_function(const char *name, unsigned int *patch, int patch_instrs)
-{
+ {
     unsigned long addr = kallsyms_lookup_name_ex(name);
     if (!addr)
         return 0;
@@ -1187,19 +1187,19 @@ static int cfi_patch_function(const char *name, unsigned int *patch, int patch_i
 }
 
 static int cfi_patch_ret(const char *name)
-{
+ {
     unsigned int RET = 0xD65F03C0;
     return cfi_patch_function(name, &RET, 1);
 }
 
 static int cfi_patch_mov_x0_1_ret(const char *name)
-{
+ {
     unsigned int patch[2] = {0xD2800020, 0xD65F03C0};
     return cfi_patch_function(name, patch, 2);
 }
 
 int cfi_bypass(void)
-{
+ {
     int ret = 0;
     int r;
 
@@ -1356,7 +1356,7 @@ int cfi_bypass(void)
 }
 
 static int cfi_bypass_pan_uao(void)
-{
+ {
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
 
@@ -1418,7 +1418,7 @@ static int cfi_bypass_pan_uao(void)
 }
 
 static int cfi_bypass_pac(void)
-{
+ {
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
 
@@ -1480,7 +1480,7 @@ static int cfi_bypass_pac(void)
 }
 
 static int cfi_bypass_kpti(void)
-{
+ {
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
     unsigned int NOP = 0xD503201F;
@@ -1542,7 +1542,7 @@ static int cfi_bypass_kpti(void)
 }
 
 static int cfi_bypass_mte(void)
-{
+ {
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
 
@@ -1586,7 +1586,7 @@ static int cfi_bypass_mte(void)
 }
 
 static int cfi_bypass_bti(void)
-{
+ {
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
 

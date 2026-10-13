@@ -33,7 +33,7 @@ struct unsafe_region_tree {
 static struct unsafe_region_tree *g_region_tree = NULL;
 
 static int region_cmp(struct unsafe_region_area *a, struct unsafe_region_area *b)
-{
+ {
     if (a->addr < b->addr)
         return -1;
     if (a->addr > b->addr)
@@ -42,7 +42,7 @@ static int region_cmp(struct unsafe_region_area *a, struct unsafe_region_area *b
 }
 
 static struct unsafe_region_area *region_find(uintptr_t addr)
-{
+ {
     struct rb_node *node = g_region_tree->root.rb_node;
     while (node) {
         struct unsafe_region_area *area = rb_entry(node, struct unsafe_region_area, rb_node);
@@ -57,7 +57,7 @@ static struct unsafe_region_area *region_find(uintptr_t addr)
 }
 
 static bool region_overlaps(struct unsafe_region_area *new_area)
-{
+ {
     struct rb_node *node = g_region_tree->root.rb_node;
     uintptr_t new_end = new_area->addr + (new_area->nums_page << PAGE_SHIFT);
     while (node) {
@@ -74,7 +74,7 @@ static bool region_overlaps(struct unsafe_region_area *new_area)
 }
 
 static void region_insert(struct unsafe_region_area *area)
-{
+ {
     struct rb_node **link = &g_region_tree->root.rb_node;
     struct rb_node *parent = NULL;
     while (*link) {
@@ -93,7 +93,7 @@ static void region_insert(struct unsafe_region_area *area)
 }
 
 static void region_remove(struct unsafe_region_area *area)
-{
+ {
     rb_erase(&area->rb_node, &g_region_tree->root);
     list_del(&area->list);
     g_region_tree->region_count--;
@@ -101,7 +101,7 @@ static void region_remove(struct unsafe_region_area *area)
 }
 
 int memd_region_init(void)
-{
+ {
     g_region_tree = kzalloc(sizeof(*g_region_tree), GFP_KERNEL);
     if (!g_region_tree) {
         memd_err("failed to create region tree\n");
@@ -115,7 +115,7 @@ int memd_region_init(void)
 }
 
 void memd_region_cleanup(void)
-{
+ {
     unsigned long flags;
     struct unsafe_region_area *area, *tmp;
 
@@ -132,7 +132,7 @@ void memd_region_cleanup(void)
 }
 
 int memd_add_unsafe_region(pid_t session, uid_t uid, uintptr_t start, size_t num_page)
-{
+ {
     struct unsafe_region_area *area;
     unsigned long flags;
 
@@ -190,7 +190,7 @@ int memd_add_unsafe_region(pid_t session, uid_t uid, uintptr_t start, size_t num
 }
 
 int memd_del_unsafe_region(pid_t pid)
-{
+ {
     unsigned long flags;
     int removed = 0;
 
@@ -217,7 +217,7 @@ int memd_del_unsafe_region(pid_t pid)
 /* Enhanced API functions */
 
 int memd_find_region(uintptr_t addr, struct unsafe_region_area *out)
-{
+ {
     unsigned long flags;
     struct unsafe_region_area *area;
 
@@ -235,7 +235,7 @@ int memd_find_region(uintptr_t addr, struct unsafe_region_area *out)
 }
 
 int memd_region_iterate(int (*callback)(struct unsafe_region_area *area, void *data), void *data)
-{
+ {
     unsigned long flags;
     struct unsafe_region_area *area;
     int ret = 0;
@@ -252,7 +252,7 @@ int memd_region_iterate(int (*callback)(struct unsafe_region_area *area, void *d
 }
 
 int memd_get_region_stats(u64 *total_pages, u32 *region_count)
-{
+ {
     unsigned long flags;
     spin_lock_irqsave(&g_region_tree->lock, flags);
     if (total_pages)
@@ -264,7 +264,7 @@ int memd_get_region_stats(u64 *total_pages, u32 *region_count)
 }
 
 int memd_set_session_quota(pid_t session, u32 max_regions)
-{
+ {
     unsigned long flags;
     spin_lock_irqsave(&g_region_tree->lock, flags);
     g_region_tree->max_regions_per_session = max_regions;

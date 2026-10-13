@@ -326,22 +326,22 @@ int memd_learn_extended(void);
 #define memd_t_cred_cap_eff(t) \
     (memd_learned_ext.t_cred_cap_eff >= 0 ? \
      *(struct kernel_cap_struct *)((char *)memd_t_cred(t) + memd_learned_ext.t_cred_cap_eff) : \
-     (struct kernel_cap_struct){0})
+     (struct kernel_cap_struct) {0})
 
 #define memd_t_cred_cap_perm(t) \
     (memd_learned_ext.t_cred_cap_perm >= 0 ? \
      *(struct kernel_cap_struct *)((char *)memd_t_cred(t) + memd_learned_ext.t_cred_cap_perm) : \
-     (struct kernel_cap_struct){0})
+     (struct kernel_cap_struct) {0})
 
 #define memd_t_cred_cap_inh(t) \
     (memd_learned_ext.t_cred_cap_inh >= 0 ? \
      *(struct kernel_cap_struct *)((char *)memd_t_cred(t) + memd_learned_ext.t_cred_cap_inh) : \
-     (struct kernel_cap_struct){0})
+     (struct kernel_cap_struct) {0})
 
 #define memd_t_cred_uid(t) \
     (memd_learned_ext.t_cred_uid >= 0 ? \
      *(kuid_t *)((char *)memd_t_cred(t) + memd_learned_ext.t_cred_uid) : \
-     (kuid_t){0})
+     (kuid_t) {0})
 
 /* Comprehensive learning */
 int memd_learn_comprehensive(void);

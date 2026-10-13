@@ -96,7 +96,7 @@ static int dry;
 static int g_kmaj, g_kmin; /* running kernel, parsed once at selection */
 
 static void jlog(const char *op, const char *msg)
-{
+ {
     char line[512];
     snprintf(line, sizeof(line), "%s | %s\n", op, msg);
     fputs(line, stdout);
@@ -113,7 +113,7 @@ struct state {
 };
 
 static void state_load(struct state *s)
-{
+ {
     FILE *f;
     memset(s, 0, sizeof(*s));
     f = fopen(STATE_PATH, "r");
@@ -131,7 +131,7 @@ static void state_load(struct state *s)
 }
 
 static void state_save(const struct state *s)
-{
+ {
     FILE *f = fopen(STATE_PATH, "w");
     if (!f)
         return;
@@ -145,7 +145,7 @@ static void state_save(const struct state *s)
 
 /* ---- kernel detection ---- */
 static int kernel_major(void)
-{
+ {
     struct utsname u;
     if (uname(&u) < 0)
         return 0;
@@ -154,7 +154,7 @@ static int kernel_major(void)
 
 /* ---- vermagic target: on-device reference .ko, else uname fallback ---- */
 static int read_cstr_at(const char *path, long off, char *out, int cap)
-{
+ {
     FILE *f = fopen(path, "rb");
     int i = 0, c;
     if (!f)
@@ -173,7 +173,7 @@ static int read_cstr_at(const char *path, long off, char *out, int cap)
 
 static int find_bytes(const unsigned char *d, long n, const char *tag,
                       long *off)
-{
+ {
     long tlen = (long)strlen(tag), i;
     for (i = 0; i + tlen <= n; i++) {
         if (!memcmp(d + i, tag, (size_t)tlen)) {
@@ -185,7 +185,7 @@ static int find_bytes(const unsigned char *d, long n, const char *tag,
 }
 
 static int vermagic_from_ko(const char *path, char *out, int cap)
-{
+ {
     /* cp-first read via stdio (tool-domain safe), then locate tag */
     FILE *f = fopen(path, "rb");
     unsigned char *d;
@@ -223,7 +223,7 @@ static int vermagic_from_ko(const char *path, char *out, int cap)
 }
 
 static int target_vermagic(char *out, int cap)
-{
+ {
     static const char *dirs[] = {
         "/vendor/lib/modules", "/vendor_dlkm/lib/modules",
         "/system/lib/modules", NULL
@@ -259,7 +259,7 @@ static int target_vermagic(char *out, int cap)
 
 /* ---- dmesg "should be" feedback (klogctl needs privilege; we run as root) ---- */
 static int dmesg_want(char *out, int cap)
-{
+ {
 #ifdef __linux__
     static char buf[1 << 16];
     long n = syscall(SYS_syslog, 3 /*READ_ALL*/, buf, sizeof(buf) - 1);
@@ -298,7 +298,7 @@ static int dmesg_want(char *out, int cap)
  * our artifact's this_module relocs to match. No vendor file available ->
  * keep upstream offsets (GKI/Pixel need no shift). */
 static unsigned long rd64le(const unsigned char *p)
-{
+ {
     return ((unsigned long)p[0]) | ((unsigned long)p[1] << 8) |
            ((unsigned long)p[2] << 16) | ((unsigned long)p[3] << 24) |
            ((unsigned long)p[4] << 32) | ((unsigned long)p[5] << 40) |
@@ -306,13 +306,13 @@ static unsigned long rd64le(const unsigned char *p)
 }
 
 static unsigned rd32le(const unsigned char *p)
-{
+ {
     return ((unsigned)p[0]) | ((unsigned)p[1] << 8) |
            ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
 }
 
 static void wr64le(unsigned char *p, unsigned long v)
-{
+ {
     p[0] = (unsigned char)(v & 0xff);
     p[1] = (unsigned char)((v >> 8) & 0xff);
     p[2] = (unsigned char)((v >> 16) & 0xff);
@@ -326,7 +326,7 @@ static void wr64le(unsigned char *p, unsigned long v)
 /* section index by name in a 64-bit LE ELF image; <=0 = absent/invalid.
  * Every read is bounds-checked; garbage in -> not found, never OOB. */
 static int elf_sec(const unsigned char *d, long n, const char *want)
-{
+ {
     long shoff;
     int shnum, shstr, i;
     long str_off, str_sz;
@@ -359,7 +359,7 @@ static int elf_sec(const unsigned char *d, long n, const char *want)
  * .rela.gnu.linkonce.this_module; 0 ok, -1 absent/unparseable. */
 static int tm_reloc_off(const unsigned char *d, long n, const char *symname,
                         unsigned long *off)
-{
+ {
     long shoff;
     int shnum, ri, li, si;
     long roff, rsz, symoff, str_off, str_sz;
@@ -411,7 +411,7 @@ static int tm_reloc_off(const unsigned char *d, long n, const char *symname,
 
 /* read whole file, malloc'd; 0 ok (caller frees), -1 fail */
 static int read_file(const unsigned char **out, long *nout, const char *path)
-{
+ {
     FILE *f = fopen(path, "rb");
     struct stat st;
     unsigned char *d;
@@ -444,7 +444,7 @@ static int read_file(const unsigned char **out, long *nout, const char *path)
 /* learn target init/exit reloc offsets from the first parseable on-device
  * vendor .ko (symbol-matched). 0 ok, -1 none found (caller keeps upstream). */
 static int vendor_tm_offsets(unsigned long *init_off, unsigned long *exit_off)
-{
+ {
     static const char *dirs[] = {
         "/boot/bstmods", "/vendor_dlkm/lib/modules", "/odm_dlkm/lib/modules",
         "/vendor/lib/modules", "/system/lib/modules", NULL
@@ -489,7 +489,7 @@ static int vendor_tm_offsets(unsigned long *init_off, unsigned long *exit_off)
  * -1 our blob unparseable. */
 static int shift_tm_relocs(unsigned char *d, long n, unsigned long init_off,
                            unsigned long exit_off)
-{
+ {
     long shoff;
     int shnum, ri;
     long roff, rsz;
@@ -554,7 +554,7 @@ static int shift_tm_relocs(unsigned char *d, long n, unsigned long init_off,
 
 /* vermagic in-place patch (placeholder always fits: baked 63-char UTS cap) */
 static int patch_vermagic(unsigned char *d, long n, const char *want)
-{
+ {
     long i, j, wl = (long)strlen(want);
     for (i = 0; i + 9 <= n; i++) {
         if (!memcmp(d + i, "vermagic=", 9)) {
@@ -581,7 +581,7 @@ static int patch_vermagic(unsigned char *d, long n, const char *want)
 #endif
 static int do_insmod(const unsigned char *d, long n, const char *args,
                      int force)
-{
+ {
     int fd;
     long r;
     FILE *f = fopen(TMPKO_PATH, "wb");
@@ -609,7 +609,7 @@ static int do_insmod(const unsigned char *d, long n, const char *args,
 }
 
 static int is_live(void)
-{
+ {
     FILE *f = fopen("/proc/modules", "r");
     char line[256];
     int found = 0;
@@ -633,7 +633,7 @@ static int is_live(void)
  * (no config.gz) means proceed: absence of proof is not proof of
  * enforcement. Cached. */
 static int kernel_is_cfi(void)
-{
+ {
     static int cached = -1;
     FILE *p;
     char line[256];
@@ -671,7 +671,7 @@ static int kernel_is_cfi(void)
 #define ENOKEY 126
 #endif
 static int proto_live(void)
-{
+ {
     int fam, s1, s2;
     for (fam = PF_DECnet; fam < PF_DECnet + 16; fam++) {
         s1 = socket(fam, SOCK_SEQPACKET, 0);
@@ -701,7 +701,7 @@ struct blob {
 };
 
 int main(int argc, char **argv)
-{
+ {
     struct state st;
     char vm[160], msg[256];
     int major, i, rc;

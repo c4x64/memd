@@ -14,7 +14,7 @@
 /* Read /proc/sys/kernel/osrelease content (exact string, no struct
  * offsets). Returns 0 ok, negative otherwise. */
 static int memd_read_osrelease(char *out, size_t cap)
-{
+ {
     struct file *f;
     loff_t pos = 0;
     ssize_t n;
@@ -41,7 +41,7 @@ static int memd_read_osrelease(char *out, size_t cap)
 }
 
 int memd_net_gen(void)
-{
+ {
     static int gen = -2;
     char rel[72];
     int i, maj, min, j;
