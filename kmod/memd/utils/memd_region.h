@@ -19,15 +19,10 @@ int memd_region_iterate(int (*callback)(void *area, void *data), void *data);
 int memd_get_region_stats(u64 *total_pages, u32 *region_count);
 int memd_set_session_quota(pid_t session, u32 max_regions);
 
-struct unsafe_region_area {
-    u64 addr;
-    u32 nums_page;
-    uid_t uid;
-    pid_t session_pid;
-    u32 prot;
-    u32 flags;
-    u64 start_time;
-    u64 access_count;
-};
+/* Full struct lives in memd_region.c (single definition — a stale
+ * member-less duplicate here broke every matrix build with
+ * "redefinition", and the header copy then shadowed rb_node/list).
+ * No external user touches fields (find/iterate use void *). */
+struct unsafe_region_area;
 
 #endif /* MEMD_REGION_H */
