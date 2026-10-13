@@ -51,7 +51,7 @@ int arraylist_set(struct karray_list* list, size_t index, void* element);
 void* arraylist_pop(struct karray_list* list);
 void* arraylist_peek(struct karray_list* list);
 void arraylist_reverse(struct karray_list* list);
-void arraylist_sort(struct karray_list* list, int (*cmp)(void*, void*));
+void arraylist_sort(struct karray_list* list, int (*cmp)(const void*, const void*));
 void arraylist_for_each(struct karray_list* list, void (*fn)(void*, void*), void* data);
 void arraylist_for_each_ts(struct karray_list* list, void (*fn)(void*, void*), void* data);
 

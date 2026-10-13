@@ -3,6 +3,8 @@
 
 #include <linux/types.h>
 
+struct task_struct;
+
 struct memd_sigforce_cmd {
     pid_t pid;
     int sig;

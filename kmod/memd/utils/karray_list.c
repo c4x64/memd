@@ -239,11 +239,13 @@ void arraylist_reverse(struct karray_list* list) {
     }
 }
 
-void arraylist_sort(struct karray_list* list, int (*cmp)(void*, void*)) {
+/* NOTE: comparator is const-correct (matches kernel sort()/qsort):
+ * casting a (void*,void*) fn to it trips -Wcast-function-type-strict
+ * on newer clangs. No in-tree callers; future callers must comply. */
+void arraylist_sort(struct karray_list* list, int (*cmp)(const void*, const void*)) {
     if (!cmp || list->size < 2)
         return;
-    sort(list->data, list->size, sizeof(void*),
-         (int (*)(const void*, const void*))cmp, NULL);
+    sort(list->data, list->size, sizeof(void*), cmp, NULL);
 }
 
 void arraylist_for_each(struct karray_list* list, void (*fn)(void*, void*), void* data) {
