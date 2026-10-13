@@ -84,9 +84,12 @@ int memd_net_gen(void)
     }
     if (i >= 64 || !rel[i])
         return gen;
-    if (maj == 5 && min == 4)
-        gen = MEMD_GEN_54;
-    else if (maj == 5 && min == 10)
+    /* 5.4 deliberately unmapped: no DDK image exists to prove its table
+     * entries, and guessing proto offsets risks slab corruption. Until
+     * upstream publishes android11-5.4 (then re-add GEN_54 here), 5.4
+     * stays unknown-generation NO-GO (refuse socket init, never guess).
+     * MEMD_GEN_54 + its tables/asserts remain dormant for that day. */
+    if (maj == 5 && min == 10)
         gen = MEMD_GEN_510;
     else if (maj == 5 && min == 15)
         gen = MEMD_GEN_515;

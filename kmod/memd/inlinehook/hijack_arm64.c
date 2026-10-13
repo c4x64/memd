@@ -21,8 +21,9 @@ void (*flush_icache_range_ptr)(unsigned long, unsigned long) = NULL;
 #define INST_LDR         8
 #define INST_LDRV        9
 #define INST_LDRSW       10
-#define INST_LDR_LIT     10
+#define INST_LDR_LIT     26
 #define INST_STR_LIT     11
+#define INST_LDRSTR_REG  27
 #define INST_MRS         12
 #define INST_MSR         13
 #define INST_RET         14
@@ -195,11 +196,11 @@ struct memd_trampoline *memd_create_trampoline(void *target, void *handler, size
 
     memcpy(tramp_code, target, hook_size);
 
-    ret = hook_write_range(tramp_code + hook_size, (void[]) {
-        0xf0000000 | ((uintptr_t)target >> 0) & 0xfffff,
-        0xf0000000 | ((uintptr_t)target >> 20) & 0xfffff,
-        0xf0000000 | ((uintptr_t)target >> 40) & 0xfffff,
-        0xd61f0000,
+    ret = hook_write_range(tramp_code + hook_size, (u32[]) {
+        (u32)(0xf0000000 | (((uintptr_t)target >> 0) & 0xfffff)),
+        (u32)(0xf0000000 | (((uintptr_t)target >> 20) & 0xfffff)),
+        (u32)(0xf0000000 | (((uintptr_t)target >> 40) & 0xfffff)),
+        (u32)0xd61f0000,
     }, 16);
 
     if (ret) {

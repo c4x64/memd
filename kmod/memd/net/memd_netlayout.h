@@ -24,7 +24,9 @@
 
 #include <linux/version.h>
 
-/* Generation index by (major, minor). */
+/* Generation index by (major, minor). MEMD_GEN_54 is dormant: no DDK
+ * image exists to prove its table entries (see memd_net_gen), so 5.4
+ * resolves to unknown-generation NO-GO at runtime. */
 #define MEMD_GEN_54   0
 #define MEMD_GEN_510  1
 #define MEMD_GEN_515  2

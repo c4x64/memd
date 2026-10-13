@@ -12,7 +12,9 @@ from pathlib import Path
 # ALL known GKI releases with devices and AVDs (as of 2025)
 # Source: Android Common Kernels + GKI release tracking + AVD configs + Cuttlefish
 GKI_RELEASES = {
-    # Android 11 / 5.4 - Legacy but still on devices
+    # Android 11 / 5.4 - Legacy but still on devices. No DDK image
+    # published upstream (manifest unknown), so no build job and the
+    # runtime resolves 5.4 to NO-GO until one appears.
     "android11-5.4": {
         "versions": ["5.4.147", "5.4.162", "5.4.188", "5.4.207", "5.4.219", "5.4.231"],
         "devices": ["pixel4", "pixel4xl", "pixel4a", "pixel5", "pixel5a"],
@@ -80,9 +82,12 @@ GKI_RELEASES = {
     },
 }
 
-# DDK image tags available (updated from ghcr.io/ylarod/ddk)
+# DDK image tags available (updated from ghcr.io/ylarod/ddk).
+# NOTE: android11-5.4 has NO published image (registry: manifest
+# unknown), so it has no build job. The 5.4 code paths (GEN_54 tables,
+# asserts) stay dormant until upstream publishes one; at runtime 5.4
+# resolves to unknown-generation NO-GO rather than guessing offsets.
 DDK_IMAGES = {
-    "android11-5.4": "android11-5.4-20251016",
     "android12-5.10": "android12-5.10-20251016",
     "android13-5.10": "android13-5.10-20251016",
     "android13-5.15": "android13-5.15-20251016",
@@ -125,7 +130,6 @@ def generate_matrix():
         
         # Add debug variant for all major stable releases
         if kmi in [
-            "android11-5.4",
             "android13-5.10", "android13-5.15",
             "android14-5.15", "android14-6.1",
             "android15-6.1", "android15-6.6",

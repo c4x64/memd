@@ -1,6 +1,9 @@
 #ifndef ANDROID_MEMD_HIJACK_ARM64_H
 #define ANDROID_MEMD_HIJACK_ARM64_H
 
+#include <linux/compiler.h>
+#include <linux/types.h>
+
 #define INSTRUCTION_SIZE (4)
 #define HIJACK_INST_NUM (6)
 #define HIJACK_SIZE (INSTRUCTION_SIZE * HIJACK_INST_NUM)
