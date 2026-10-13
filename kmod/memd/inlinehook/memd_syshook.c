@@ -81,6 +81,26 @@ struct hide_ctx {
     struct dir_context *orig;
 };
 
+/* Dispatch: one replacement serves up to MAX_HOOKED_OPS tables; find
+ * the original for this file's ops. Lock-free (install/uninstall mutate
+ * under syshook_lock while readers run): a stale hit after uninstall
+ * merely calls the kernel's own iterate directly (one unfiltered
+ * listing, never a crash); rmmod is fenced by try_module_get below. */
+static iterate_shared_fn memd_orig_for_ops(const struct file_operations *ops)
+ {
+    int n, i;
+    if (!ops)
+        return NULL;
+    n = READ_ONCE(hooked_fops_count);
+    if (n > MAX_HOOKED_OPS)
+        n = MAX_HOOKED_OPS;
+    for (i = 0; i < n; i++) {
+        if (READ_ONCE(hooked_fops[i].ops) == ops)
+            return READ_ONCE(hooked_fops[i].orig_iterate);
+    }
+    return NULL;
+}
+
 static bool should_hide_pid(pid_t pid, struct pid_namespace *ns)
  {
     return memd_hide_contains_ns(pid, ns);
@@ -127,7 +147,7 @@ static int memd_iterate_shared(struct file *filp, struct dir_context *ctx)
     int ret;
     bool held = false;
 
-    orig = READ_ONCE(orig_iterate);
+    orig = memd_orig_for_ops(memd_file_fop(filp));
     if (!orig)
         return -ENOSYS;
 
@@ -247,7 +267,7 @@ int memd_hide_install(void)
         NULL
     };
 
-    for (int i = 0; proc_dirs[i]; i++) {
+    for (i = 0; proc_dirs[i]; i++) {
         ret = hook_proc_dir(proc_dirs[i]);
         if (ret && ret != -ENOSYS) {
             memd_err("hide install: failed to hook %s: %d\n", proc_dirs[i], ret);
