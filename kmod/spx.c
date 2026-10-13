@@ -60,7 +60,7 @@ extern const unsigned long _binary_rwbridge_android14_5_15_dbg_ko_len;
 extern const unsigned char _binary_rwbridge_android14_6_1_ko_start[];
 extern const unsigned long _binary_rwbridge_android14_6_1_ko_len;
 extern const unsigned char _binary_rwbridge_android14_6_1_dbg_ko_start[];
-extern const unsigned long _binary_rwbridge_a14_6_1_dbg_ko_len;
+extern const unsigned long _binary_rwbridge_android14_6_1_dbg_ko_len;
 extern const unsigned char _binary_rwbridge_android16_6_12_ko_start[];
 extern const unsigned long _binary_rwbridge_android16_6_12_ko_len;
 extern const unsigned char _binary_rwbridge_android16_6_12_dbg_ko_start[];
