@@ -216,16 +216,17 @@ int memd_del_unsafe_region(pid_t pid)
 
 /* Enhanced API functions */
 
-int memd_find_region(uintptr_t addr, struct unsafe_region_area *out)
+int memd_find_region(uintptr_t addr, void *out)
  {
     unsigned long flags;
     struct unsafe_region_area *area;
+    struct unsafe_region_area *o = (struct unsafe_region_area *)out;
 
     spin_lock_irqsave(&g_region_tree->lock, flags);
     area = region_find(addr);
     if (area) {
-        if (out)
-            *out = *area;
+        if (o)
+            *o = *area;
         area->access_count++;
         spin_unlock_irqrestore(&g_region_tree->lock, flags);
         return 0;
@@ -234,7 +235,7 @@ int memd_find_region(uintptr_t addr, struct unsafe_region_area *out)
     return -ENOENT;
 }
 
-int memd_region_iterate(int (*callback)(struct unsafe_region_area *area, void *data), void *data)
+int memd_region_iterate(int (*callback)(void *area, void *data), void *data)
  {
     unsigned long flags;
     struct unsafe_region_area *area;
