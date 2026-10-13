@@ -893,7 +893,7 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
             unsigned long _vf = memd_v_file(vma);
             if (!_vf)
                 continue;
-            if (vm_flag && !(vma->vm_flags & vm_flag)) {
+            if (vm_flag && !(memd_v_flags(vma) & vm_flag)) {
                 continue;
             }
             dentry = memd_file_dentry((struct file *)_vf);

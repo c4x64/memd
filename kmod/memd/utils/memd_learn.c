@@ -26,7 +26,7 @@ static DEFINE_SPINLOCK(memd_learn_lock);
 
 struct memd_learned memd_learned = {
     .t_pid = -1, .t_tgid = -1, .t_comm = -1, .t_mm = -1, .t_cred = -1,
-    .m_pgd = -1, .v_start = -1, .v_end = -1,
+    .m_pgd = -1, .v_start = -1, .v_end = -1, .v_flags = -1,
 };
 
 struct memd_learned_ext memd_learned_ext = {
@@ -281,9 +281,14 @@ static int memd_pgd_shape_ok(u64 phys)
     return zeros > 100 && valid > 0;
 }
 
-/* Read one maps line: start, end (hex), perms[0]. Returns 0 ok. */
+/* Read one maps line: start, end (hex), perms[0]. Returns 0 ok.
+ * perms (nullable out): low bits encode r/w/x/s as VM_READ/VM_WRITE/
+ * VM_EXEC/VM_SHARED (stable UAPI constants); 0 when unparseable. The
+ * line format is "start-end perms ...": after the end hex, buf[i] is
+ * the space and buf[i+1..i+4] are the perms chars. */
 static int memd_maps_line(struct file *f, loff_t *pos, unsigned long *start,
-                          unsigned long *end, char *base, size_t basecap)
+                           unsigned long *end, char *base, size_t basecap,
+                           unsigned *perms)
  {
     char buf[256];
     ssize_t n;
@@ -320,6 +325,29 @@ static int memd_maps_line(struct file *f, loff_t *pos, unsigned long *start,
     *end = e;
     if (!(s && e > s))
         return -1;
+    /* perms sit right after the end address ("end<sp>rwxp"): encode the
+     * low VM bits; anything unexpected yields 0 (caller treats equal
+     * perms as unteachable). Lenient on purpose: the line stays usable
+     * for start/end/file even when perms baffle us. */
+    if (perms) {
+        unsigned p = 0;
+        *perms = 0;
+        if (buf[i] == ' ' && i + 4 < n &&
+            (buf[i + 1] == 'r' || buf[i + 1] == '-') &&
+            (buf[i + 2] == 'w' || buf[i + 2] == '-') &&
+            (buf[i + 3] == 'x' || buf[i + 3] == '-') &&
+            (buf[i + 4] == 's' || buf[i + 4] == 'p')) {
+            if (buf[i + 1] == 'r')
+                p |= VM_READ;
+            if (buf[i + 2] == 'w')
+                p |= VM_WRITE;
+            if (buf[i + 3] == 'x')
+                p |= VM_EXEC;
+            if (buf[i + 4] == 's')
+                p |= VM_SHARED;
+            *perms = p;
+        }
+    }
     /* basename of pathname (empty for anonymous) */
     if (base && basecap > 1) {
         int k, last = -1;
@@ -342,7 +370,44 @@ static int memd_maps_line(struct file *f, loff_t *pos, unsigned long *start,
 }
 
 static int memd_find_vma_pair(struct mm_struct *mm, unsigned long addr,
-                              int *start_off, int *end_off);
+                               int *start_off, int *end_off);
+
+/* Learn vm_flags slot: the one word whose low VM bits match the known
+ * maps perms on BOTH confirmed lines. Two lines with differing perms
+ * are required (equal perms teach nothing: any shared constant would
+ * match). Unique single hit wins; anything else leaves the compiled
+ * fallback (fail-soft, loud). Page-aligned addresses (start/end) can
+ * only match an all-dash perms pattern, and p1 != p2 rules that out,
+ * so no need to exclude learned slots explicitly. */
+static void memd_learn_vma_flags(struct mm_struct *mm, unsigned long s1,
+                                  unsigned long s2, unsigned p1, unsigned p2)
+ {
+    static const unsigned long mask = (unsigned long)(VM_READ | VM_WRITE | VM_EXEC | VM_SHARED);
+    struct vm_area_struct *v1, *v2;
+    int i, found = -1, n = 0;
+    if (!memd_fv || !mm || !s1 || !s2 || p1 == p2)
+        return;
+    v1 = memd_fv(mm, s1);
+    v2 = memd_fv(mm, s2);
+    if (!v1 || !v2)
+        return;
+    for (i = 0; i + 8 <= 256; i += 8) {
+        unsigned long w1 = 0, w2 = 0;
+        if (memd_safe_read64((char *)v1 + i, &w1) ||
+            memd_safe_read64((char *)v2 + i, &w2))
+            continue;
+        if ((w1 & mask) == (unsigned long)p1 && (w2 & mask) == (unsigned long)p2) {
+            n++;
+            found = i;
+        }
+    }
+    if (n == 1) {
+        memd_learned.v_flags = found;
+        memd_info("learn: vma vm_flags at +%d\n", found);
+    } else {
+        memd_err("learn: vma vm_flags ambiguous (%d)\n", n);
+    }
+}
 
 /* Learn vm_file slot: scan vma for a file pointer whose dentry name
  * matches the known maps basename (all reads guarded). */
@@ -417,6 +482,7 @@ static void memd_learn_vma(void)
     struct file *f;
     loff_t pos = 0;
     unsigned long s1 = 0, e1 = 0, s2 = 0, e2 = 0;
+    unsigned p1 = 0, p2 = 0;
     char b1[48] = {0}, b2[48] = {0};
     int a = -1, b = -1, c = -1, d = -1, g;
     mm = get_task_mm(current);
@@ -434,7 +500,7 @@ static void memd_learn_vma(void)
         mmput(mm);
         return;
     }
-    if (memd_maps_line(f, &pos, &s1, &e1, b1, sizeof(b1))) {
+    if (memd_maps_line(f, &pos, &s1, &e1, b1, sizeof(b1), &p1)) {
         memd_err("learn: maps parse failed\n");
         memd_filp_close(&f, NULL);
         mmput(mm);
@@ -443,12 +509,13 @@ static void memd_learn_vma(void)
     /* second line with a pathname (anonymous lines teach nothing) */
     g = 0;
     while (g++ < 8) {
-        if (memd_maps_line(f, &pos, &s2, &e2, b2, sizeof(b2)))
+        if (memd_maps_line(f, &pos, &s2, &e2, b2, sizeof(b2), &p2))
             break;
         if (b2[0])
             break;
         s2 = e2 = 0;
         b2[0] = '\0';
+        p2 = 0;
     }
     memd_filp_close(&f, NULL);
     if (!memd_find_vma_pair(mm, s1, &a, &b) &&
@@ -457,6 +524,7 @@ static void memd_learn_vma(void)
         memd_learned.v_start = a;
         memd_learned.v_end = b;
         memd_info("learn: vma start/end at +%d/+%d\n", a, b);
+        memd_learn_vma_flags(mm, s1, s2, p1, p2);
     } else {
         memd_err("learn: vma pair unconfirmed\n");
     }
@@ -653,6 +721,13 @@ unsigned long memd_v_end(struct vm_area_struct *vma)
     if (memd_learned.v_end >= 0)
         return *(unsigned long *)((char *)vma + memd_learned.v_end);
     return vma->vm_end;
+}
+
+unsigned long memd_v_flags(struct vm_area_struct *vma)
+ {
+    if (memd_learned.v_flags >= 0)
+        return *(unsigned long *)((char *)vma + memd_learned.v_flags);
+    return vma->vm_flags;
 }
 
 /* Per-generation struct file layout is tabled at file scope (see top);

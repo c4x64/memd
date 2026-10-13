@@ -35,6 +35,7 @@ struct memd_learned {
     int m_pgd;    /* mm_struct.pgd, -1 unknown */
     int v_start;  /* vm_area_struct.vm_start, -1 unknown */
     int v_end;    /* vm_area_struct.vm_end, -1 unknown */
+    int v_flags;  /* vm_area_struct.vm_flags, -1 unknown */
 };
 
 extern struct memd_learned memd_learned;
@@ -54,6 +55,7 @@ unsigned long memd_m_pgd(struct mm_struct *mm);
 unsigned long memd_valid_pgd(struct mm_struct *mm);
 unsigned long memd_v_start(struct vm_area_struct *vma);
 unsigned long memd_v_end(struct vm_area_struct *vma);
+unsigned long memd_v_flags(struct vm_area_struct *vma);
 
 /* struct file fields move per generation (6.6/6.12 rework): resolved by
  * running generation. Returns NULL/0 when unknown (callers fail soft). */
