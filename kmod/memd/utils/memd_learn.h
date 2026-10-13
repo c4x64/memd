@@ -121,7 +121,9 @@ struct memd_learned_ext {
     int d_inode;      /* struct dentry.d_inode */
     int d_op;         /* struct dentry.d_op */
     int d_sb;         /* struct dentry.d_sb */
-    int d_lock;       /* struct dentry.d_lock */
+    /* NOTE: dcache.h defines d_lock as d_lockref.lock (accessor macro),
+     * so this member must NOT be named d_lock (broke all matrix builds). */
+    int d_lockref;    /* struct dentry.d_lock offset */
     int d_count;      /* struct dentry.d_count */
     int d_flags;      /* struct dentry.d_flags */
     int i_ino;        /* struct inode.i_ino */

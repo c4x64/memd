@@ -41,7 +41,7 @@ struct memd_learned_ext memd_learned_ext = {
     .m_env_end = -1, .f_fpath = -1, .f_op = -1, .f_inode = -1, .f_mapping = -1,
     .f_pos = -1, .f_flags = -1, .f_mode = -1, .f_count = -1,
     .d_name = -1, .d_parent = -1, .d_inode = -1, .d_op = -1,
-    .d_sb = -1, .d_lock = -1, .d_count = -1, .d_flags = -1,
+    .d_sb = -1, .d_lockref = -1, .d_count = -1, .d_flags = -1,
     .i_ino = -1, .i_mode = -1, .i_uid = -1, .i_gid = -1, .i_size = -1,
     .i_blocks = -1, .i_atime = -1, .i_mtime = -1, .i_ctime = -1,
     .i_blkbits = -1, .i_flags = -1, .i_sb = -1, .i_mapping = -1,

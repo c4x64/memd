@@ -55,23 +55,8 @@
 #define CMD_MAX_BYTES (50 * 1024 * 1024)
 #define CMD_MAX_PAGES (CMD_MAX_BYTES / PAGE_SIZE)
 
-struct memd_sock {
-    struct sock sk;
-
-    /* Slack: the running kernel's struct sock may exceed the build
-     * baseline's (5.10 headers on newer targets — proven: total grows
-     * per generation). Tail fields live past any plausible true size
-     * (deltas are tens of bytes; this is 2K) and the slab, sized by
-     * sizeof, covers everything. Without this, the slab object is
-     * smaller than the kernel's sock (heap overflow on first socket)
-     * and our tail overwrites live sock state. */
-    char priv_pad[2048];
-
-    int version;
-
-    pid_t session;
-
-    struct karray_list* used_pages;
-};
+/* struct memd_sock lives in memd/net/memd_sock.h (single definition —
+ * a stale duplicate here broke every matrix build with "redefinition").
+ * All field users already include memd_sock.h directly. */
 
 #endif /* MEMD_COMMON_H */
