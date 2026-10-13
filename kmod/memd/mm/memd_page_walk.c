@@ -11,6 +11,7 @@
 #include <linux/uaccess.h>
 #include <linux/swap.h>
 #include <linux/pagemap.h>
+#include <linux/mman.h>
 #include "memd_common.h"
 #include "memd_utils.h"
 #include "memd_learn.h"
@@ -470,8 +471,12 @@ int memd_page_walk(struct mm_struct *mm, struct page_walk_context *ctx)
     }
 
     ctx->mm = mm;
-    unsigned long start = ctx->include_kernel ? 0 : TASK_SIZE_MIN;
-    unsigned long end = ctx->include_kernel ? ULONG_MAX : TASK_SIZE;
+    /* No TASK_SIZE_MIN on matrix DDKs; user range starts at 0. End at
+     * TASK_SIZE_64 (not build-time TASK_SIZE: a 5.10-built image on a
+     * 52-bit-VA 6.x kernel must still reach high mappings; the extra
+     * range is unmapped holes elsewhere and walks fail closed). */
+    unsigned long start = 0;
+    unsigned long end = ctx->include_kernel ? ULONG_MAX : TASK_SIZE_64;
 
     return walk_pgd_level_ctx(mm, start, end, ctx);
 }

@@ -41,7 +41,7 @@ struct page_walk_context;
 int memd_page_walk(struct mm_struct *mm, struct page_walk_context *ctx);
 int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_info *info);
 int memd_walk_page_range(struct mm_struct *mm, unsigned long start, unsigned long end,
-                          int (*callback)(void *pte, unsigned long addr, unsigned long end, void *data),
+                          int (*callback)(pte_t *pte, unsigned long addr, unsigned long end, void *data),
                           void *data);
 
 void traverse_page_tables(struct mm_struct *mm, struct page_walk_stats *stats);
