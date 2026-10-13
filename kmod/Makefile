@@ -94,6 +94,7 @@ ccflags-y += -fno-stack-protector -fno-stack-check
 # clang emits no kcfi traps for this codebase — no indirect-call typeids —
 # so the variant was byte-identical to plain; not worth a matrix slot).
 ccflags-remove-y += -fsanitize=cfi -fsanitize=kcfi -fsanitize-cfi-cross-dso
+ccflags-remove-y += -fsanitize-cfi-icall-experimental-normalize-integers
 # kallsyms comes from /proc/kallsyms self-parse (memd_kallsyms.c): no
 # kprobe imports of any kind, so no loader-rejected GOT relocs on any
 # target and no per-generation trick filter. The old MEMD_NO_KPROBE_TRICK
