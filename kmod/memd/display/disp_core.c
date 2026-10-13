@@ -36,8 +36,6 @@ static const struct memd_disp_backend *memd_backends[] = {
 };
 
 static DEFINE_MUTEX(g_core_mu);
-static DEFINE_WAIT_QUEUE_HEAD(g_vsync_wq);
-static atomic_t g_frame_pending = ATOMIC_INIT(0);
 
 static struct task_struct *g_refresh_task;
 static struct workqueue_struct *g_flip_wq = NULL;
@@ -155,11 +153,6 @@ static void memd_dirty_add(__u32 x, __u32 y, __u32 w, __u32 h)
         g_core.dirty.x1 = x1;
     if (y1 > g_core.dirty.y1)
         g_core.dirty.y1 = y1;
-}
-
-static inline int64_t ktime_to_ns(ktime_t kt)
- {
-    return ktime_to_ns(kt);
 }
 
 static int64_t memd_get_time_ns(void)
