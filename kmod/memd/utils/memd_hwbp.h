@@ -1,7 +1,10 @@
 #ifndef MEMD_HWBP_H
 #define MEMD_HWBP_H
 
+#include <linux/errno.h>
 #include <linux/types.h>
+
+struct task_struct;
 
 #define MEMD_HWBP_TYPE_BREAKPOINT 0
 #define MEMD_HWBP_TYPE_WATCHPOINT_READ 1
@@ -54,11 +57,35 @@ struct memd_hwbp_list_cmd {
     } entries[16];
 };
 
-int memd_hwbp_init(void);
-void memd_hwbp_cleanup(void);
-int memd_hwbp_get_info(struct memd_hwbp_info_cmd *info);
-int memd_hwbp_set(struct task_struct *task, struct memd_hwbp_set_cmd *cmd);
-int memd_hwbp_remove(struct task_struct *task, u32 hwbp_id);
-int memd_hwbp_list(struct task_struct *task, struct memd_hwbp_list_cmd *cmd);
+/* TODO(hwbp): implementation parked (memd_hwbp.c not in rwbridge-y).
+ * It programs thread_struct.debug_monitors / struct debug_monitor_state,
+ * removed on every matrix DDK (new model: thread debug_info + live
+ * registers). Stubs keep the ioctl numbers wired and fail soft until
+ * the rewrite lands. */
+static inline int memd_hwbp_init(void) { return 0; }
+static inline void memd_hwbp_cleanup(void) {}
+static inline int memd_hwbp_get_info(struct memd_hwbp_info_cmd *info)
+{
+    (void)info;
+    return -ENODEV;
+}
+static inline int memd_hwbp_set(struct task_struct *task, struct memd_hwbp_set_cmd *cmd)
+{
+    (void)task;
+    (void)cmd;
+    return -ENODEV;
+}
+static inline int memd_hwbp_remove(struct task_struct *task, u32 hwbp_id)
+{
+    (void)task;
+    (void)hwbp_id;
+    return -ENODEV;
+}
+static inline int memd_hwbp_list(struct task_struct *task, struct memd_hwbp_list_cmd *cmd)
+{
+    (void)task;
+    (void)cmd;
+    return -ENODEV;
+}
 
 #endif

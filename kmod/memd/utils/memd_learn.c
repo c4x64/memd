@@ -16,6 +16,7 @@
 #include <linux/version.h>
 #include <linux/rcupdate.h>
 #include <linux/sched/mm.h>
+#include <linux/fs_struct.h>
 #include <asm/sysreg.h>
 
 #include "memd_utils.h"
@@ -1056,13 +1057,8 @@ static void memd_learn_sighand_struct(void)
     }
 }
 
-/* TODO(fs_struct): parked until the defining header is known. sched.h
- * only forward-declares struct fs_struct on every matrix DDK, so
- * &fs->pwd / &fs->root do not compile (incomplete type). The build.yml
- * "fs_struct def" probe locates it; then include that header and flip
- * this back to 1. Readers (memd_t_fs_pwd/root) already fail soft on
- * -1, and have no external users yet, so runtime impact is nil. */
-#if 0
+/* struct fs_struct lives in <linux/fs_struct.h> (sched.h only
+ * forward-declares it on every matrix DDK — CI-probed). */
 static void memd_learn_fs_struct(void)
  {
     struct task_struct *t = current;
@@ -1100,7 +1096,6 @@ static void memd_learn_fs_struct(void)
         memd_info("learn: fs root at +%d\n", found);
     }
 }
-#endif /* TODO(fs_struct) */
 
 static void memd_learn_nsproxy_struct(void)
  {
@@ -1310,9 +1305,7 @@ int memd_learn_comprehensive(void)
     memd_learn_thread_struct();
     memd_learn_signal_struct();
     memd_learn_sighand_struct();
-#if 0 /* TODO(fs_struct): parked with its learner (see above). */
     memd_learn_fs_struct();
-#endif
     memd_learn_nsproxy_struct();
     memd_learn_cred_struct();
 

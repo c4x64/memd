@@ -18,6 +18,10 @@
 # check-universal runs on the already-built rwbridge.ko, no KDIR needed.
 
 obj-m += rwbridge.o
+# TODO(hwbp): memd/utils/memd_hwbp.o is parked (not in rwbridge-y): it
+# targets the removed thread_struct.debug_monitors / debug_monitor_state
+# model (absent on every matrix DDK; new model is thread debug_info).
+# Re-add with a rewrite; API stubs in memd_hwbp.h fail soft meanwhile.
 rwbridge-y := \
     memd/core/memd.o \
     memd/net/memd_sock.o \
@@ -27,7 +31,6 @@ rwbridge-y := \
     memd/utils/memd_kallsyms.o \
     memd/utils/memd_uaccess.o \
     memd/utils/memd_learn.o \
-    memd/utils/memd_hwbp.o \
     memd/utils/memd_gyro.o \
     memd/utils/memd_sigforce.o \
     memd/utils/karray_list.o \
