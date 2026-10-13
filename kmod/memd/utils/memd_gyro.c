@@ -311,8 +311,9 @@ int memd_touch_init(struct task_struct *task, struct memd_touch_init_cmd *cmd)
             memd_info("touch: created virtual input device\n");
         }
 
-        if (!(dev->evbit[0] & (1 << EV_ABS)) ||
-            !(dev->absbit[0] & ((1 << ABS_MT_POSITION_X) | (1 << ABS_MT_POSITION_Y)))) {
+        /* test_bit, not (1 << code): MT codes exceed 31 (int width). */
+        if (!test_bit(EV_ABS, dev->evbit) ||
+            !(test_bit(ABS_MT_POSITION_X, dev->absbit) && test_bit(ABS_MT_POSITION_Y, dev->absbit))) {
             if (dev != touch_input_dev)
                 input_put_device(dev);
             mutex_unlock(&touch_lock);
@@ -340,7 +341,7 @@ int memd_touch_init(struct task_struct *task, struct memd_touch_init_cmd *cmd)
     return 0;
 }
 
-static void memd_touch_calibrate(struct memd_touch_data *touch)
+static void memd_touch_calibrate_sample(struct memd_touch_data *touch)
  {
     if (!touch_cal.calibrated) {
         if (touch_cal.min_x == 0 && touch_cal.max_x == 0) {
@@ -406,7 +407,7 @@ int memd_touch_inject(struct task_struct *task, struct memd_touch_inject_cmd *cm
 
     dev = touch_input_dev;
 
-    memd_touch_calibrate(touch);
+    memd_touch_calibrate_sample(touch);
     memd_touch_detect_gesture(touch, slot);
 
     input_mt_slot(dev, slot);
@@ -454,7 +455,7 @@ int memd_touch_inject(struct task_struct *task, struct memd_touch_inject_cmd *cm
     return 0;
 }
 
-static void memd_gyro_calibrate(struct memd_gyro_data *gyro)
+static void memd_gyro_calibrate_sample(struct memd_gyro_data *gyro)
  {
     if (!gyro_cal.calibrated) {
         if (gyro_cal.bias_x == 0 && gyro_cal.bias_y == 0 && gyro_cal.bias_z == 0) {
@@ -492,7 +493,7 @@ int memd_gyro_inject(struct task_struct *task, struct memd_gyro_inject_cmd *cmd)
 
     dev = gyro_input_dev;
 
-    memd_gyro_calibrate(gyro);
+    memd_gyro_calibrate_sample(gyro);
 
     if (dev->evbit[0] & (1 << EV_REL)) {
         input_report_rel(dev, REL_RX, gyro->x);
