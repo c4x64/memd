@@ -3,12 +3,14 @@
 
 #include "memd_common.h"
 
+/* Snapshot view: plain counters (the live ones are atomic64_t inside
+ * memd_protocol.c; memd_get_sock_stats converts on copy-out). */
 struct memd_sock_stat {
-    atomic64_t rx_bytes;
-    atomic64_t tx_bytes;
-    atomic64_t rx_packets;
-    atomic64_t tx_packets;
-    atomic64_t errors;
+    s64 rx_bytes;
+    s64 tx_bytes;
+    s64 rx_packets;
+    s64 tx_packets;
+    s64 errors;
 };
 
 int memd_proto_init(void);

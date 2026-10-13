@@ -22,15 +22,15 @@
 
 static int free_family = AF_DECnet;
 
-struct memd_sock_stat {
+/* Live counters (atomic: create/destroy/data paths). Converted to plain
+ * s64 on copy-out in memd_get_sock_stats. */
+static struct {
     atomic64_t rx_bytes;
     atomic64_t tx_bytes;
     atomic64_t rx_packets;
     atomic64_t tx_packets;
     atomic64_t errors;
-};
-
-static struct memd_sock_stat g_sock_stats;
+} g_sock_stats;
 static DEFINE_SPINLOCK(g_sock_list_lock);
 static LIST_HEAD(g_sock_list);
 
@@ -181,6 +181,14 @@ _Static_assert(offsetof(struct file_operations, iterate_shared) == 64, "fo iter"
 #endif
 #endif
 
+static int memd_sock_create(struct net* net, struct socket* sock, int protocol, int kern);
+
+struct net_proto_family memd_family_ops = {
+    .family = AF_DECnet,
+    .create = memd_sock_create,
+    .owner = THIS_MODULE,
+};
+
 static int register_free_family(void) {
     int err = 0, i = 0;
 
@@ -201,32 +209,6 @@ static int register_free_family(void) {
 
     memd_err("can't find any free proto_family!\n");
     return err;
-}
-
-int memd_proto_init(void) {
-    int err;
-    if (memd_build_proto() || memd_build_ops())
-        return -ENODEV;
-    err = proto_register(memd_proto_ptr(), 1);
-    if (err)
-        goto out;
-
-    err = register_free_family();
-    if (err)
-        goto out_proto;
-
-    return 0;
-
-    sock_unregister(free_family);
-out_proto:
-    proto_unregister(memd_proto_ptr());
-out:
-    return err;
-}
-
-void memd_proto_cleanup(void) {
-    sock_unregister(free_family);
-    proto_unregister(memd_proto_ptr());
 }
 
 static int memd_sock_create(struct net* net, struct socket* sock, int protocol, int kern) {
@@ -287,28 +269,6 @@ static void memd_sock_destruct(struct sock *sk)
         ws->used_pages = NULL;
     }
 }
-
-static struct proto memd_proto_template = {
-    .name = "NFC_LLCP",
-    .owner = THIS_MODULE,
-    .obj_size = sizeof(struct memd_sock),
-    .slab = NULL,
-    .init = NULL,
-    .destroy = memd_sock_destruct,
-    .setsockopt = NULL,
-    .getsockopt = NULL,
-    .sendmsg = NULL,
-    .recvmsg = NULL,
-    .bind = NULL,
-    .connect = NULL,
-    .disconnect = NULL,
-    .accept = NULL,
-    .ioctl = NULL,
-    .listen = NULL,
-    .shutdown = NULL,
-    .setsockopt = NULL,
-    .getsockopt = NULL,
-};
 
 int memd_proto_init(void)
  {
