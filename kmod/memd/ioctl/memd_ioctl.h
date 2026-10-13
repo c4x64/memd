@@ -4,6 +4,12 @@
 #include "memd_common.h"
 #include "memd_bindproc.h"
 
+/* Feature command structs live in their own headers (single definition;
+ * stale duplicates here broke every matrix build with "redefinition"). */
+#include "memd_hwbp.h"
+#include "memd_gyro.h"
+#include "memd_sigforce.h"
+
 struct memd_addr_translate_cmd {
     uintptr_t phy_addr; /* Output: Physical address after translation */
     pid_t pid; /* Input: Process ID owning the virtual address */
@@ -228,122 +234,31 @@ struct memd_page_perms_cmd {
 #define MEMD_IOCTL_PAGE_PERMS _IOWR('W', 23, struct memd_page_perms_cmd)
 /* IOCTL command for getting process information by PID */
 #define MEMD_IOCTL_GET_PROC_INFO _IOWR('W', 20, struct memd_get_proc_info_cmd)
-/* Hardware breakpoint/watchpoint commands */
-struct memd_hwbp_info_cmd {
-    u32 num_brps;
-    u32 num_wrps;
-    u32 brp_len_mask;
-    u32 wrp_len_mask;
-};
+/* Hardware breakpoint/watchpoint commands (structs in memd_hwbp.h). */
 #define MEMD_IOCTL_HWBP_INFO _IOWR('W', 21, struct memd_hwbp_info_cmd)
 
-struct memd_hwbp_set_cmd {
-    pid_t pid;
-    u32 type;
-    uintptr_t addr;
-    u32 len;
-    u32 enabled;
-    u32 hwbp_id;
-};
 #define MEMD_IOCTL_HWBP_SET _IOWR('W', 22, struct memd_hwbp_set_cmd)
 
-struct memd_hwbp_remove_cmd {
-    pid_t pid;
-    u32 hwbp_id;
-};
 #define MEMD_IOCTL_HWBP_REMOVE _IOWR('W', 23, struct memd_hwbp_remove_cmd)
 
-struct memd_hwbp_list_cmd {
-    pid_t pid;
-    u32 max_entries;
-    u32 count;
-    struct {
-        u32 hwbp_id;
-        u32 type;
-        uintptr_t addr;
-        u32 len;
-        u32 enabled;
-    } entries[16];
-};
 #define MEMD_IOCTL_HWBP_LIST _IOWR('W', 24, struct memd_hwbp_list_cmd)
 
-/* Gyroscope/Touch simulation commands */
-struct memd_gyro_data {
-    int16_t x;
-    int16_t y;
-    int16_t z;
-    int64_t timestamp;
-};
-
-struct memd_touch_data {
-    int32_t x;
-    int32_t y;
-    int32_t pressure;
-    int32_t type;
-    int64_t timestamp;
-    int32_t tracking_id;
-    int32_t slot;
-};
-
-struct memd_gyro_prepare_cmd {
-    pid_t pid;
-    uintptr_t target_addr;
-    u32 enable;
-};
+/* Gyroscope/Touch simulation commands (structs in memd_gyro.h). */
 #define MEMD_IOCTL_GYRO_PREPARE _IOWR('W', 30, struct memd_gyro_prepare_cmd)
 
-struct memd_touch_init_cmd {
-    pid_t pid;
-    uintptr_t input_dev_addr;
-    u32 enable;
-};
 #define MEMD_IOCTL_TOUCH_INIT _IOWR('W', 31, struct memd_touch_init_cmd)
 
-struct memd_touch_inject_cmd {
-    pid_t pid;
-    struct memd_touch_data touch;
-};
 #define MEMD_IOCTL_TOUCH_INJECT _IOWR('W', 32, struct memd_touch_inject_cmd)
 
-struct memd_gyro_inject_cmd {
-    pid_t pid;
-    struct memd_gyro_data gyro;
-};
 #define MEMD_IOCTL_GYRO_INJECT _IOWR('W', 33, struct memd_gyro_inject_cmd)
 
-struct memd_sigforce_cmd {
-    pid_t pid;
-    int sig;
-    int force;
-    int result;
-    int async;
-    int group;
-};
+/* Signal forcing (struct in memd_sigforce.h). */
 #define MEMD_IOCTL_SIGFORCE _IOWR('W', 34, struct memd_sigforce_cmd)
 
-struct memd_gyro_calibrate_cmd {
-    pid_t pid;
-    int16_t bias_x, bias_y, bias_z;
-    int16_t scale_x, scale_y, scale_z;
-    u32 action;
-};
 #define MEMD_IOCTL_GYRO_CALIBRATE _IOWR('W', 35, struct memd_gyro_calibrate_cmd)
 
-struct memd_touch_calibrate_cmd {
-    pid_t pid;
-    int32_t min_x, max_x, min_y, max_y;
-    int32_t pressure_min, pressure_max;
-    u32 action;
-};
 #define MEMD_IOCTL_TOUCH_CALIBRATE _IOWR('W', 36, struct memd_touch_calibrate_cmd)
 
-struct memd_virtual_input_cmd {
-    pid_t pid;
-    u32 type;
-    char name[64];
-    u32 enable;
-    int result;
-};
 #define MEMD_IOCTL_VIRTUAL_INPUT_CREATE _IOWR('W', 37, struct memd_virtual_input_cmd)
 
 /* IOCTL command for hiding status (hook active, hidden count) */
