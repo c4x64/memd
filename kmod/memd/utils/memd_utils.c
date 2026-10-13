@@ -909,16 +909,24 @@ ret:
 int is_pid_alive(pid_t pid) {
     struct pid* pid_struct;
     struct task_struct* task;
+    int alive;
 
     pid_struct = find_get_pid(pid);
     if (!pid_struct)
         return false;
 
-    task = pid_task(pid_struct, PIDTYPE_PID);
+    /* pid_task() needs rcu_read_lock and pins nothing; every other site
+     * here uses the refcounted get_pid_task() instead (safe without the
+     * lock, task pinned). This also drops the pid ref the old code
+     * leaked on all paths. */
+    task = get_pid_task(pid_struct, PIDTYPE_PID);
+    put_pid(pid_struct);
     if (!task)
         return false;
 
-    return pid_alive(task);
+    alive = pid_alive(task);
+    put_task_struct(task);
+    return alive;
 }
 
 /* Single find_process_by_name: get_cmdline via runtime kallsyms
