@@ -103,7 +103,7 @@ static int get_instruction_type(uint32_t instruction)
     if ((instruction & 0xfffff000) == 0xd5132000) return INST_MSR;
     if ((instruction & 0xfffffc00) == 0xd65f0000) return INST_RET;
     if ((instruction & 0xfffffc00) == 0xd63f0000) return INST_BLR;
-    if ((instruction & 0xfc000000) == 0xd6000000) return INST_BR;
+    if ((instruction & 0xfc000000) == 0xd4000000) return INST_BR;
     if ((instruction & 0xfe000000) == 0xaa000000) return INST_MOV;
     if ((instruction & 0xffe0fc00) == 0x8b000000) return INST_ADD_SUB_IMM;
     if ((instruction & 0xffe0fc00) == 0xcb000000) return INST_ADD_SUB_REG;
