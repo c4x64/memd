@@ -116,7 +116,7 @@ static void memd_learn_task(void)
     comm[sizeof(comm) - 1] = '\0';
     {
         size_t cl = strlen(comm);
-        int found = -1, n = 0;
+        int found = -1, n = 0, i;
         if (cl > 0 && cl < 32) {
             for (i = 0; i + (int)cl + 1 <= MEMD_LEARN_SCAN; i++) {
                 if (!memcmp((char *)t + i, comm, cl + 1)) {
@@ -858,10 +858,15 @@ static void memd_learn_mm_extended(void)
     if (!mm)
         return;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+    /* vma list anchor: mm->mmap exists pre-6.1 (CI-dumped: present on
+     * 5.4/5.10/5.15, gone on 6.1+ maple kernels). Nothing to learn
+     * there on newer targets (m_mmap stays -1, fail-soft). */
+    {
     struct vm_area_struct *mmap = mm->mmap;
     if (mmap) {
-        int found = -1, n = 0;
-        for (int i = 0; i + 8 <= 512; i += 8) {
+        int found = -1, n = 0, i;
+        for (i = 0; i + 8 <= 512; i += 8) {
             u64 v = 0;
             memcpy(&v, (char *)mm + i, 8);
             if (v == (u64)mmap) {
@@ -877,6 +882,10 @@ static void memd_learn_mm_extended(void)
             memd_err("learn: mm mmap ambiguous (%d)\n", n);
         }
     }
+    }
+#else
+    /* 6.1+: vma list removed; nothing to learn here. */
+#endif
 
     mmput(mm);
 }
@@ -948,9 +957,9 @@ static void memd_learn_thread_struct(void)
  {
     struct task_struct *t = current;
     struct thread_struct *thread = &t->thread;
-    int found = -1, n = 0;
+    int found = -1, n = 0, i;
 
-    for (int i = 0; i + 8 <= MEMD_LEARN_SCAN; i += 8) {
+    for (i = 0; i + 8 <= MEMD_LEARN_SCAN; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)t + i, 8);
         if (v == (u64)thread) {
@@ -976,7 +985,9 @@ static void memd_learn_thread_struct(void)
             memd_info("learn: thread cpu_context at +%d\n", found);
         }
 
-        n = memd_scan_for_ptr(thread, 512, &ts->fpsimd_state, &found);
+        /* fpsimd lives in the anonymous uw{} wrapper on every matrix DDK
+         * (5.10 through 6.12, CI-dumped); never top-level. */
+        n = memd_scan_for_ptr(thread, 512, &ts->uw.fpsimd_state, &found);
         if (n == 1) {
             memd_learned_ext.t_thread_fpsimd = found;
             memd_info("learn: thread fpsimd_state at +%d\n", found);
@@ -991,8 +1002,8 @@ static void memd_learn_signal_struct(void)
     if (!sig)
         return;
 
-    int found = -1, n = 0;
-    for (int i = 0; i + 8 <= 512; i += 8) {
+    int found = -1, n = 0, i;
+    for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)sig + i, 8);
         if (v == (u64)&sig->shared_pending) {
@@ -1007,7 +1018,7 @@ static void memd_learn_signal_struct(void)
     }
 
     found = -1; n = 0;
-    for (int i = 0; i + 8 <= 512; i += 8) {
+    for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)sig + i, 8);
         if (v == (u64)&sig->cred_guard_mutex) {
@@ -1029,8 +1040,8 @@ static void memd_learn_sighand_struct(void)
     if (!sh)
         return;
 
-    int found = -1, n = 0;
-    for (int i = 0; i + 8 <= 512; i += 8) {
+    int found = -1, n = 0, i;
+    for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)sh + i, 8);
         if (v == (u64)&sh->action) {
@@ -1045,6 +1056,13 @@ static void memd_learn_sighand_struct(void)
     }
 }
 
+/* TODO(fs_struct): parked until the defining header is known. sched.h
+ * only forward-declares struct fs_struct on every matrix DDK, so
+ * &fs->pwd / &fs->root do not compile (incomplete type). The build.yml
+ * "fs_struct def" probe locates it; then include that header and flip
+ * this back to 1. Readers (memd_t_fs_pwd/root) already fail soft on
+ * -1, and have no external users yet, so runtime impact is nil. */
+#if 0
 static void memd_learn_fs_struct(void)
  {
     struct task_struct *t = current;
@@ -1052,8 +1070,8 @@ static void memd_learn_fs_struct(void)
     if (!fs)
         return;
 
-    int found = -1, n = 0;
-    for (int i = 0; i + 8 <= 512; i += 8) {
+    int found = -1, n = 0, i;
+    for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)fs + i, 8);
         if (v == (u64)&fs->pwd) {
@@ -1068,7 +1086,7 @@ static void memd_learn_fs_struct(void)
     }
 
     found = -1; n = 0;
-    for (int i = 0; i + 8 <= 512; i += 8) {
+    for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)fs + i, 8);
         if (v == (u64)&fs->root) {
@@ -1082,6 +1100,7 @@ static void memd_learn_fs_struct(void)
         memd_info("learn: fs root at +%d\n", found);
     }
 }
+#endif /* TODO(fs_struct) */
 
 static void memd_learn_nsproxy_struct(void)
  {
@@ -1090,8 +1109,8 @@ static void memd_learn_nsproxy_struct(void)
     if (!nsp)
         return;
 
-    int found = -1, n = 0;
-    for (int i = 0; i + 8 <= 512; i += 8) {
+    int found = -1, n = 0, i;
+    for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)nsp + i, 8);
         if (v == (u64)&nsp->mnt_ns) {
@@ -1106,7 +1125,7 @@ static void memd_learn_nsproxy_struct(void)
     }
 
     found = -1; n = 0;
-    for (int i = 0; i + 8 <= 512; i += 8) {
+    for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)nsp + i, 8);
         if (v == (u64)&nsp->pid_ns_for_children) {
@@ -1124,14 +1143,14 @@ static void memd_learn_nsproxy_struct(void)
 static void memd_learn_cred_struct(void)
  {
     struct task_struct *t = current;
-    struct cred *c = t->cred;
+    const struct cred *c = t->cred;
     if (!c)
         return;
 
-    int found = -1, n = 0;
-    for (int i = 0; i + 8 <= 512; i += 8) {
+    int found = -1, n = 0, i;
+    for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
-        memcpy(&v, (char *)c + i, 8);
+        memcpy(&v, (const char *)c + i, 8);
         if (v == (u64)&c->cap_effective) {
             if (!n)
                 found = i;
@@ -1144,9 +1163,9 @@ static void memd_learn_cred_struct(void)
     }
 
     found = -1; n = 0;
-    for (int i = 0; i + 8 <= 512; i += 8) {
+    for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
-        memcpy(&v, (char *)c + i, 8);
+        memcpy(&v, (const char *)c + i, 8);
         if (v == (u64)&c->cap_permitted) {
             if (!n)
                 found = i;
@@ -1159,9 +1178,9 @@ static void memd_learn_cred_struct(void)
     }
 
     found = -1; n = 0;
-    for (int i = 0; i + 8 <= 512; i += 8) {
+    for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
-        memcpy(&v, (char *)c + i, 8);
+        memcpy(&v, (const char *)c + i, 8);
         if (v == (u64)&c->cap_inheritable) {
             if (!n)
                 found = i;
@@ -1174,9 +1193,9 @@ static void memd_learn_cred_struct(void)
     }
 
     found = -1; n = 0;
-    for (int i = 0; i + 8 <= 512; i += 8) {
+    for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
-        memcpy(&v, (char *)c + i, 8);
+        memcpy(&v, (const char *)c + i, 8);
         if (v == (u64)&c->uid) {
             if (!n)
                 found = i;
@@ -1291,7 +1310,9 @@ int memd_learn_comprehensive(void)
     memd_learn_thread_struct();
     memd_learn_signal_struct();
     memd_learn_sighand_struct();
+#if 0 /* TODO(fs_struct): parked with its learner (see above). */
     memd_learn_fs_struct();
+#endif
     memd_learn_nsproxy_struct();
     memd_learn_cred_struct();
 

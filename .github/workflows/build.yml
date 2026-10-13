@@ -155,6 +155,8 @@ jobs:
               grep -n "struct qstr d_name;" "$HDR/include/linux/dcache.h" | head -2
               grep -n "const struct file_operations\s*\*f_op;\|struct path\s*f_path;" "$HDR/include/linux/fs.h" | head -4
               grep -n "iterate_shared;" "$HDR/include/linux/fs.h" | head -3
+              echo "=== fs_struct def header ($IMG) ==="
+              grep -rln "^struct fs_struct {" "$HDR/include/" 2>/dev/null | head -3 || echo "fs_struct def not found ($IMG)"
               break
             fi
           done
