@@ -11,6 +11,8 @@
 #include <linux/completion.h>
 #include <linux/wait.h>
 #include <linux/kthread.h>
+#include <linux/slab.h>
+#include <linux/string.h>
 
 #include "memd_common.h"
 #include "memd_utils.h"

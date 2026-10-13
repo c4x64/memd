@@ -5,6 +5,7 @@
 
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/string.h>
 
 int (*aarch64_insn_write_ptr)(void *, u32) = NULL;
 void (*flush_icache_range_ptr)(unsigned long, unsigned long) = NULL;

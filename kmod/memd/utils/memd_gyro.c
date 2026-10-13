@@ -12,6 +12,7 @@
 #include <linux/rwsem.h>
 #include <linux/list.h>
 #include <linux/workqueue.h>
+#include <linux/string.h>
 
 #include "memd_common.h"
 #include "memd_utils.h"
