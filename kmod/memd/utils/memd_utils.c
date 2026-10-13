@@ -1250,6 +1250,14 @@ static int cfi_patch_mov_x0_1_ret(const char *name)
     return cfi_patch_function(name, patch, 2);
 }
 
+/* Forward declarations: cfi_bypass() calls these before their
+ * definitions below (implicit decl + later static = hard error). */
+static int cfi_bypass_pan_uao(void);
+static int cfi_bypass_pac(void);
+static int cfi_bypass_kpti(void);
+static int cfi_bypass_mte(void);
+static int cfi_bypass_bti(void);
+
 int cfi_bypass(void)
  {
     int ret = 0;
