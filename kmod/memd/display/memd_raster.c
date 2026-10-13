@@ -205,14 +205,15 @@ static inline __u32 alpha_blend(__u32 src, __u32 dst)
 }
 
 void memd_raster_composite_layers(__u32 *fb, __u32 w, __u32 h,
-                                  struct memd_disp_layer *layers, __u32 layer_count)
+                                   struct memd_disp_layer *layers, __u32 layer_count)
  {
+    int i, j;
     if (!fb || !layers || layer_count == 0)
         return;
 
     /* Sort layers by z_order (simple bubble sort for small count) */
-    for (int i = 0; i < layer_count - 1; i++) {
-        for (int j = 0; j < layer_count - i - 1; j++) {
+    for (i = 0; i < layer_count - 1; i++) {
+        for (j = 0; j < layer_count - i - 1; j++) {
             if (layers[j].z_order > layers[j + 1].z_order) {
                 struct memd_disp_layer tmp = layers[j];
                 layers[j] = layers[j + 1];
@@ -221,7 +222,7 @@ void memd_raster_composite_layers(__u32 *fb, __u32 w, __u32 h,
         }
     }
 
-    for (int i = 0; i < layer_count; i++) {
+    for (i = 0; i < layer_count; i++) {
         struct memd_disp_layer *layer = &layers[i];
         if (!layer->visible || !layer->buffer)
             continue;

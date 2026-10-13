@@ -16,8 +16,32 @@
  * R/W for. Format/layout certainty beats reuse here.
  */
 #include <linux/types.h>
+#include <linux/wait.h>
+#include <linux/atomic.h>
 
 #include "memd_display.h"
+
+/* Core-internal descriptors (fields from disp_core.c use). Backends only
+ * ever see pointers to these, so per-SoC code needs no layout trust. */
+struct memd_disp_vsync {
+    bool enabled;
+    int64_t next_vsync_ns;
+    int64_t frame_interval_ns;
+    wait_queue_head_t wq;
+    atomic_t frame_pending;
+};
+
+struct memd_disp_edid {
+    __u8 data[256];   /* Raw EDID block bytes */
+    __u32 len;        /* Valid bytes in data */
+    bool valid;
+};
+
+struct memd_disp_mode {
+    __u32 w;
+    __u32 h;
+    __u32 refresh_rate;   /* Hz; core derives frame_interval_ns from it */
+};
 
 struct memd_dirty {
     __u32 x0;
@@ -41,6 +65,19 @@ struct memd_disp_backend {
                    const struct memd_dirty *dirty);
     int (*active)(void);
     void (*status)(__u32 *w, __u32 *h, __u32 *err);
+    /* Optional ops below: NULL-checked at every call site, so backends
+     * that don't implement them simply report -ENOTSUPP / skip. */
+    int (*set_mode)(const struct memd_disp_mode *mode);
+    int (*get_modes)(struct memd_disp_mode *modes, __u32 max_modes);
+    int (*get_edid)(struct memd_disp_edid *edid);
+    int (*dpms)(int mode);
+    int (*cursor_set)(const __u32 *cursor_fb, __u32 w, __u32 h, __u32 x, __u32 y);
+    int (*cursor_move)(__u32 x, __u32 y);
+    int (*cursor_show)(bool show);
+    int (*gamma_set)(const __u16 *r, const __u16 *g, const __u16 *b, __u32 size);
+    int (*layer_add)(struct memd_disp_layer *layer);
+    int (*layer_remove)(struct memd_disp_layer *layer);
+    int (*layer_update)(struct memd_disp_layer *layer);
     /* Refresh need: backend whose display can be overwritten behind
      * its back (fbcon on simplefb) sets true; core re-presents the
      * stable front at MEMD_DISP_REFRESH_MS. DRM (commit persists) and
@@ -66,6 +103,18 @@ int memd_core_uninstall(void);
 int memd_core_active(void);
 int memd_core_status(__u32 *backend, __u32 *w, __u32 *h, __u32 *err);
 int memd_core_frame(const struct memd_disp_op *ops, __u32 count);
+int memd_core_set_mode(const struct memd_disp_mode *mode);
+int memd_core_get_modes(struct memd_disp_mode *modes, __u32 max_modes);
+int memd_core_get_edid(struct memd_disp_edid *edid);
+int memd_core_dpms(int mode);
+int memd_core_vsync_wait(int64_t timeout_ns);
+int memd_core_cursor_set(const __u32 *cursor_fb, __u32 w, __u32 h, __u32 x, __u32 y);
+int memd_core_cursor_move(__u32 x, __u32 y);
+int memd_core_cursor_show(bool show);
+int memd_core_layer_add(struct memd_disp_layer *layer);
+int memd_core_layer_remove(struct memd_disp_layer *layer);
+int memd_core_layer_update(struct memd_disp_layer *layer);
+int memd_core_gamma_set(const __u16 *r, const __u16 *g, const __u16 *b, __u32 size);
 
 #ifdef MEMD_DISP_TEST
 int memd_core_readback(__u64 dst, __u32 size, __u32 *w, __u32 *h);

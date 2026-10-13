@@ -56,7 +56,6 @@ struct memd_disp_op {
 };
 
 #define MEMD_DISP_MAX_OPS 1024
-
 /* UI dimensions cap (bounded shadow memory + blit/upload cost).
  * Fullscreen needs a plane/DRM modeset, not a bigger shadow. */
 #define MEMD_DISP_MAX_W 640
@@ -66,6 +65,22 @@ struct memd_disp_frame_cmd {
     __u64 ops;      /* Input: userspace pointer to memd_disp_op array */
     __u32 count;    /* Input: op count (capped at MEMD_DISP_MAX_OPS) */
     __u32 rc;       /* Output: 0 ok, else -errno */
+};
+
+/* Overlay layer descriptor (fields from raster + core use: compositing
+ * needs x/y/w/h, buffer, alpha, visibility and z-order; core owns the
+ * buffer storage). Small static arrays only (see MAX_LAYERS). */
+#define MEMD_DISP_MAX_LAYERS 8
+
+struct memd_disp_layer {
+    __u32 x;
+    __u32 y;
+    __u32 w;
+    __u32 h;
+    __u32 *buffer;    /* Core-allocated ARGB8888 (w*h), NULL when empty */
+    __u8 alpha;       /* 255 = opaque */
+    bool visible;
+    __u32 z_order;    /* Ascending blit order */
 };
 
 #ifdef MEMD_DISP_TEST
