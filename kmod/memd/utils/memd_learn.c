@@ -15,6 +15,7 @@
 #include <linux/string.h>
 #include <linux/version.h>
 #include <linux/rcupdate.h>
+#include <linux/sched/mm.h>
 #include <asm/sysreg.h>
 
 #include "memd_utils.h"
@@ -1115,29 +1116,35 @@ static void memd_learn_cred_struct(void)
 
 static void memd_learn_sighand_verify(void)
  {
+    /* No compiled-field trust: t->sighand is garbage on any kernel whose
+     * layout differs from the build headers, so comparing against it
+     * would drop correct learning exactly on foreign kernels. Sanity
+     * only: the learned slot must hold a readable kernel address. */
     struct task_struct *t = current;
-    if (!t->sighand)
+    unsigned long v = 0;
+    if (memd_learned_ext.t_sighand < 0)
         return;
-
-    struct sighand_struct *sh = t->sighand;
-    if (memd_learned_ext.t_sighand >= 0) {
-        struct sighand_struct **sh_ptr = (void *)((char *)t + memd_learned_ext.t_sighand);
-        if (*sh_ptr != sh) {
-            memd_err("learn: sighand ptr verification failed\n");
-            memd_learned_ext.t_sighand = -1;
-        }
+    if (memd_safe_read64((char *)t + memd_learned_ext.t_sighand, &v) || !v ||
+        (v & 0xffff000000000000UL) != 0xffff000000000000UL) {
+        memd_err("learn: sighand learned ptr insane, dropping\n");
+        memd_learned_ext.t_sighand = -1;
     }
 }
 
 static int memd_verify_all_offsets(void)
  {
+    /* Anchor-based re-checks only (stable function calls, never compiled
+     * field offsets). The old code compared learned reads against
+     * t->pid/t->tgid/t->mm/t->cred, which is garbage on any kernel whose
+     * layout differs from the build headers — it nuked correct learning
+     * exactly on the foreign kernels the universal image targets. */
     struct task_struct *t = current;
     int errors = 0;
 
     if (memd_learned.t_pid >= 0) {
         pid_t *pid_ptr = (void *)((char *)t + memd_learned.t_pid);
-        if (*pid_ptr != t->pid) {
-            memd_err("verify: t_pid offset wrong (%d != %d)\n", *pid_ptr, t->pid);
+        if (*pid_ptr != task_pid_vnr(t)) {
+            memd_err("verify: t_pid offset wrong (%d != %d)\n", *pid_ptr, task_pid_vnr(t));
             memd_learned.t_pid = -1;
             errors++;
         }
@@ -1145,8 +1152,8 @@ static int memd_verify_all_offsets(void)
 
     if (memd_learned.t_tgid >= 0) {
         pid_t *tgid_ptr = (void *)((char *)t + memd_learned.t_tgid);
-        if (*tgid_ptr != t->tgid) {
-            memd_err("verify: t_tgid offset wrong (%d != %d)\n", *tgid_ptr, t->tgid);
+        if (*tgid_ptr != task_tgid_vnr(t)) {
+            memd_err("verify: t_tgid offset wrong (%d != %d)\n", *tgid_ptr, task_tgid_vnr(t));
             memd_learned.t_tgid = -1;
             errors++;
         }
@@ -1154,16 +1161,32 @@ static int memd_verify_all_offsets(void)
 
     if (memd_learned.t_mm >= 0) {
         struct mm_struct **mm_ptr = (void *)((char *)t + memd_learned.t_mm);
-        if (*mm_ptr != t->mm) {
-            memd_err("verify: t_mm offset wrong\n");
-            memd_learned.t_mm = -1;
-            errors++;
+        struct mm_struct *anchor = get_task_mm(t);
+        if (anchor) {
+            if (*mm_ptr != anchor) {
+                memd_err("verify: t_mm offset wrong\n");
+                memd_learned.t_mm = -1;
+                errors++;
+            }
+            mmput(anchor);
         }
     }
 
     if (memd_learned.t_cred >= 0) {
-        struct cred **cred_ptr = (void *)((char *)t + memd_learned.t_cred);
-        if (*cred_ptr != t->cred) {
+        /* Re-run the learning-time anchor: loader runs as root, so the
+         * cred must look like root cred (usage sane, uid 0). */
+        unsigned long c = 0;
+        unsigned long w = 0;
+        u32 usage = 0, uid = 0;
+        bool ok = false;
+        if (!memd_safe_read64((char *)t + memd_learned.t_cred, &c) &&
+            (c & 0xffff000000000000UL) == 0xffff000000000000UL &&
+            !memd_safe_read64((void *)(uintptr_t)c, &w)) {
+            usage = (u32)(w & 0xffffffffU);
+            uid = (u32)((w >> 32) & 0xffffffffU);
+            ok = (usage >= 1 && usage <= 1000 && uid == 0);
+        }
+        if (!ok) {
             memd_err("verify: t_cred offset wrong\n");
             memd_learned.t_cred = -1;
             errors++;
