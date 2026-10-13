@@ -131,9 +131,9 @@ int main(int argc, char **argv)
         printf("  finit_module(fd=%d, flags=0x%x)...\n", fd,
                MODULE_INIT_IGNORE_MODVERSIONS | MODULE_INIT_IGNORE_VERMAGIC);
 
-    long r = syscall(__NR_finit_module, fd, "",
-                     (long)(MODULE_INIT_IGNORE_MODVERSIONS |
-                            MODULE_INIT_IGNORE_VERMAGIC));
+    r = syscall(__NR_finit_module, fd, "",
+                 (long)(MODULE_INIT_IGNORE_MODVERSIONS |
+                        MODULE_INIT_IGNORE_VERMAGIC));
     if (r < 0) {
         int e = errno;
         close(fd);
