@@ -184,7 +184,9 @@ bool memd_uaccess_validate_range(unsigned long addr, unsigned long len)
     if (end < addr)  /* overflow */
         return false;
 
-    if (addr >= TASK_SIZE_MAX || end > TASK_SIZE_MAX)
+    /* TASK_SIZE_64 (not TASK_SIZE_MAX: absent on 5.4-6.12 DDKs), same
+     * bound the ioctl layer already uses. */
+    if (addr >= TASK_SIZE_64 || end > TASK_SIZE_64)
         return false;
 
     return true;
@@ -203,7 +205,7 @@ bool memd_task_uaccess_validate_range(struct task_struct *t,
     if (end < addr)  /* overflow */
         return false;
 
-    if (addr >= TASK_SIZE_MAX || end > TASK_SIZE_MAX)
+    if (addr >= TASK_SIZE_64 || end > TASK_SIZE_64)
         return false;
 
     return true;

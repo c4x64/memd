@@ -2,6 +2,7 @@
 #define MEMD_UACCESS_H
 
 #include <linux/types.h>
+#include <linux/uio.h>
 
 /* Universal user-copy (KPM-grade universality). copy_to/from_user are
  * INLINE on arm64 (PAN/UAO sequences baked from build headers): a
