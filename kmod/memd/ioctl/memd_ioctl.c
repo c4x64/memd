@@ -229,7 +229,11 @@ int do_pte_mapping(struct socket* sock, void* arg) {
     }
 
     struct mm_struct* mm = get_task_mm(task);
+    /* Snapshot anything needed from task before dropping the ref:
+     * task may be freed once put_task_struct runs. */
+    uid_t hide_uid = task->cred->uid.val;
     put_task_struct(task);
+    task = NULL;
     if (!mm) {
         memd_warn("failed to get mm: %d\n", cmd.pid);
         return -ESRCH;
@@ -346,7 +350,7 @@ int do_pte_mapping(struct socket* sock, void* arg) {
     kfree(page_arr);
 
     if (cmd.hide) {
-        memd_add_unsafe_region(ws->session, task->cred->uid.val, cmd.start_addr, cmd.num_pages);
+        memd_add_unsafe_region(ws->session, hide_uid, cmd.start_addr, cmd.num_pages);
     }
 
     memd_info("successfully mapped page at address 0x%lx for pid %d\n", cmd.start_addr, cmd.pid);

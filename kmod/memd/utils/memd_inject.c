@@ -192,25 +192,30 @@ static int memd_elf_lookup(struct task_struct *t, uintptr_t symtab,
         return -ENOENT;
     /* GNU hash first (what modern Bionic emits), then SYSV. */
     if (gnuhash) {
-        unsigned long nbuckets, bloom_size, bloom_shift;
-        if (memd_task_copy_ok(t, 0, gnuhash, &nbuckets, 8))
+        /* ELF64 GNU-hash header is four u32 words (nbuckets, symoffset,
+         * bloom_size, bloom_shift); bloom words follow at +16. */
+        u32 nbuckets32 = 0, symoff32 = 0, bloom32 = 0, shift32 = 0;
+        if (memd_task_copy_ok(t, 0, gnuhash, &nbuckets32, 4))
             return -EFAULT;
-        if (memd_task_copy_ok(t, 0, gnuhash + 8, &symoff, 8))
+        if (memd_task_copy_ok(t, 0, gnuhash + 4, &symoff32, 4))
             return -EFAULT;
-        if (memd_task_copy_ok(t, 0, gnuhash + 16, &bloom_size, 8))
+        if (memd_task_copy_ok(t, 0, gnuhash + 8, &bloom32, 4))
             return -EFAULT;
-        if (memd_task_copy_ok(t, 0, gnuhash + 24, &bloom_shift, 8))
+        if (memd_task_copy_ok(t, 0, gnuhash + 12, &shift32, 4))
             return -EFAULT;
-        (void)bloom_shift;
+        (void)shift32;
+        nbuckets = nbuckets32;
+        symoff = symoff32;
+        bloom_size = bloom32;
         if (nbuckets == 0 || nbuckets > 100000 || bloom_size > 1024)
             return -ENOENT;
         h = memd_gnu_hash(want);
-        if (memd_task_copy_ok(t, 0, gnuhash + 32 + (h / 64 % bloom_size) * 8, &w, 8))
+        if (memd_task_copy_ok(t, 0, gnuhash + 16 + (h / 64 % bloom_size) * 8, &w, 8))
             return -EFAULT;
         if (!((w >> (h % 64)) & 1))
             return -ENOENT;
         if (memd_task_copy_ok(t, 0,
-                              gnuhash + 32 + bloom_size * 8 + (h % nbuckets) * 4,
+                              gnuhash + 16 + bloom_size * 8 + (h % nbuckets) * 4,
                               &bkt, 4))
             return -EFAULT;
         if (bkt < symoff)
@@ -218,7 +223,7 @@ static int memd_elf_lookup(struct task_struct *t, uintptr_t symtab,
         for (i = bkt, n = 0; n < (unsigned long)MEMD_INJ_SYM_WALK_MAX; i++, n++) {
             unsigned long cw;
             if (memd_task_copy_ok(t, 0,
-                                  gnuhash + 32 + bloom_size * 8 +
+                                  gnuhash + 16 + bloom_size * 8 +
                                   nbuckets * 4 + (i - symoff) * 4,
                                   &cw, 4))
                 return -EFAULT;
