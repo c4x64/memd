@@ -105,13 +105,22 @@ jobs:
         if: ${{ !inputs.manifest_run_id }}
         run: |
           mkdir -p "$RUNNER_TEMP/kernelci"
-          bq query \
+          if ! bq query \
             --project_id=kernelci-production \
             --use_legacy_sql=false \
             --format=json \
             --max_rows=0 \
             < .github/scripts/kcidb_builds.sql \
-            > "$RUNNER_TEMP/kernelci/query.json"
+            > "$RUNNER_TEMP/kernelci/query.json" \
+            2> "$RUNNER_TEMP/kernelci/query.stderr"; then
+            echo "BigQuery query failed:" >&2
+            cat "$RUNNER_TEMP/kernelci/query.stderr" >&2
+            if [ -s "$RUNNER_TEMP/kernelci/query.json" ]; then
+              echo "BigQuery output before failure:" >&2
+              cat "$RUNNER_TEMP/kernelci/query.json" >&2
+            fi
+            exit 1
+          fi
 
       - name: Validate manifest and select batch
         id: batch
