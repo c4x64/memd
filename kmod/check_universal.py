@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """check_universal.py — per-KMI static gate for rwbridge.ko.
 Fails (exit 1) if the module drifted off the matrix contract:
-  - __versions section with real CRCs (pins build past its KMI; the
-    runtime vermagic patch cannot fix CRC mismatches).
+  - __versions section missing or empty (per-symbol CRCs are REQUIRED:
+    kernels without CONFIG_MODULE_FORCE_LOAD refuse version-less
+    modules with a silent -ENOEXEC no override flag can bypass —
+    proven on 6.1 ranchu. Same-KMI kernels share CRCs by GKI contract,
+    so intact versions load clean with the runtime-patched vermagic).
   - undefined symbols NOT exported by that KMI generation's own
    System.map (exact ground truth: the donor tree the artifact was
    built against).
@@ -43,12 +46,13 @@ def main():
         if secname(struct.unpack_from("<I", b, base)[0]) != "__versions":
             continue
         size = struct.unpack_from("<Q", b, base + 32)[0]
-        if size != 0:
-            die("__versions has CRCs (%d bytes; pins build past %s)" % (size, kmi))
-        print("note: empty __versions present (no CRCs)")
+        if size == 0:
+            die("__versions is empty (no CRCs: no-FORCE_LOAD kernels "
+                "refuse with silent -ENOEXEC)")
+        print("note: __versions present with CRCs (%d bytes)" % size)
         break
     else:
-        print("note: no __versions section")
+        die("no __versions section (no-FORCE_LOAD kernels refuse)")
 
     exported = set()
     for line in open(sysmap_path, errors="replace"):

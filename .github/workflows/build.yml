@@ -221,14 +221,14 @@ jobs:
           else
             echo "dbg variant: keeping debug info (no --strip-debug)"
           fi
-          if [ "${{ matrix.dbg }}" != "true" ]; then
-            "$OBJCOPY_BIN" --remove-section __versions rwbridge.ko
-          else
-            : > empty_versions.bin
-            "$OBJCOPY_BIN" --update-section __versions=empty_versions.bin rwbridge.ko
-            echo "dbg variant: __versions zeroed in place (debug relocations kept)"
-          fi
-          echo "stripped __versions (enforcing loaders warn-and-pass CRC-less)"
+          # KEEP __versions (real per-symbol CRCs): kernels without
+          # CONFIG_MODULE_FORCE_LOAD refuse version-less modules with a
+          # silent -ENOEXEC that no override flag can bypass (proven on
+          # 6.1 ranchu: finit_module IGNORE_* fails, plain loads work).
+          # Same-KMI kernels share CRCs by GKI contract, so intact
+          # versions load clean with the runtime-patched vermagic; the
+          # override path stays as last resort for FORCE_LOAD kernels.
+          echo "keeping __versions (CRC intact for no-FORCE_LOAD kernels)"
           echo "OBJCOPY_BIN=$OBJCOPY_BIN" >> "$GITHUB_ENV"
           
           set -o pipefail

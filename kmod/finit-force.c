@@ -71,7 +71,6 @@ int main(int argc, char **argv)
     int dry_run = 0;
     int verbose = 0;
     int no_verify = 0;
-    int opt_idx = 1;
     char *module_path = NULL;
     char *module_name = NULL;
 
@@ -115,10 +114,19 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* Extract module name for verification */
-    char *slash = strrchr(module_path, '/');
-    module_name = slash ? slash + 1 : module_path;
-    char *dot = strrchr(module_name, '.');
+    /* Extract module name for verification (into a copy: truncating
+     * the extension in place would corrupt module_path for open()). */
+    char modname[256];
+    const char *slash = strrchr(module_path, '/');
+    const char *base = slash ? slash + 1 : module_path;
+    size_t blen = strlen(base);
+    char *dot;
+    if (blen >= sizeof(modname))
+        blen = sizeof(modname) - 1;
+    memcpy(modname, base, blen);
+    modname[blen] = '\0';
+    module_name = modname;
+    dot = strrchr(module_name, '.');
     if (dot) *dot = '\0';
 
     fd = open(module_path, O_RDONLY);
