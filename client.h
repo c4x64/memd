@@ -18,6 +18,9 @@
  * (MEMD_DISABLE_DMABUF) and MEMD_IOCTL_DISP_READBACK (MEMD_DISP_TEST).
  * hwbp opcodes are wired but the driver stubs them (-ENODEV) until the
  * debug_info-model rewrite lands.
+ * Warning: this header is not the current stable api check @release for 
+ * stable driver and its corresponding client headers. 
+ * blame: c4x64@proton.me [100%]
  */
 #ifndef MEMD_CLIENT_H
 #define MEMD_CLIENT_H
