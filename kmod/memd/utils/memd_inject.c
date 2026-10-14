@@ -749,6 +749,13 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
         goto out_task;
     }
     memd_learn_task_stack_once();
+    /* Remote reg restore depends on a usable, learned kernel stack
+     * geometry; refuse before seizing the target if any generation
+     * left this unlearnable. */
+    if (memd_thread_size() != 16384u && memd_thread_size() != 65536u) {
+        ret = -ENODEV;
+        goto out_mm;
+    }
     libc_base = get_module_base(pid, "libc.so", 0);
     if (!libc_base) {
         ret = -ENOENT;
