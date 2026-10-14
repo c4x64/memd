@@ -63,6 +63,8 @@
 #define MEMD_INJ_SYM_WALK_MAX 100000
 #define MEMD_INJ_NAME_MAX    128
 #define MEMD_INJ_STRSZ_MAX   (16UL << 20)
+/* DT_GNU_HASH is absent from linux/elf.h; stable dynamic-tag ABI. */
+#define MEMD_DT_GNU_HASH 0x6ffffef5u
 
 /* arm64 instruction encoders (exact; consistent with the masks already
  * used in hijack_arm64.c). */
@@ -326,7 +328,7 @@ static int resolve_libc_syms(struct task_struct *t, uintptr_t base,
         case DT_HASH:
             hash = bias + (unsigned long)dyn.d_un.d_ptr;
             break;
-        case DT_GNU_HASH:
+        case MEMD_DT_GNU_HASH:
             ghash = bias + (unsigned long)dyn.d_un.d_ptr;
             break;
         default:
@@ -390,10 +392,12 @@ static void release_task(struct task_struct *task)
         send_task_sig(task, SIGCONT);
 }
 
+static void release_task(struct task_struct *task);
+
 /* ---- user-pt_regs location + sanity ---- */
-static int regs_sane(uint64_t *r)
+static int regs_sane(unsigned long *r)
  {
-    uint64_t pc = r[MEMD_PT_PC], sp = r[MEMD_PT_SP], ps = r[MEMD_PT_PSTATE];
+    unsigned long pc = r[MEMD_PT_PC], sp = r[MEMD_PT_SP], ps = r[MEMD_PT_PSTATE];
     if (pc < 0x1000 || pc >= TASK_SIZE_64)
         return 0;
     if (sp == 0 || (sp & 0xf) || sp >= TASK_SIZE_64)
@@ -404,12 +408,12 @@ static int regs_sane(uint64_t *r)
 }
 
 static int locate_user_regs(struct task_struct *task, uintptr_t *regs_va,
-                             uint64_t *regs)
+                             unsigned long *regs)
  {
     void *stack;
     unsigned long size, base, va;
     int i;
-    uint64_t v;
+    unsigned long v;
     if (!task || !regs_va || !regs)
         return -EFAULT;
     stack = memd_t_stack(task);
@@ -432,10 +436,10 @@ static int locate_user_regs(struct task_struct *task, uintptr_t *regs_va,
 }
 
 static int write_regs(struct task_struct *task, uintptr_t regs_va,
-                       uint64_t *regs)
+                       unsigned long *regs)
  {
     int i;
-    uint64_t v;
+    unsigned long v;
     (void)task;
     for (i = 0; i < MEMD_PT_NREGS; i++) {
         if (memd_safe_write64((void *)(regs_va + (unsigned long)i * 8), regs[i]))
@@ -470,8 +474,8 @@ static int flush_user_range(struct mm_struct *mm, uintptr_t start, size_t len)
 struct memd_su_saved {
     struct cred *cred;
     u32 uid;
-    u64 cap_eff;
-    u64 cap_perm;
+    unsigned long cap_eff;
+    unsigned long cap_perm;
     bool have_perm;
     bool active;
 };
@@ -566,7 +570,7 @@ static int remote_call(struct task_struct *task, struct mm_struct *mm,
                        uintptr_t fn, uintptr_t a0, const void *extra,
                        size_t extralen, uintptr_t *retval, int timeout_ms)
  {
-    uint64_t saved[MEMD_PT_NREGS], regs[MEMD_PT_NREGS];
+    unsigned long saved[MEMD_PT_NREGS], regs[MEMD_PT_NREGS];
     uintptr_t regs_va, sp, base, flag_va, path_va, stub_va;
     u32 stub[MEMD_INJ_STUB_WORDS];
     u64 flag[2];
