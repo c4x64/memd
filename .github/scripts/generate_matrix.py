@@ -84,19 +84,20 @@ GKI_RELEASES = {
 
 # DDK image tags available (verified against ghcr.io/ylarod/ddk package
 # listing; every entry below was confirmed present).
-# NOTE: android11-5.4, android15-6.1, android15-6.6, android16-6.6 and
-# android17-6.12 have NO published image (registry: manifest unknown),
-# so they get no build job. Their code paths stay in-tree (GEN_54/66
-# tables, asserts); unsupported generations resolve to
-# unknown-generation NO-GO at runtime rather than guessing offsets.
-# (Upstream now ships android17-6.18, which needs GEN_618 support that
-# does not exist yet — out of scope for the 5.4-6.12 objective.)
+# NOTE: android11-5.4, android15-6.1, android16-6.6 and android17-6.12
+# have NO published image (registry: manifest unknown), so they get no
+# build job. Their code paths stay in-tree (GEN_54/66 tables, asserts);
+# unsupported generations resolve to unknown-generation NO-GO at
+# runtime rather than guessing offsets. (Upstream now ships
+# android17-6.18, which needs GEN_618 support that does not exist
+# yet — out of scope for the 5.4-6.12 objective.)
 DDK_IMAGES = {
     "android12-5.10": "android12-5.10-20251016",
     "android13-5.10": "android13-5.10-20251016",
     "android13-5.15": "android13-5.15-20251016",
     "android14-5.15": "android14-5.15-20251016",
     "android14-6.1": "android14-6.1-20251016",
+    "android15-6.6": "android15-6.6-20251016",
     "android16-6.12": "android16-6.12-20260828",
 }
 

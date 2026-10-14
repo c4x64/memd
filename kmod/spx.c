@@ -61,6 +61,8 @@ extern const unsigned char _binary_rwbridge_android14_6_1_ko_start[];
 extern const unsigned long _binary_rwbridge_android14_6_1_ko_len;
 extern const unsigned char _binary_rwbridge_android14_6_1_dbg_ko_start[];
 extern const unsigned long _binary_rwbridge_android14_6_1_dbg_ko_len;
+extern const unsigned char _binary_rwbridge_android15_6_6_ko_start[];
+extern const unsigned long _binary_rwbridge_android15_6_6_ko_len;
 extern const unsigned char _binary_rwbridge_android16_6_12_ko_start[];
 extern const unsigned long _binary_rwbridge_android16_6_12_ko_len;
 extern const unsigned char _binary_rwbridge_android16_6_12_dbg_ko_start[];
@@ -89,7 +91,7 @@ static void jlog(const char *op, const char *msg)
 }
 
 /* ---- state: attempt counting across reboots (one slot per flavor) ---- */
-#define SPX_NFLAVORS 11
+#define SPX_NFLAVORS 12
 
 struct state {
     int tried[SPX_NFLAVORS];
@@ -754,15 +756,18 @@ int main(int argc, char **argv)
     flavors[7].name = "a14-6.1-dbg"; flavors[7].kver = "6.1"; flavors[7].gen = "android14";
     flavors[7].d = _binary_rwbridge_android14_6_1_dbg_ko_start;
     flavors[7].n = (long)_binary_rwbridge_android14_6_1_dbg_ko_len;
-    flavors[8].name = "a16-6.12"; flavors[8].kver = "6.12"; flavors[8].gen = "android16";
-    flavors[8].d = _binary_rwbridge_android16_6_12_ko_start;
-    flavors[8].n = (long)_binary_rwbridge_android16_6_12_ko_len;
-    flavors[9].name = "a16-6.12-dbg"; flavors[9].kver = "6.12"; flavors[9].gen = "android16";
-    flavors[9].d = _binary_rwbridge_android16_6_12_dbg_ko_start;
-    flavors[9].n = (long)_binary_rwbridge_android16_6_12_dbg_ko_len;
-    flavors[10].name = "universal"; flavors[10].kver = "any"; flavors[10].gen = "any";
-    flavors[10].d = _binary_rwbridge_universal_ko_start;
-    flavors[10].n = (long)_binary_rwbridge_universal_ko_len;
+    flavors[8].name = "a15-6.6"; flavors[8].kver = "6.6"; flavors[8].gen = "android15";
+    flavors[8].d = _binary_rwbridge_android15_6_6_ko_start;
+    flavors[8].n = (long)_binary_rwbridge_android15_6_6_ko_len;
+    flavors[9].name = "a16-6.12"; flavors[9].kver = "6.12"; flavors[9].gen = "android16";
+    flavors[9].d = _binary_rwbridge_android16_6_12_ko_start;
+    flavors[9].n = (long)_binary_rwbridge_android16_6_12_ko_len;
+    flavors[10].name = "a16-6.12-dbg"; flavors[10].kver = "6.12"; flavors[10].gen = "android16";
+    flavors[10].d = _binary_rwbridge_android16_6_12_dbg_ko_start;
+    flavors[10].n = (long)_binary_rwbridge_android16_6_12_dbg_ko_len;
+    flavors[11].name = "universal"; flavors[11].kver = "any"; flavors[11].gen = "any";
+    flavors[11].d = _binary_rwbridge_universal_ko_start;
+    flavors[11].n = (long)_binary_rwbridge_universal_ko_len;
 
     major = kernel_major();
     snprintf(msg, sizeof(msg), "kernel major=%d", major);
