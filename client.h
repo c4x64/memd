@@ -91,17 +91,23 @@ struct memd_at_s1e0r_cmd {
     uintptr_t va;
 };
 
-/* Userspace mirror of the kernel's page descriptor snapshot. atomic_t is
- * a 4-byte int on every target, so int32_t keeps layout identical. */
+/* Userspace mirror of the kernel's page descriptor snapshot. Kernel
+ * flags is unsigned long (8B on LP64 arm64); atomic_t halves stay
+ * int32_t. Layout must be flags@0, mapcount@8, refcount@12, phy@16. */
 struct kernel_page {
-    int32_t flags;
+    uint64_t flags;
     union {
         int32_t _mapcount;
         uint32_t page_type;
     };
     int32_t _refcount;
-    uintptr_t phy_addr;
+    uint64_t phy_addr;
 };
+/* C89/C++-compatible ABI pin: flags and phy_addr 8B, total 24B. */
+typedef char memd_kernel_page_abi_check[
+    (sizeof(struct kernel_page) == 24 &&
+     sizeof(((struct kernel_page *)0)->flags) == 8 &&
+     sizeof(((struct kernel_page *)0)->phy_addr) == 8) ? 1 : -1];
 
 struct memd_page_info_cmd {
     pid_t pid;
