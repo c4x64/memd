@@ -21,18 +21,31 @@
  * us). Resident mode leaves normal linker traces; hiding /proc maps
  * content needs a seq_file show hook (explicit follow-up, not here).
  *
+ * After a successful dlopen, a named ENTRY symbol may be executed in
+ * the target (same hijack machinery, handle passed in x0): constructors
+ * already ran inside dlopen, so entry is for explicit payload startup.
+ * In ephemeral mode the order is dlopen -> entry -> dlclose, all inside
+ * one su window when requested.
+ *
+ * Stealth hygiene: the below-sp scratch (stub, path, flags) is wiped
+ * before the final SIGCONT, so no payload bytes linger in target stack
+ * memory (readable via /proc/pid/mem or core dumps).
+ *
  * The .so path must be absolute and visible in the TARGET's mount
- * namespace (/data/local/tmp paths work everywhere). Every stage is
- * verified before proceeding; any failure restores saved state
- * (regs, creds) and SIGCONTs before returning -errno. Nothing
+ * namespace (/data/local/tmp paths work everywhere). The entry lookup
+ * matches the library by BASENAME, so it must be unique in the target.
+ * Every stage is verified before proceeding; any failure restores saved
+ * state (regs, creds) and SIGCONTs before returning -errno. Nothing
  * succeeds partially.
  */
 struct memd_loadso_cmd {
     pid_t pid;           /* Input: target process (or thread) ID */
     char path[256];      /* Input: absolute .so path, NUL-terminated */
+    char entry[64];      /* Input: symbol to call after dlopen ("" = skip) */
     int flags;           /* Input: MEMD_LOADSO_* bits */
     int result;          /* Output: 0 ok, else -errno */
     uintptr_t handle;    /* Output: dlopen handle (0 if ephemeral/failed) */
+    int entry_result;    /* Output: entry return, truncated to int */
 };
 
 /* dlclose right after the constructor returns: linker unloads the

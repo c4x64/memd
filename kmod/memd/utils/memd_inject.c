@@ -262,16 +262,26 @@ static int memd_elf_lookup(struct task_struct *t, uintptr_t symtab,
     return -ENOENT;
 }
 
-static int resolve_libc_syms(struct task_struct *t, uintptr_t base,
-                              struct memd_elf_addrs *addrs, int need_dlclose)
+struct memd_elf_dyn {
+    uintptr_t bias;
+    uintptr_t strtab;
+    uintptr_t symtab;
+    unsigned long strsz;
+    uintptr_t hash;
+    uintptr_t ghash;
+};
+
+/* Parse headers + dynamic section of a loaded ET_DYN (path lookup shared
+ * by libc symbol resolution and payload entry resolution). */
+static int parse_dynamic(struct task_struct *t, uintptr_t base,
+                          struct memd_elf_dyn *di)
  {
     Elf64_Ehdr eh;
     Elf64_Phdr ph;
     Elf64_Dyn dyn;
-    unsigned long min_vaddr, bias, dyn_rva;
-    unsigned long strtab, symtab, strsz, syment, hash, ghash;
+    unsigned long min_vaddr, dyn_rva;
     int i, np;
-    memset(addrs, 0, sizeof(*addrs));
+    memset(di, 0, sizeof(*di));
     if (!t || !base)
         return -EFAULT;
     if (memd_task_copy_ok(t, 0, base, &eh, sizeof(eh)))
@@ -299,56 +309,87 @@ static int resolve_libc_syms(struct task_struct *t, uintptr_t base,
     }
     if (min_vaddr == (unsigned long)-1 || !dyn_rva)
         return -ENOEXEC;
-    bias = base - min_vaddr;
-    strtab = 0;
-    symtab = 0;
-    strsz = 0;
-    syment = sizeof(Elf64_Sym);
-    hash = 0;
-    ghash = 0;
+    di->bias = base - min_vaddr;
     for (i = 0; i < MEMD_INJ_ELF_MAX_DYN; i++) {
-        if (memd_task_copy_ok(t, 0, bias + dyn_rva + (unsigned long)i * sizeof(dyn),
+        unsigned long syment = sizeof(Elf64_Sym);
+        if (memd_task_copy_ok(t, 0, di->bias + dyn_rva + (unsigned long)i * sizeof(dyn),
                               &dyn, sizeof(dyn)))
             return -EFAULT;
         if (dyn.d_tag == DT_NULL)
             break;
         switch (dyn.d_tag) {
         case DT_STRTAB:
-            strtab = bias + (unsigned long)dyn.d_un.d_ptr;
+            di->strtab = di->bias + (unsigned long)dyn.d_un.d_ptr;
             break;
         case DT_SYMTAB:
-            symtab = bias + (unsigned long)dyn.d_un.d_ptr;
+            di->symtab = di->bias + (unsigned long)dyn.d_un.d_ptr;
             break;
         case DT_STRSZ:
-            strsz = (unsigned long)dyn.d_un.d_val;
+            di->strsz = (unsigned long)dyn.d_un.d_val;
             break;
         case DT_SYMENT:
             syment = (unsigned long)dyn.d_un.d_val;
             break;
         case DT_HASH:
-            hash = bias + (unsigned long)dyn.d_un.d_ptr;
+            di->hash = di->bias + (unsigned long)dyn.d_un.d_ptr;
             break;
         case MEMD_DT_GNU_HASH:
-            ghash = bias + (unsigned long)dyn.d_un.d_ptr;
+            di->ghash = di->bias + (unsigned long)dyn.d_un.d_ptr;
             break;
         default:
             break;
         }
+        if (dyn.d_tag == DT_SYMENT && syment != sizeof(Elf64_Sym))
+            return -ENOEXEC;
     }
-    if (!strtab || !symtab || !strsz || strsz > MEMD_INJ_STRSZ_MAX ||
-        syment != sizeof(Elf64_Sym))
+    if (!di->strtab || !di->symtab || !di->strsz ||
+        di->strsz > MEMD_INJ_STRSZ_MAX)
         return -ENOEXEC;
-    if (memd_elf_lookup(t, symtab, strtab, strsz, hash, ghash, "dlopen",
-                        bias, &addrs->dlopen_va))
+    return 0;
+}
+
+static int resolve_libc_syms(struct task_struct *t, uintptr_t base,
+                              struct memd_elf_addrs *addrs, int need_dlclose)
+ {
+    struct memd_elf_dyn di;
+    int ret;
+    memset(addrs, 0, sizeof(*addrs));
+    ret = parse_dynamic(t, base, &di);
+    if (ret)
+        return ret;
+    if (memd_elf_lookup(t, di.symtab, di.strtab, di.strsz, di.hash,
+                        di.ghash, "dlopen", di.bias, &addrs->dlopen_va))
         return -ENOENT;
     if (!addrs->dlopen_va)
         return -ENOENT;
     if (need_dlclose) {
-        if (memd_elf_lookup(t, symtab, strtab, strsz, hash, ghash,
-                            "dlclose", bias, &addrs->dlclose_va) ||
+        if (memd_elf_lookup(t, di.symtab, di.strtab, di.strsz, di.hash,
+                            di.ghash, "dlclose", di.bias,
+                            &addrs->dlclose_va) ||
             !addrs->dlclose_va)
             return -ENOENT;
     }
+    return 0;
+}
+
+/* Resolve any exported symbol in an already-loaded library (payload
+ * entry points). Same bounded machinery as the libc resolver. */
+static int resolve_lib_sym(struct task_struct *t, uintptr_t base,
+                            const char *name, uintptr_t *va)
+ {
+    struct memd_elf_dyn di;
+    int ret;
+    if (!t || !base || !name || !name[0] || !va)
+        return -EFAULT;
+    *va = 0;
+    ret = parse_dynamic(t, base, &di);
+    if (ret)
+        return ret;
+    if (memd_elf_lookup(t, di.symtab, di.strtab, di.strsz, di.hash,
+                        di.ghash, name, di.bias, va))
+        return -ENOENT;
+    if (!*va)
+        return -ENOENT;
     return 0;
 }
 
@@ -386,13 +427,11 @@ static int seize_task(struct task_struct *task)
     return -ETIMEDOUT;
 }
 
-static void release_task(struct task_struct *task)
+static void memd_inj_release(struct task_struct *task)
  {
     if (task)
         send_task_sig(task, SIGCONT);
 }
-
-static void release_task(struct task_struct *task);
 
 /* ---- user-pt_regs location + sanity ---- */
 static int regs_sane(unsigned long *r)
@@ -617,7 +656,7 @@ static int remote_call(struct task_struct *task, struct mm_struct *mm,
     regs[30] = (uint64_t)(stub_va + 36);
     if (write_regs(task, regs_va, regs))
         return -EFAULT;
-    release_task(task);
+    memd_inj_release(task);
     ret = -ETIMEDOUT;
     for (tries = 0; tries * MEMD_INJ_POLL_MS < timeout_ms; tries++) {
         u64 done = 0, out = 0;
@@ -639,24 +678,64 @@ static int remote_call(struct task_struct *task, struct mm_struct *mm,
     return ret;
 }
 
+/* Best-effort scratch wipe (stub, path, flags) before the final SIGCONT,
+ * so no payload bytes linger in target stack memory. Failure is logged
+ * by the caller path but never fails the inject itself: the payload
+ * already ran or was never installed. */
+static void wipe_scratch(struct task_struct *task)
+ {
+    unsigned long regs[MEMD_PT_NREGS];
+    uintptr_t regs_va, sp, base, i;
+    unsigned long zero = 0;
+    if (!task)
+        return;
+    if (locate_user_regs(task, &regs_va, regs))
+        return;
+    sp = regs[MEMD_PT_SP];
+    if (sp < MEMD_INJ_SCRATCH_BELOW + 512)
+        return;
+    base = (sp - MEMD_INJ_SCRATCH_BELOW) & ~15UL;
+    for (i = 0; i < MEMD_INJ_SCRATCH_BELOW; i += 8) {
+        if (memd_task_copy_ok(task, 1, base + i, &zero, 8))
+            return;
+    }
+}
+
+static const char *memd_basename(const char *path)
+ {
+    const char *b = path, *p = path;
+    while (*p) {
+        if (*p == '/')
+            b = p + 1;
+        p++;
+    }
+    return b;
+}
+
 /* ---- top-level inject ---- */
-static int inject_so(pid_t pid, const char *path, int su, int flags,
-                      uintptr_t *handle_out)
+static int inject_so(pid_t pid, const char *path, const char *entry, int su,
+                      int flags, uintptr_t *handle_out, int *entry_out)
  {
     struct task_struct *task = NULL;
     struct mm_struct *mm = NULL;
-    uintptr_t libc_base, retval;
+    uintptr_t libc_base, retval, lib_base, entry_va;
     struct memd_elf_addrs addrs;
     struct memd_su_saved su_state;
-    size_t pathlen;
+    size_t pathlen, entrylen;
+    const char *base;
     int ret, ephemeral;
     if (!path || !handle_out)
         return -EFAULT;
     *handle_out = 0;
+    if (entry_out)
+        *entry_out = 0;
     memset(&su_state, 0, sizeof(su_state));
     pathlen = strnlen(path, 256);
     if (pathlen == 0 || pathlen >= 256 || path[0] != '/' ||
         (flags & ~MEMD_LOADSO_EPHEMERAL))
+        return -EINVAL;
+    entrylen = entry ? strnlen(entry, 64) : 0;
+    if (entry && (entrylen == 0 || entrylen >= 64 || strchr(entry, '/')))
         return -EINVAL;
     ephemeral = (flags & MEMD_LOADSO_EPHEMERAL) != 0;
     if (!is_pid_alive(pid))
@@ -702,6 +781,41 @@ static int inject_so(pid_t pid, const char *path, int su, int flags,
         goto out_release;
     }
     *handle_out = retval;
+    if (entrylen) {
+        /* Run the payload entry with the dlopen handle in x0. The
+         * library is located by basename (must be unique in target);
+         * su still covers this call. */
+        base = memd_basename(path);
+        if (!*base) {
+            if (su)
+                su_unstage(task, &su_state);
+            ret = -EINVAL;
+            goto out_release;
+        }
+        lib_base = get_module_base(pid, (char *)base, 0);
+        if (!lib_base) {
+            if (su)
+                su_unstage(task, &su_state);
+            ret = -ENOENT;
+            goto out_release;
+        }
+        if (resolve_lib_sym(task, lib_base, entry, &entry_va)) {
+            if (su)
+                su_unstage(task, &su_state);
+            ret = -ENOENT;
+            goto out_release;
+        }
+        retval = 0;
+        ret = remote_call(task, mm, entry_va, *handle_out, NULL, 0,
+                          &retval, MEMD_INJ_CALL_TRIES * MEMD_INJ_POLL_MS);
+        if (entry_out)
+            *entry_out = (int)retval;
+        if (ret) {
+            if (su)
+                su_unstage(task, &su_state);
+            goto out_release;
+        }
+    }
     if (ephemeral) {
         /* Linker unloads itself: maps/solist cleaned by Android's own
          * linker, no layout knowledge needed on our side. */
@@ -720,7 +834,10 @@ static int inject_so(pid_t pid, const char *path, int su, int flags,
         su_unstage(task, &su_state);
     ret = 0;
 out_release:
-    release_task(task);
+    /* Wipe our scratch before resume (still stopped here on all paths
+     * that got past seize; best-effort, never fails the inject). */
+    wipe_scratch(task);
+    memd_inj_release(task);
 out_mm:
     mmput(mm);
 out_task:
@@ -732,16 +849,19 @@ int do_load_sotoapp(struct socket* sock, void __user* arg)
  {
     struct memd_loadso_cmd cmd;
     uintptr_t handle;
-    int ret;
+    int entry_result, ret;
     (void)sock;
     if (!memd_capable(CAP_SYS_ADMIN))
         return -EPERM;
     if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
         return -EFAULT;
     handle = 0;
-    ret = inject_so(cmd.pid, cmd.path, 0, cmd.flags, &handle);
+    entry_result = 0;
+    ret = inject_so(cmd.pid, cmd.path, cmd.entry[0] ? cmd.entry : NULL,
+                    0, cmd.flags, &handle, &entry_result);
     cmd.result = ret;
     cmd.handle = handle;
+    cmd.entry_result = entry_result;
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
     return 0;
@@ -751,16 +871,19 @@ int do_load_sosutoapp(struct socket* sock, void __user* arg)
  {
     struct memd_loadso_cmd cmd;
     uintptr_t handle;
-    int ret;
+    int entry_result, ret;
     (void)sock;
     if (!memd_capable(CAP_SYS_ADMIN))
         return -EPERM;
     if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
         return -EFAULT;
     handle = 0;
-    ret = inject_so(cmd.pid, cmd.path, 1, cmd.flags, &handle);
+    entry_result = 0;
+    ret = inject_so(cmd.pid, cmd.path, cmd.entry[0] ? cmd.entry : NULL,
+                    1, cmd.flags, &handle, &entry_result);
     cmd.result = ret;
     cmd.handle = handle;
+    cmd.entry_result = entry_result;
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
     return 0;
