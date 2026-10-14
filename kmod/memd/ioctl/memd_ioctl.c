@@ -509,6 +509,10 @@ int do_read_physical_memory(struct socket* sock, void __user* arg) {
      * cap it. Root-only path, but a garbage size must still fail fast. */
     if (!cmd.size || cmd.size > CMD_MAX_BYTES)
         return -EINVAL;
+    /* va+off must not wrap: near-ULONG_MAX bases would alias low memory. */
+    if (cmd.size - 1 > (unsigned long)-1 - cmd.src_va ||
+        cmd.size - 1 > (unsigned long)-1 - cmd.dst_va)
+        return -EINVAL;
     task = get_target_task(cmd.pid);
     if (!task)
         return -ESRCH;
@@ -601,6 +605,9 @@ int do_write_physical_memory(struct socket* sock, void __user* arg) {
 
     /* Same cap as the read path (see above): unbounded size livelocks. */
     if (!cmd.size || cmd.size > CMD_MAX_BYTES)
+        return -EINVAL;
+    if (cmd.size - 1 > (unsigned long)-1 - cmd.src_va ||
+        cmd.size - 1 > (unsigned long)-1 - cmd.dst_va)
         return -EINVAL;
     task = get_target_task(cmd.pid);
     if (!task)

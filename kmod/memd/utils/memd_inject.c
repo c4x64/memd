@@ -557,11 +557,11 @@ static int su_stage(struct task_struct *task, struct memd_su_saved *s)
     s->cred = (struct cred *)c;
     s->uid = uid;
     if (memd_safe_read64((void *)(c + cred_cap_eff_off()), &s->cap_eff))
-        goto fail;
+        goto fail_read;
     if (memd_learned_ext.t_cred_cap_perm >= 0) {
         if (memd_safe_read64((void *)(c + (unsigned long)memd_learned_ext.t_cred_cap_perm),
                              &s->cap_perm))
-            goto fail;
+            goto fail_read;
         s->have_perm = true;
     }
     if (memd_safe_write32((void *)(c + 4), 0))
@@ -574,6 +574,15 @@ static int su_stage(struct task_struct *task, struct memd_su_saved *s)
     s->active = true;
     return 0;
 fail:
+    /* A write clobbered state: restore every saved field before the
+     * target can resume elevated. All saved values are valid here
+     * (reads complete before the first write). */
+    memd_safe_write32((void *)(c + 4), s->uid);
+    memd_safe_write64((void *)(c + cred_cap_eff_off()), s->cap_eff);
+    if (s->have_perm)
+        memd_safe_write64((void *)(c + (unsigned long)memd_learned_ext.t_cred_cap_perm),
+                          s->cap_perm);
+fail_read:
     /* Manual drop (NOT put_cred: see above); __put_cred only if last. */
     {
         atomic_t *cnt = (atomic_t *)(void *)c;
