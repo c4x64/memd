@@ -39,7 +39,7 @@ struct memd_learned_ext memd_learned_ext = {
     .m_hiwater_rss = -1, .m_hiwater_vm = -1, .m_total_vm = -1, .m_locked_vm = -1,
     .m_pinned_vm = -1, .m_data_vm = -1, .m_exec_vm = -1, .m_stack_vm = -1,
     .m_arg_lock = -1, .m_arg_start = -1, .m_arg_end = -1, .m_env_start = -1,
-    .m_env_end = -1, .f_fpath = -1, .f_op = -1, .f_inode = -1, .f_mapping = -1,
+    .m_env_end = -1, .f_fpath = -1, .f_op = -1, .f_private = -1, .f_inode = -1, .f_mapping = -1,
     .f_pos = -1, .f_flags = -1, .f_mode = -1, .f_count = -1,
     .d_name = -1, .d_parent = -1, .d_inode = -1, .d_op = -1,
     .d_sb = -1, .d_lockref = -1, .d_count = -1, .d_flags = -1,
@@ -952,6 +952,26 @@ int memd_learn_extended(void)
     memd_learn_mm_extended();
     memd_learn_file_extended();
     return 0;
+}
+
+/* Learn struct file.private_data from an exact anchor: our own anon_inode
+ * file, whose private pointer we set at creation. The offset is a
+ * per-boot constant, so every bind re-confirms the same value
+ * (idempotent — first unique hit wins, later binds are no-ops). A
+ * non-unique hit leaves -1 (compiled fallback, loud). Direct memcpy is
+ * safe here: our own freshly-created slab object, current context. */
+void memd_learn_file_private(struct file *f, void *known_private)
+ {
+    int found = -1, n = 0;
+    if (!f || !known_private || memd_learned_ext.f_private >= 0)
+        return;
+    n = memd_scan_for_ptr(f, 512, known_private, &found);
+    if (n == 1) {
+        memd_learned_ext.f_private = found;
+        memd_info("learn: file private_data at +%d\n", found);
+    } else {
+        memd_err("learn: file private_data ambiguous (%d)\n", n);
+    }
 }
 
 static void memd_learn_thread_struct(void)

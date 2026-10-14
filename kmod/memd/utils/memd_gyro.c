@@ -145,7 +145,7 @@ static struct input_dev *memd_find_input_device(struct task_struct *task, const 
          * gen means skip, never a wrong-offset read. */
         fop = memd_file_fop(filp);
         if (fop && fop->unlocked_ioctl) {
-            handle = filp->private_data;
+            handle = memd_f_private(filp);
             if (handle && handle->dev && handle->dev->name &&
                 strstr(handle->dev->name, name)) {
                 dev = input_get_device(handle->dev);

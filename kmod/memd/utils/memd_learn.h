@@ -110,6 +110,7 @@ struct memd_learned_ext {
     int m_env_end;     /* mm_struct.env_end */
     int f_fpath;      /* struct file.f_path */
     int f_op;         /* struct file.f_op */
+    int f_private;    /* struct file.private_data (learned from our own anon file) */
     int f_inode;      /* struct file.f_inode */
     int f_mapping;    /* struct file.f_mapping */
     int f_pos;        /* struct file.f_pos */
@@ -225,6 +226,24 @@ int memd_learn_extended(void);
     (memd_learned_ext.f_op >= 0 ? \
      *(struct file_operations **)((char *)(f) + memd_learned_ext.f_op) : \
      (f)->f_op)
+
+#define memd_f_private(f) \
+    (memd_learned_ext.f_private >= 0 ? \
+     *(void **)((char *)(f) + memd_learned_ext.f_private) : \
+     (f)->private_data)
+
+/* Writer twin of memd_f_private (release path NULL-ing). */
+static inline void memd_f_private_set(struct file *f, void *v) {
+    if (memd_learned_ext.f_private >= 0)
+        *(void **)((char *)f + memd_learned_ext.f_private) = v;
+    else
+        f->private_data = v;
+}
+
+/* Learn f_private from an exact anchor (our own anon_inode file whose
+ * private pointer we set at creation). Declared here, defined in
+ * memd_learn.c next to the other file learners. */
+void memd_learn_file_private(struct file *f, void *known_private);
 
 #define memd_d_name(d) \
     (memd_learned_ext.d_name >= 0 ? \

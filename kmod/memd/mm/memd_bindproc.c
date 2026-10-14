@@ -15,6 +15,7 @@
 #include "linux/types.h"
 #include "memd_common.h"
 #include "memd_ioctl.h"
+#include "memd_learn.h"
 #include "memd_page_walk.h"
 #include "memd_utils.h"
 
@@ -79,7 +80,7 @@ struct bp_write_memory_cmd {
 #define MEMD_BP_IOCTL_WRITE_MEMORY _IOWR('B', 3, struct bp_write_memory_cmd)
 
 static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) {
-    struct memd_bindproc_private* private_data = f->private_data;
+    struct memd_bindproc_private* private_data = memd_f_private(f);
     int ret = 0;
     if (!private_data) {
         return -EINVAL;
@@ -304,7 +305,7 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
 static int bindproc_mmap(struct file* f, struct vm_area_struct* vma) { return -EINVAL; }
 
 static int bindproc_release(struct inode* inode, struct file* f) {
-    struct memd_bindproc_private* private_data = f->private_data;
+    struct memd_bindproc_private* private_data = memd_f_private(f);
     if (private_data) {
         size_t i;
 
@@ -327,30 +328,14 @@ static int bindproc_release(struct inode* inode, struct file* f) {
         mutex_destroy(&private_data->lock);
 
         kfree(private_data);
-        f->private_data = NULL;
+        memd_f_private_set(f, NULL);
     }
     return 0;
 }
 
-loff_t bindproc_llseek(struct file* file, loff_t offset, int whence) {
-    switch (whence) {
-    case SEEK_SET:
-        if (offset < 0)
-            return -EINVAL;
-        file->f_pos = offset;
-        break;
-    case SEEK_CUR:
-        if (file->f_pos + offset < 0)
-            return -EINVAL;
-        file->f_pos += offset;
-        break;
-    case SEEK_END:
-        return -EINVAL; /* Not supported */
-    default:
-        return -EINVAL;
-    }
-    return file->f_pos;
-}
+/* No custom llseek: the VFS default uses per-kernel offsets, while any
+ * reimplementation here would trust build-header layout on foreign
+ * kernels (struct file was reworked in 6.6/6.12). */
 
 static const struct file_operations bindproc_fops = {
     .owner = THIS_MODULE,
@@ -359,7 +344,6 @@ static const struct file_operations bindproc_fops = {
     .write = bindproc_write,
     .unlocked_ioctl = bindproc_ioctl,
     .mmap = bindproc_mmap,
-    .llseek = bindproc_llseek,
 };
 
 
@@ -423,6 +407,10 @@ int do_bind_proc(struct socket* sock, void __user* arg) {
         put_unused_fd(fd);
         goto err_free_private;
     }
+
+    /* Learn private_data offset from this exact anchor (our own file).
+     * Must run before fd_install: any reachable fd implies learning ran. */
+    memd_learn_file_private(filp, private_data);
 
     /* Copy result back to userspace before installing fd */
     cmd.fd = fd;
