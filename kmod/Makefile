@@ -131,8 +131,9 @@ check-universal: all
 	@echo "== versions/imports via check_universal.py =="
 	@NM_BIN="$(NM)"; [ -n "$$NM_BIN" ] || NM_BIN="$(CROSS_COMPILE)nm"; \
 	OD_BIN="$(OBJDUMP)"; [ -n "$$OD_BIN" ] || OD_BIN="$(CROSS_COMPILE)objdump"; \
-	$$NM_BIN -u rwbridge.ko | awk '{print $$2}' | sort -u | tee /tmp/rwbridge.undef; \
-	python3 check_universal.py rwbridge.ko /tmp/rwbridge.undef $(KMI) $(KDIR)/System.map; \
+	$$NM_BIN -u rwbridge.ko | awk '{print $$2}' | sort -u | tee /tmp/rwbridge.undef || \
+		{ echo "FAIL: nm undef dump failed"; exit 1; }; \
+	python3 check_universal.py rwbridge.ko /tmp/rwbridge.undef $(KMI) $(KDIR)/System.map && \
 	echo "== BTI landing pads present =="; \
 	$$OD_BIN -d rwbridge.ko | grep -qiE 'bti([[:space:]]|$$)|hint[[:space:]]' || \
 		{ echo "FAIL: no BTI pads (BTI kernels fault on entry -> reboot)"; exit 1; }; \
