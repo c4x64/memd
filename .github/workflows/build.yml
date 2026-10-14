@@ -8,6 +8,16 @@ on:
     - cron: '0 2 * * 0'  # Weekly rebuild to catch new DDK tags
 
 jobs:
+  compat-check:
+    name: Kernel Compat DB (>=1000 kernels resolve)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify compat database
+        run: python3 .github/scripts/compat_db.py
+
   generate-matrix:
     name: Generate Build Matrix
     runs-on: ubuntu-latest
