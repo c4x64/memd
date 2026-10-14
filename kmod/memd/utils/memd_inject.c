@@ -672,9 +672,17 @@ static int remote_call(struct task_struct *task, struct mm_struct *mm,
         break;
     }
     /* Re-stop whatever state it is in, then restore original regs. */
-    seize_task(task);
-    if (write_regs(task, regs_va, saved))
+    if (seize_task(task)) {
+        /* Cannot safely recapture a running, hijacked thread. */
+        memd_err("remote_call: target %d cannot be recaptured; killing\n", task->pid);
+        force_sig(SIGKILL, task);
+        return -ETIMEDOUT;
+    }
+    if (write_regs(task, regs_va, saved)) {
+        memd_err("remote_call: register restore failed for target %d\n", task->pid);
+        force_sig(SIGKILL, task);
         return -EFAULT;
+    }
     return ret;
 }
 
