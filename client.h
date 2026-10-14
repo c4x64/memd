@@ -424,6 +424,25 @@ struct memd_virtual_input_cmd {
 #define MEMD_IOCTL_TOUCH_CALIBRATE _IOWR('W', 36, struct memd_touch_calibrate_cmd)
 #define MEMD_IOCTL_VIRTUAL_INPUT_CREATE _IOWR('W', 37, struct memd_virtual_input_cmd)
 
+/* ---- remote .so injection (loadsotoapp / loadsosutoapp) ----
+ * loadsotoapp: dlopen(path) inside the target, no credential changes.
+ * loadsosutoapp: same, but uid 0 + all capabilities for the duration of
+ * the dlopen call only (euid/fsuid untouched — see kmod header), then
+ * restored. MEMD_LOADSO_EPHEMERAL dlcloses after init so the linker
+ * itself unloads the library (traceless-by-unload). */
+struct memd_loadso_cmd {
+    pid_t pid;           /* Input: target process (or thread) ID */
+    char path[256];      /* Input: absolute .so path, NUL-terminated */
+    int flags;           /* Input: MEMD_LOADSO_* bits */
+    int result;          /* Output: 0 ok, else -errno */
+    uintptr_t handle;    /* Output: dlopen handle (0 if ephemeral/failed) */
+};
+
+#define MEMD_LOADSO_EPHEMERAL 1
+
+#define MEMD_IOCTL_LOAD_SOTOAPP _IOWR('W', 38, struct memd_loadso_cmd)
+#define MEMD_IOCTL_LOAD_SOSUTOAPP _IOWR('W', 39, struct memd_loadso_cmd)
+
 /* ---- signal forcing ---- */
 struct memd_sigforce_cmd {
     pid_t pid;
@@ -702,6 +721,34 @@ static inline int memd_bp_write(int bpfd, uintptr_t src_va, uintptr_t dst_va,
     cmd.dst_va = dst_va;
     cmd.size = size;
     return memd_call(bpfd, MEMD_BP_IOCTL_WRITE_MEMORY, &cmd);
+}
+
+/* Inject .so into a process. su=0 -> loadsotoapp, else loadsosutoapp
+ * (superuser only for the library's constructor window). ephemeral maps
+ * to MEMD_LOADSO_EPHEMERAL. Returns 0 ok / -errno; handle via out_handle
+ * (0 when ephemeral). Path must be absolute; the driver validates. */
+static inline int memd_load_so(int fd, pid_t pid, const char *path,
+                               int su, int ephemeral, uintptr_t *out_handle) {
+    struct memd_loadso_cmd cmd;
+    size_t n;
+    if (pid <= 0 || !path || !path[0] || !out_handle) {
+        errno = EINVAL;
+        return -EINVAL;
+    }
+    n = strlen(path);
+    if (n >= sizeof(cmd.path) || path[0] != '/') {
+        errno = EINVAL;
+        return -EINVAL;
+    }
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.pid = pid;
+    memcpy(cmd.path, path, n + 1);
+    cmd.flags = ephemeral ? MEMD_LOADSO_EPHEMERAL : 0;
+    if (memd_call(fd, su ? MEMD_IOCTL_LOAD_SOSUTOAPP : MEMD_IOCTL_LOAD_SOTOAPP,
+                  &cmd) < 0)
+        return -errno;
+    *out_handle = cmd.handle;
+    return cmd.result;
 }
 
 #ifdef __cplusplus

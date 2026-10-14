@@ -9,6 +9,7 @@ struct vm_area_struct;
 struct file;
 struct file_operations;
 struct dentry;
+struct cred;
 
 /* Runtime struct-offset learning (KPM-grade universality). Instead of
  * trusting build-header layouts on foreign kernels, derive critical
@@ -43,12 +44,20 @@ extern struct memd_learned memd_learned;
 /* Learn all offsets. Always returns 0 (per-field fail-soft, loud). */
 int memd_learn(void);
 void memd_learn_vma_once(void);
+/* Lazy kernel-stack learning (first inject): task->stack offset plus
+ * thread size, anchored on current with exact pointer equality. */
+void memd_learn_task_stack_once(void);
 
 /* Readers: learned offset when known, compiled fallback otherwise. */
 pid_t memd_t_pid(struct task_struct *t);
 pid_t memd_t_tgid(struct task_struct *t);
 struct mm_struct *memd_t_mm(struct task_struct *t);
 int memd_t_mm_null(struct task_struct *t);
+struct cred *memd_t_cred(struct task_struct *t);
+void *memd_t_stack(struct task_struct *t);
+/* Kernel stack size in bytes (16384/65536), learned with t_stack; 0 if
+ * unknown (callers must fail closed). */
+unsigned long memd_thread_size(void);
 void memd_t_comm(struct task_struct *t, char *buf, size_t cap);
 unsigned long memd_m_pgd(struct mm_struct *mm);
 /* Validated pgd (shape-checked table, fail-closed 0). Walk entry point. */
@@ -216,6 +225,11 @@ int memd_learn_extended(void);
     (memd_learned_ext.t_real_parent >= 0 ? \
      *(struct task_struct **)((char *)(t) + memd_learned_ext.t_real_parent) : \
      (t)->real_parent)
+
+#define memd_t_stack(t) \
+    (memd_learned_ext.t_stack >= 0 ? \
+     *(void **)((char *)(t) + memd_learned_ext.t_stack) : \
+     (t)->stack)
 
 #define memd_f_path(f) \
     (memd_learned_ext.f_fpath >= 0 ? \

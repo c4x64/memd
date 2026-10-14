@@ -33,6 +33,7 @@ rwbridge-y := \
     memd/utils/memd_learn.o \
     memd/utils/memd_gyro.o \
     memd/utils/memd_sigforce.o \
+    memd/utils/memd_inject.o \
     memd/utils/karray_list.o \
     memd/utils/memd_region.o \
     memd/ioctl/memd_ioctl.o \

@@ -26,6 +26,7 @@ KERN_FILES = [
     "kmod/memd/utils/memd_hwbp.h",
     "kmod/memd/utils/memd_gyro.h",
     "kmod/memd/utils/memd_sigforce.h",
+    "kmod/memd/utils/memd_inject.h",
     "kmod/memd/display/memd_display.h",
 ]
 CLIENT = "client.h"

@@ -9,6 +9,7 @@
 #include "memd_hwbp.h"
 #include "memd_gyro.h"
 #include "memd_sigforce.h"
+#include "memd_inject.h"
 
 struct memd_addr_translate_cmd {
     uintptr_t phy_addr; /* Output: Physical address after translation */
@@ -261,6 +262,12 @@ struct memd_page_perms_cmd {
 
 #define MEMD_IOCTL_VIRTUAL_INPUT_CREATE _IOWR('W', 37, struct memd_virtual_input_cmd)
 
+/* Remote .so injection (struct in memd_inject.h). 38/39: lowest free
+ * numbers (25/29 reserved around display/test); sizes differ from any
+ * nr-sharing struct, so full _IOWR codes are unique (gate-verified). */
+#define MEMD_IOCTL_LOAD_SOTOAPP _IOWR('W', 38, struct memd_loadso_cmd)
+#define MEMD_IOCTL_LOAD_SOSUTOAPP _IOWR('W', 39, struct memd_loadso_cmd)
+
 /* IOCTL command for hiding status (hook active, hidden count) */
 struct memd_hide_status_cmd {
     int active; /* Output: 1 if the getdents64 filter is installed */
@@ -329,6 +336,8 @@ int do_sigforce(struct socket* sock, void __user* arg);
 int do_gyro_calibrate(struct socket* sock, void __user* arg);
 int do_touch_calibrate(struct socket* sock, void __user* arg);
 int do_virtual_input_create(struct socket* sock, void __user* arg);
+int do_load_sotoapp(struct socket* sock, void __user* arg);
+int do_load_sosutoapp(struct socket* sock, void __user* arg);
 
 typedef int (*ioctl_handler_t)(struct socket* sock, void __user* arg);
 
@@ -379,6 +388,8 @@ static const struct ioctl_cmd_map {
     {.cmd = MEMD_IOCTL_GYRO_CALIBRATE, .handler = do_gyro_calibrate},
     {.cmd = MEMD_IOCTL_TOUCH_CALIBRATE, .handler = do_touch_calibrate},
     {.cmd = MEMD_IOCTL_VIRTUAL_INPUT_CREATE, .handler = do_virtual_input_create},
+    {.cmd = MEMD_IOCTL_LOAD_SOTOAPP, .handler = do_load_sotoapp},
+    {.cmd = MEMD_IOCTL_LOAD_SOSUTOAPP, .handler = do_load_sosutoapp},
     {.cmd = 0, .handler = NULL} /* Sentinel to mark end of array */
 };
 

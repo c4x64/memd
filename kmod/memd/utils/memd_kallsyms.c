@@ -85,6 +85,9 @@ static const char *memd_wanted[] = {
     /* Commented-out but reserved for future use (ioctl/memd_ioctl.c) */
     "wake_up_new_task",
     "copy_process",
+    /* Remote-call engine (inject/memd_inject.c): stop/wait + icache */
+    "wait_task_inactive",
+    "flush_dcache_page",
 };
 
 #define MEMD_NWANT (sizeof(memd_wanted) / sizeof(memd_wanted[0]))

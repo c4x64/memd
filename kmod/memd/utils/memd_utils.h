@@ -45,6 +45,7 @@ int memd_filp_close(struct file** f, fl_owner_t id);
 int memd_safe_read64(const void *src, unsigned long *dst);
 int memd_safe_read32(const void *src, unsigned int *dst);
 int memd_safe_write64(void *dst, unsigned long v);
+int memd_safe_write32(void *dst, unsigned int v);
 /* Write a u64 to a possibly read-only kernel page (AP flip + TLBI). */
 int memd_table_write64(unsigned long entry_va, unsigned long val);
 /* Page permissions + phys for a kernel VA (descriptor metadata only). */

@@ -627,6 +627,89 @@ int memd_t_mm_null(struct task_struct *t)
     return memd_t_mm(t) == NULL;
 }
 
+struct cred *memd_t_cred(struct task_struct *t)
+ {
+    if (memd_learned.t_cred >= 0)
+        return *(struct cred **)((char *)t + memd_learned.t_cred);
+    return t->cred;
+}
+
+static unsigned long memd_stack_size_learned;
+
+unsigned long memd_thread_size(void)
+ {
+    return memd_stack_size_learned;
+}
+
+/* Learn task->stack offset + thread stack size from current.
+ * current's sp lies in [base, base+SIZE) with SIZE in {16K (4K pages),
+ * 64K (16K pages)} and base SIZE-aligned. thread_info.task sits at
+ * base+small offset; scan foff {0..64 step 8} for == current with a
+ * unique (size, foff) hit, then scan current's task_struct for == base
+ * (unique) to learn t_stack. Exact pointer equality: a false positive
+ * would need our own task pointer forged in memory; ambiguity aborts.
+ * Runs lazily on first inject (loader/ioctl context, always a user
+ * task with a real kernel stack). */
+static void memd_learn_task_stack(void)
+ {
+    struct task_struct *t = current;
+    unsigned long sp;
+    unsigned long sizes[2] = {16384, 65536};
+    int si, foff, i, n, found_foff;
+    unsigned long found_size, base, v;
+    int off, hits;
+    asm volatile("mov %0, sp" : "=r" (sp));
+    n = 0;
+    found_size = 0;
+    found_foff = -1;
+    for (si = 0; si < 2; si++) {
+        base = sp & ~(sizes[si] - 1);
+        for (foff = 0; foff <= 64; foff += 8) {
+            if (memd_safe_read64((void *)(base + (unsigned long)foff), &v))
+                continue;
+            if (v == (unsigned long)t) {
+                n++;
+                found_size = sizes[si];
+                found_foff = foff;
+            }
+        }
+    }
+    if (n != 1) {
+        memd_err("learn: task stack base ambiguous (%d)\n", n);
+        return;
+    }
+    base = sp & ~(found_size - 1);
+    off = -1;
+    hits = 0;
+    for (i = 0; i + 8 <= MEMD_LEARN_SCAN; i += 8) {
+        if (memd_safe_read64((char *)t + i, &v))
+            continue;
+        if (v == base) {
+            if (!hits)
+                off = i;
+            hits++;
+        }
+    }
+    if (hits != 1) {
+        memd_err("learn: task stack offset ambiguous (%d)\n", hits);
+        return;
+    }
+    memd_learned_ext.t_stack = off;
+    memd_stack_size_learned = found_size;
+    memd_info("learn: task stack at +%d size %lu (thread_info.task at base+%d)\n",
+              off, found_size, found_foff);
+}
+
+/* Lazy stack learning on first inject (caller process context). */
+void memd_learn_task_stack_once(void)
+ {
+    static bool done = false;
+    if (done)
+        return;
+    done = true;
+    memd_learn_task_stack();
+}
+
 void memd_t_comm(struct task_struct *t, char *buf, size_t cap)
  {
     if (memd_learned.t_comm >= 0 && cap > 0) {

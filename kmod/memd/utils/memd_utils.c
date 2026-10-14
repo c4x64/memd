@@ -434,6 +434,22 @@ int memd_safe_write64(void *dst, unsigned long v)
     return err;
 }
 
+/* 32-bit twin of memd_safe_write64: same extable guard, word store. */
+int memd_safe_write32(void *dst, unsigned int v)
+ {
+    int err = -EFAULT;
+    asm volatile(
+        "1: str %w1, [%2]\n"
+        "   mov %w0, #0\n"
+        "2:\n"
+        "   .pushsection __ex_table, \"a\"\n"
+        "   .balign 4\n"
+        "   .long (1b - .), (2b - .)\n"
+        "   .popsection\n"
+        : "+r" (err) : "r" (v), "r" (dst) : "memory");
+    return err;
+}
+
 /* Write a u64 to a possibly read-only kernel page (e.g. sys_call_table
  * under STRICT_KERNEL_RWX): walk TTBR1 to the covering descriptor,
  * flip AP to writable, local TLBI, guarded store, readback verify,
