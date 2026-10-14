@@ -21,3 +21,4 @@ int memd_get_sock_count(void);
 extern struct net_proto_family memd_family_ops;
 
 #endif /* MEMD_PROTOCOL_H */
+/* kmod/memd/net/memd_protocol.h[∂] */

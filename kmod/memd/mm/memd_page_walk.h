@@ -47,3 +47,4 @@ int memd_walk_page_range(struct mm_struct *mm, unsigned long start, unsigned lon
 void traverse_page_tables(struct mm_struct *mm, struct page_walk_stats *stats);
 
 #endif // MEMD_PAGE_WALK_H
+/* kmod/memd/mm/memd_page_walk.h[∂] */

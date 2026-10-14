@@ -6,16 +6,25 @@ on:
   workflow_dispatch:
     inputs:
       manifest_run_id:
-        description: "Previous run ID whose kernel manifest should be resumed"
+        description: "Run ID containing the manifest to resume"
         required: false
         type: string
       batch_offset:
-        description: "First manifest row to compile (use the previous run's next offset)"
+        description: "First manifest row to compile; use the preceding run's next offset"
         required: false
         default: 0
         type: number
+      release_channel:
+        description: "Release channel to publish after a successful manual build"
+        required: true
+        type: choice
+        options:
+          - alpha
+          - beta
+          - rc
+          - stable
   schedule:
-    - cron: '0 2 * * 0'  # Weekly rebuild to catch new DDK tags
+    - cron: '0 2 * * 0'  # Weekly rebuild to identify new DDK tags
 
 permissions:
   actions: read
@@ -59,10 +68,10 @@ jobs:
         run: |
           if [ -n "$MANIFEST_RUN_ID" ] || [ -n "$KCIDB_GCP_CREDENTIALS" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "KernelCI build is enabled (new query or manifest resume)." >> "$GITHUB_STEP_SUMMARY"
+            echo "KernelCI compilation is enabled for a new query or manifest resumption." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "KernelCI build skipped: add the \`KCIDB_GCP_CREDENTIALS\` repository secret to enable BigQuery queries." >> "$GITHUB_STEP_SUMMARY"
+            echo "KernelCI compilation has been skipped. Add the \`KCIDB_GCP_CREDENTIALS\` repository secret to enable BigQuery queries." >> "$GITHUB_STEP_SUMMARY"
           fi
 
   prepare-kcidb-batch:
@@ -508,15 +517,17 @@ jobs:
             run.sh
 
       - name: Create Release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch' && inputs.release_channel != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: rwbridge-${{ github.run_number }}
-          name: rwbridge build ${{ github.run_number }}
+          tag_name: ${{ inputs.release_channel == 'stable' && format('rwbridge-{0}', github.run_number) || format('rwbridge-{0}-{1}', inputs.release_channel, github.run_number) }}
+          name: rwbridge ${{ inputs.release_channel }} release ${{ github.run_number }}
           draft: false
-          prerelease: false
+          prerelease: ${{ inputs.release_channel != 'stable' }}
+          generate_release_notes: true
           files: |
             rwbridge-spx
             rwbridge-spx.lz4
             dl/kmod/spx_decompress
             shell-bundle/*
+# .github/workflows/build.yml[∂]

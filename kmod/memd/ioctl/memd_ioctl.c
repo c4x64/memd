@@ -514,7 +514,7 @@ int do_read_physical_memory(struct socket* sock, void __user* arg) {
         return -ENOMEM;
     }
     /* Data via kernel cross-process copy (KPTI/lock-safe, universal).
-     * No page walk, no phys needed for contents. */
+     * No page-table walk or physical-address lookup is required for contents. */
     while (off < cmd.size) {
         unsigned long chunk = cmd.size - off;
         if (chunk > 65536)
@@ -1053,7 +1053,7 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
             cmd.prio = pr;
     }
 
-    // Try to get full command line
+    // Attempt to obtain the complete command line.
     cmdline[0] = '\0';
 
     /* get_cmdline via runtime kallsyms (6.1+), argv fallback below it:
@@ -1355,3 +1355,4 @@ int do_virtual_input_create(struct socket* sock, void __user* arg)
         return -EFAULT;
     return 0;
 }
+/* kmod/memd/ioctl/memd_ioctl.c[∂] */

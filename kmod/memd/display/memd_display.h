@@ -85,7 +85,7 @@ struct memd_disp_layer {
 
 #ifdef MEMD_DISP_TEST
 /* TEST ONLY (never ship): read back the front buffer for host-side
- * pixel verification (no panel hardware needed). Product builds omit
+ * pixel verification (no panel hardware is required). Product builds omit
  * the opcode entirely (dispatch returns ENOTTY). */
 struct memd_disp_readback_cmd {
     __u64 dst;      /* Input: userspace pointer for ARGB8888 pixels */
@@ -105,3 +105,4 @@ int memd_disp_status(struct memd_disp_status_cmd *out);
 int memd_disp_frame(const struct memd_disp_op *ops, __u32 count);
 
 #endif /* MEMD_DISPLAY_H */
+/* kmod/memd/display/memd_display.h[∂] */

@@ -272,3 +272,4 @@ int memd_set_session_quota(pid_t session, u32 max_regions)
     spin_unlock_irqrestore(&g_region_tree->lock, flags);
     return 0;
 }
+/* kmod/memd/utils/memd_region.c[∂] */

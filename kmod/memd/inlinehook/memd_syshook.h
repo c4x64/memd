@@ -18,3 +18,4 @@ int memd_hide_uninstall(void);
 int memd_hide_active(void);
 
 #endif /* MEMD_SYSHOOK_H */
+/* kmod/memd/inlinehook/memd_syshook.h[∂] */

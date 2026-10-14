@@ -36,7 +36,7 @@ The `memd_hwbp.c` module implements hardware breakpoint/watchpoint management fo
 
 | Location | Issue |
 |----------|-------|
-| `memd_hwbp_set:138-139` | Returns `-EINVAL` if `task->thread.debug_monitors` is NULL, but doesn't check if debug monitors are actually initialized for the task |
+| `memd_hwbp_set:138-139` | Returns `-EINVAL` if `task->thread.debug_monitors` is NULL, but does not verify that the task's debug monitors have been initialized |
 | `memd_hwbp_set:141-146` | No validation that `cmd->addr` is canonical/user-space address |
 | `memd_hwbp_set:150-166` | No bounds check on `cmd->hwbp_id` when > 16 (silently falls to auto-assign) |
 | `memd_hwbp_remove:199` | No check that `hwbp_table[slot].dms == dms` (could remove another task's breakpoint) |
@@ -63,7 +63,7 @@ dms->bvr[slot] = cmd->addr;
 dms->bcr[slot] = dbgbcr;
 ```
 
-**Problem**: `task->thread.debug_monitors` offset varies across kernel versions and vendor trees. The project has `memd_learn.h` infrastructure but **doesn't use it**.
+**Problem**: The offset of `task->thread.debug_monitors` varies across kernel versions and vendor trees. The project provides `memd_learn.h` infrastructure but does not employ it.
 
 ### 2.2 Debug Architecture Version Handling
 
@@ -76,7 +76,7 @@ dms->bcr[slot] = dbgbcr;
 | ARMv8.5 | +MTE/BTI | 2-16 | 2-16 | Memory Tagging, Branch Target ID |
 | ARMv8.6 | +ECV/FGT | 2-16 | 2-16 | Enhanced Counter Virtualization |
 
-**Current code**: Reads `ID_AA64DFR0_EL1` once at init but doesn't adapt encoding for DVS, MTE, or linked contexts.
+**Current code**: Reads `ID_AA64DFR0_EL1` once during initialization but does not adapt its encoding for DVS, MTE, or linked contexts.
 
 ### 2.3 Missing Symbol Resolution via kallsyms
 
@@ -200,3 +200,4 @@ This modular design enables:
 - Clear separation of arch-specific vs generic logic
 - Easy backporting to older kernels
 - Selective compilation of features
+<!-- retired/HWBP_ANALYSIS_REPORT.md[´ø¬ µ∂] -->

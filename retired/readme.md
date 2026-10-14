@@ -294,7 +294,7 @@ only); `hijack_arm64.c` stays linked SOLELY for `hook_write_range`
 
 - Re-verify the loader-contract map per release (the old 6.1 map
   described the previous driver; same method, new numbers).
-- 16K-page live proof (geometry path exercised on-device, not just CI).
+- 16K-page live proof (the geometry path was exercised on-device, not merely in CI).
 - Hide status surfacing in the overlay client (opcodes 21/22 in the
   product client header; warn user when hiding is unavailable).
 - Cross-generation live proofs (5.10 / 6.1 / 6.6 / 6.12 devices +
@@ -307,3 +307,4 @@ Journal first (`/sdcard/MemoryD/`), then dmesg (vermagic exact-want),
 then `uname -r` vs matrix (selection log names the match passes), then
 the socket probe (SEQPACKET→ENOKEY?). A wedge inside exactly one phase
 convicts it; report phase + kernel string, never theory alone.
+<!-- retired/readme.md[´ø¬ µ∂] -->

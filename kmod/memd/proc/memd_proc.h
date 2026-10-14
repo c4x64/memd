@@ -17,3 +17,4 @@ int memd_hide_get_hidden_pids(pid_t *buf, size_t buf_size, size_t *count);
 int memd_hide_get_ns_hidden_pids(pid_t *buf, size_t buf_size, size_t *count, struct pid_namespace *ns);
 
 #endif // ANDROID_MEMD_MEMD_PROC_H
+/* kmod/memd/proc/memd_proc.h[∂] */

@@ -348,3 +348,4 @@ int memd_disp_frame(const struct memd_disp_op *ops, __u32 count)
  {
     return memd_core_frame(ops, count);
 }
+/* kmod/memd/display/soc_exynos.c[∂] */

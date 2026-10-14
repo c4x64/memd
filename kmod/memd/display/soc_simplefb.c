@@ -153,3 +153,4 @@ const struct memd_disp_backend memd_be_simplefb = {
      * our back — core re-presents the stable front at 10Hz. */
     .refresh = true,
 };
+/* kmod/memd/display/soc_simplefb.c[∂] */

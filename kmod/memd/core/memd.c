@@ -127,3 +127,4 @@ MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("https://github.com/c4x64/memd");
 MODULE_VERSION("1.0.5");
 
+/* kmod/memd/core/memd.c[∂] */

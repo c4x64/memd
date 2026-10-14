@@ -325,3 +325,4 @@ void memd_vnc_stop(void)
 }
 
 #endif /* MEMD_DISP_TEST */
+/* kmod/memd/display/memd_vnc.c[∂] */

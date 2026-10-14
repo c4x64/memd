@@ -24,7 +24,7 @@ The `memd_hwbp.c` implementation has **critical flaws** that prevent it from fun
 
 ### 1.3 Memory Leaks / Use-After-Free
 - No `task_struct` death notification (no `task_work` or `perf_event` cleanup callback)
-- `memd_hwbp_cleanup()` only disables monitors but doesn't free per-task state
+- `memd_hwbp_cleanup()` disables monitors but does not free per-task state.
 - `hwbp_table[slot].dms` becomes dangling pointer when task exits
 - No RCU grace period for task lifetime
 
@@ -69,7 +69,7 @@ static struct memd_hwbp_entry hwbp_table[16];  // Should use get_num_brps()/get_
 - No page-boundary crossing check for watchpoints
 - No validation that `enable_debug_monitors()` succeeds
 - No check that `task` is still alive (`pid_alive()`, `task->mm`)
-- `memd_hwbp_remove()` doesn't verify `dms` matches current task's debug state
+- `memd_hwbp_remove()` does not verify that `dms` matches the current task's debug state.
 
 ---
 
@@ -139,7 +139,7 @@ API needed:
 ```c
 struct memd_hwbp_watchpoint_condition {
     u64 data_value;
-    u64 data_mask;    // 0 = exact match, ~0 = don't care
+    u64 data_mask;    // 0 = exact match, ~0 = no comparison
 };
 ```
 
@@ -219,3 +219,4 @@ The patch will:
 4. **Add** CPU debug architecture detection and feature gating
 5. **Implement** per-task state with proper locking and lifetime management
 6. **Add** all requested enhancements (conditions, callbacks, single-step, context-switch)
+<!-- retired/MEMD_HWBP_ANALYSIS_REPORT.md[´ø¬ µ∂] -->

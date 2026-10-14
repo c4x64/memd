@@ -1,15 +1,23 @@
-/* stable readme dont change */ 
+MemoryD[∂] — A Loadable Kernel Module for Android Memory I/O
 
-MemoryD - Loadable Kernel Module for Android Memory I/O
-
-Blame: c4x64@proton.me
+Maintained by: c4x64@proton.me
 
 
-GPL v2 License 
+Licence: GNU General Public License, version 2
 
-We do not promote any illegal activity. This project 
-is for educational purposes only.
+This project neither advocates nor endorses unlawful conduct. It is
+provided solely for educational purposes.
 
 Contact: c4x64@proton.me
-Affliation: Independent
+Affiliation: Independent
 Telegram: @LXGR00
+
+## Continuous Integration and Releases
+
+Pushes to the principal branch and scheduled runs perform builds and retain
+their artifacts; neither event publishes a release. A successful manual
+workflow dispatch publishes a release after the packaging job completes.
+The person initiating that dispatch must select one of four channels:
+`alpha`, `beta`, `rc`, or `stable`. Alpha, beta, and rc releases are marked
+as pre-releases; stable releases are not.
+<!-- readme[∂] -->

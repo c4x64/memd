@@ -21,3 +21,4 @@ int memd_install_inline_hook(void *target, void *handler, void **orig);
 void memd_remove_inline_hook(void *target, void *orig);
 
 #endif // ANDROID_MEMD_HIJACK_ARM64_H
+/* kmod/memd/inlinehook/hijack_arm64.h[∂] */

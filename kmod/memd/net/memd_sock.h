@@ -34,3 +34,4 @@ struct memd_sock {
 #define SOCK_OPT_SET_MODULE_VISIBLE 100
 
 #endif // MEMD_SOCK_H
+/* kmod/memd/net/memd_sock.h[∂] */

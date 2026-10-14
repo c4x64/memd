@@ -32,3 +32,4 @@ struct memd_hide_entry *memd_hide_get_first(void);
 struct memd_hide_entry *memd_hide_get_next(struct memd_hide_entry *entry);
 
 #endif /* MEMD_HIDE_H */
+/* kmod/memd/proc/memd_hide.h[∂] */

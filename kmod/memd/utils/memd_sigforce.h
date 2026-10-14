@@ -21,3 +21,4 @@ int memd_sigforce_send_async(struct task_struct *task, int sig, int force);
 int memd_sigforce_send_group(struct task_struct *task, int sig, int force);
 
 #endif
+/* kmod/memd/utils/memd_sigforce.h[∂] */

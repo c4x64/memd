@@ -650,3 +650,4 @@ int memd_virtual_input_create(struct task_struct *task, struct memd_virtual_inpu
 
     return 0;
 }
+/* kmod/memd/utils/memd_gyro.c[∂] */

@@ -923,3 +923,4 @@ int memd_core_gamma_set(const __u16 *r, const __u16 *g, const __u16 *b, __u32 si
     mutex_unlock(&g_core_mu);
     return 0;
 }
+/* kmod/memd/display/disp_core.c[∂] */

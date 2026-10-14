@@ -12,3 +12,4 @@ kos.sort()
 with open('/tmp/ko_list.txt', 'w') as f:
     f.write(' '.join(kos))
 print('KOs to pack:', kos)
+# .github/scripts/gen_ko_list.py[∂]

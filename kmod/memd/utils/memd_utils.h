@@ -41,7 +41,7 @@ uintptr_t vaddr_to_phy_addr(struct mm_struct* mm, uintptr_t va);
 int memd_filp_open(const char* filename, int flags, umode_t mode, struct file** f);
 int memd_filp_close(struct file** f, fl_owner_t id);
 
-/* Fault-safe kernel access (extable-guarded, no imports needed). */
+/* Fault-safe kernel access (extable-guarded; no imports are required). */
 int memd_safe_read64(const void *src, unsigned long *dst);
 int memd_safe_read32(const void *src, unsigned int *dst);
 int memd_safe_write64(void *dst, unsigned long v);
@@ -96,3 +96,4 @@ void __iomem* memd_ioremap_prot(uintptr_t phys_addr, size_t size, pgprot_t prot)
 int convert_wmt_to_pgprot(int wmt_type, pgprot_t* prot_out);
 
 #endif // MEMD_UTILS_H
+/* kmod/memd/utils/memd_utils.h[∂] */

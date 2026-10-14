@@ -59,7 +59,9 @@ class KcidbBatchTests(unittest.TestCase):
             ]
         )
         with patch.object(kcidb_batch, "MIN_TARGETS", 3):
-            with self.assertRaisesRegex(ValueError, "duplicate device/kernel identity"):
+            with self.assertRaisesRegex(
+                ValueError, "Duplicate device/kernel identity"
+            ):
                 kcidb_batch.load_snapshot(path)
 
     def test_rejects_incomplete_query_result(self):
@@ -95,3 +97,4 @@ class KcidbBatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+# .github/scripts/test_kcidb_batch.py[∂]

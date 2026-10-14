@@ -640,7 +640,7 @@ static int kernel_is_cfi(void)
 
 /* proto liveness: scan families for the driver marker (SEQPACKET ->
  * ENOKEY) then open a RAW socket on it. Proves the proto registered,
- * i.e. the module is not just present but serving. Bounded scan. */
+ * that is, the module is present and serving. The scan is bounded. */
 #include <sys/socket.h>
 #include <errno.h>
 #ifndef SOCK_SEQPACKET
@@ -1029,3 +1029,4 @@ int main(int argc, char **argv)
         fclose(jfp);
     return 1;
 }
+/* kmod/spx.c[∂] */

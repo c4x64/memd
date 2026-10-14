@@ -1,6 +1,6 @@
 /* spx_decompress.c — LZ4 decompressor for rwbridge-spx.lz4
  * Embedded in run.sh wrapper to decompress SPX at runtime.
- * Uses LZ4 frame format decompression (no external lib needed).
+ * Uses the LZ4 frame format; no external library is required.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -196,3 +196,4 @@ int main(int argc, char **argv) {
     fprintf(stderr, "Decompressed %zu -> %zu bytes\n", in_size, out_len);
     return 0;
 }
+/* kmod/spx_decompress.c[∂] */

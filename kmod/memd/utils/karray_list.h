@@ -64,3 +64,4 @@ size_t arraylist_capacity(struct karray_list* list);
 void arraylist_set_thread_safe(struct karray_list* list, bool enable);
 
 #endif // ANDROID_MEMD_KARRAY_LIST_H
+/* kmod/memd/utils/karray_list.h[∂] */

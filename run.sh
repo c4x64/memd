@@ -134,8 +134,8 @@ for d in /boot/bstmods /vendor/lib/modules /vendor_dlkm/lib/modules /system/lib/
     [ -d "$d" ] || continue
     for k in "$d"/*.ko; do
         [ -f "$k" ] || continue
-        # Copy first: some tool domains cannot read /vendor directly
-        # (cp works where od/dd/strings get EACCES).
+        # Copy first: some tool domains cannot read /vendor directly,
+        # although cp may succeed when od, dd, and strings return EACCES.
         cp -f "$k" /data/local/tmp/rwref.ko 2>/dev/null || continue
         _vo=$(od -A d -t u1 -v /data/local/tmp/rwref.ko 2>/dev/null | awk '
         BEGIN { split("118 101 114 109 97 103 105 99 61", t, " "); found=0; pos=0 }
@@ -201,7 +201,7 @@ extend_vermagic() {
     _eentsz=$((_e2 % 65536)); _enum=$((_e2 / 65536))
     [ "$_eentsz" = "64" ] || { echo "bad shentsize $_eentsz"; return 1; }
     [ "$_enum" -gt 0 ] && [ "$_enum" -lt 100 ] || { echo "bad shnum $_enum"; return 1; }
-    [ "$_esh" -gt "$_ev" ] || { echo "weird layout (shdr table before vermagic)"; return 1; }
+    [ "$_esh" -gt "$_ev" ] || { echo "invalid section-header layout (table precedes vermagic)"; return 1; }
     # Dump the whole table once: "idx off size" per section.
     _tbl=$(dd if="$_eko" bs=1 skip="$_esh" count=$((_enum * 64)) 2>/dev/null | od -A d -t u1 -v 2>/dev/null | awk -v n="$_enum" '
         { for (i=2; i<=NF; i++) b[m++]=$i }
@@ -555,4 +555,5 @@ else
 fi
 
 dump_log "install"
-echo "[rwbridge] done"
+echo "[rwbridge] completed"
+# run.sh[∂]

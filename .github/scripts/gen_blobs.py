@@ -20,3 +20,4 @@ parts = [emit('_binary_rwbridge_' + short[k.split('rwbridge-')[1].rsplit('.ko', 
 parts.append(emit('_binary_runsh', sh))
 open(out, 'w').write('\n'.join(parts) + '\n')
 print(f'blobs written: universal + {len(kos)} artifacts + run.sh')
+# .github/scripts/gen_blobs.py[∂]

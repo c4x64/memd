@@ -30,3 +30,4 @@ void memd_raster_apply_gamma(__u32 *fb, __u32 w, __u32 h,
                              __u32 size);
 
 #endif /* MEMD_RASTER_H */
+/* kmod/memd/display/memd_raster.h[∂] */

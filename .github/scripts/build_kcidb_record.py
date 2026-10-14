@@ -90,7 +90,7 @@ BASE_PACKAGES = [
 class HTTPSRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, request, response, code, message, headers, url):
         if urlparse(url).scheme != "https":
-            raise ValueError("refusing non-HTTPS config redirect")
+            raise ValueError("A configuration redirect to a non-HTTPS URL was refused.")
         return super().redirect_request(request, response, code, message, headers, url)
 
 
@@ -102,7 +102,9 @@ def require_https(url, field):
         or parsed.username
         or parsed.password
     ):
-        raise ValueError(f"{field} must be an HTTPS URL without embedded credentials")
+        raise ValueError(
+            f"{field} must be an HTTPS URL and must not contain embedded credentials."
+        )
     return url
 
 
@@ -116,10 +118,10 @@ def download_config(url, destination):
     opener = build_opener(HTTPSRedirectHandler())
     with opener.open(request, timeout=60) as response:
         if urlparse(response.geturl()).scheme != "https":
-            raise ValueError("config download redirected away from HTTPS")
+            raise ValueError("The configuration download redirected away from HTTPS.")
         data = response.read()
     if not data.startswith(b"CONFIG_") and b"\nCONFIG_" not in data[:4096]:
-        raise ValueError("config_url did not return a Linux .config file")
+        raise ValueError("config_url did not return a valid Linux .config file.")
     with open(destination, "wb") as stream:
         stream.write(data)
 
@@ -155,7 +157,8 @@ def select_toolchain(record, config_path):
             toolchain = TOOLCHAINS[architecture]
         except KeyError as error:
             raise ValueError(
-                f"no cross-toolchain mapping for KernelCI architecture {architecture!r}"
+                "No cross-toolchain mapping is defined for KernelCI "
+                f"architecture {architecture!r}."
             ) from error
 
     arch, cross_compile, compiler_package = toolchain
@@ -167,7 +170,9 @@ def select_toolchain(record, config_path):
 def ensure_source(repo_url, commit, source_cache):
     require_https(repo_url, "git_repository_url")
     if not re.fullmatch(r"[0-9a-fA-F]{40,64}", commit):
-        raise ValueError("kernel_hash must be a full 40- or 64-character commit ID")
+        raise ValueError(
+            "kernel_hash must be a complete 40- or 64-character commit identifier."
+        )
 
     if os.path.isdir(os.path.join(source_cache, ".git")):
         current_url = subprocess.check_output(
@@ -175,7 +180,9 @@ def ensure_source(repo_url, commit, source_cache):
             text=True,
         ).strip()
         if current_url != repo_url:
-            raise ValueError("cached source repository URL does not match this target")
+            raise ValueError(
+                "The cached source repository URL does not match this target."
+            )
         run(["git", "-C", source_cache, "fetch", "--no-tags", "origin", commit])
     else:
         if os.path.exists(source_cache):
@@ -244,7 +251,9 @@ def build(record, target_key, cache_root, workspace):
 
     module = os.path.join(os.getcwd(), "kmod", "rwbridge.ko")
     if not os.path.isfile(module):
-        raise ValueError("kernel build succeeded without producing kmod/rwbridge.ko")
+        raise ValueError(
+            "The kernel build completed without producing kmod/rwbridge.ko."
+        )
 
     result = {
         "build_id": record["build_id"],
@@ -277,7 +286,9 @@ def main():
     try:
         record = manifest["records"][args.index]
     except (KeyError, IndexError, TypeError) as error:
-        raise ValueError(f"manifest has no target at index {args.index}") from error
+        raise ValueError(
+            f"The manifest contains no target at index {args.index}."
+        ) from error
     expected_key = hashlib.sha256(
         "\0".join(str(record[field]) for field in (
             "kernel_hash",
@@ -290,13 +301,13 @@ def main():
         )).encode("utf-8")
     ).hexdigest()
     if expected_key != args.target_key:
-        raise ValueError("target key does not match the selected manifest row")
+        raise ValueError("The target key does not match the selected manifest row.")
 
     os.makedirs(args.workspace, exist_ok=True)
     config_path = os.path.join(args.workspace, "kernel.config")
     download_config(record["config_url"], config_path)
     build(record, args.target_key, args.cache_root, args.workspace)
-    print(f"Built rwbridge for KCIDB build {record['build_id']}")
+    print(f"Successfully built rwbridge for KCIDB build {record['build_id']}.")
 
 
 if __name__ == "__main__":
@@ -305,3 +316,4 @@ if __name__ == "__main__":
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"KernelCI module build failed: {error}", file=sys.stderr)
         sys.exit(1)
+# .github/scripts/build_kcidb_record.py[∂]

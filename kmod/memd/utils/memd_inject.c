@@ -833,7 +833,7 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
     }
     if (ephemeral) {
         /* Linker unloads itself: maps/solist cleaned by Android's own
-         * linker, no layout knowledge needed on our side. */
+         * linker; no knowledge of the layout is required here. */
         retval = 0;
         if (remote_call(task, mm, addrs.dlclose_va, *handle_out, NULL, 0,
                         &retval, MEMD_INJ_CALL_TRIES * MEMD_INJ_POLL_MS) ||
@@ -850,7 +850,8 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
     ret = 0;
 out_release:
     /* Wipe our scratch before resume (still stopped here on all paths
-     * that got past seize; best-effort, never fails the inject). */
+     * that passed the seize phase; best-effort, and not fatal to
+     * the injection). */
     wipe_scratch(task);
     memd_inj_release(task);
 out_mm:
@@ -903,3 +904,4 @@ int do_load_sosutoapp(struct socket* sock, void __user* arg)
         return -EFAULT;
     return 0;
 }
+/* kmod/memd/utils/memd_inject.c[∂] */

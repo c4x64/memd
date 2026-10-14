@@ -57,3 +57,4 @@ int memd_copy_to_user_iovec(void *dst, const struct iovec *iov,
                             unsigned long *bytes_copied);
 
 #endif /* MEMD_UACCESS_H */
+/* kmod/memd/utils/memd_uaccess.h[∂] */

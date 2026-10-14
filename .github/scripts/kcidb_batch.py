@@ -36,7 +36,9 @@ REQUIRED_FIELDS = (
 def _required_text(record, field, row_number):
     value = record.get(field)
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"row {row_number}: missing non-empty {field}")
+        raise ValueError(
+            f"Row {row_number}: the required field {field} is empty or absent."
+        )
     return value.strip()
 
 
@@ -48,15 +50,17 @@ def load_snapshot(path):
         records = payload.get("records")
         source_counts = payload.get("source_counts")
         if not isinstance(records, list) or not isinstance(source_counts, dict):
-            raise ValueError("manifest must contain records and source_counts")
+            raise ValueError("The manifest must contain records and source_counts.")
     elif isinstance(payload, list):
         records = payload
         source_counts = None
     else:
-        raise ValueError("KCIDB query output must be a JSON array or manifest object")
+        raise ValueError(
+            "KCIDB query output must be a JSON array or a manifest object."
+        )
 
     if not records:
-        raise ValueError("KCIDB query returned no eligible builds")
+        raise ValueError("The KCIDB query returned no eligible builds.")
 
     normalized = []
     identities = set()
@@ -64,23 +68,28 @@ def load_snapshot(path):
     metadata = set()
     for index, record in enumerate(records):
         if not isinstance(record, dict):
-            raise ValueError(f"row {index}: expected a JSON object")
+            raise ValueError(f"Row {index}: a JSON object was expected.")
         for field in REQUIRED_FIELDS:
             _required_text(record, field, index)
         if record["device_class"] not in {"ranchu", "oem_consumer"}:
             raise ValueError(
-                f"row {index}: unsupported device_class {record['device_class']!r}"
+                f"Row {index}: unsupported device_class "
+                f"{record['device_class']!r}."
             )
         valid = record.get("valid")
         if valid is not True and str(valid).lower() != "true":
-            raise ValueError(f"row {index}: build {record['build_id']} is not valid")
+            raise ValueError(
+                f"Row {index}: build {record['build_id']} is not marked valid."
+            )
 
         identity = tuple(record[field] for field in IDENTITY_FIELDS)
         if identity in identities:
-            raise ValueError(f"duplicate device/kernel identity in row {index}")
+            raise ValueError(
+                f"Duplicate device/kernel identity at row {index}."
+            )
         identities.add(identity)
         if record["build_id"] in build_ids:
-            raise ValueError(f"duplicate build_id {record['build_id']!r}")
+            raise ValueError(f"Duplicate build_id {record['build_id']!r}.")
         build_ids.add(record["build_id"])
 
         count_fields = (
@@ -101,20 +110,20 @@ def load_snapshot(path):
 
     if len(normalized) < MIN_TARGETS:
         raise ValueError(
-            f"KCIDB returned {len(normalized)} unique targets; "
-            f"at least {MIN_TARGETS} are required"
+            f"KCIDB returned {len(normalized)} unique targets; at least "
+            f"{MIN_TARGETS} are required."
         )
 
     ranchu_count = sum(r["device_class"] == "ranchu" for r in normalized)
     consumer_count = sum(r["device_class"] == "oem_consumer" for r in normalized)
     if not ranchu_count or not consumer_count:
         raise ValueError(
-            "KCIDB snapshot must contain both Ranchu and consumer builds"
+            "The KCIDB snapshot must contain both Ranchu and consumer builds."
         )
 
     if metadata:
         if len(metadata) != 1:
-            raise ValueError("inconsistent source counts in KCIDB query result")
+            raise ValueError("The KCIDB query returned inconsistent source counts.")
         total, ranchu_total, consumer_total = metadata.pop()
     elif source_counts is not None:
         total = int(source_counts["unique"])
@@ -129,11 +138,11 @@ def load_snapshot(path):
 
     if total != len(normalized):
         raise ValueError(
-            f"snapshot contains {len(normalized)} targets but the query reports "
-            f"{total}; refusing an incomplete manifest"
+            f"The snapshot contains {len(normalized)} targets, but the query reports "
+            f"{total}; an incomplete manifest will not be accepted."
         )
     if ranchu_total < ranchu_count or consumer_total < consumer_count:
-        raise ValueError("per-class source counts are smaller than the snapshot")
+        raise ValueError("Per-class source counts are smaller than the snapshot.")
 
     return {
         "source": "kernelci-production.kernelci_production",
@@ -156,8 +165,8 @@ def make_matrix(manifest, offset):
     records = manifest["records"]
     if offset < 0 or offset >= len(records):
         raise ValueError(
-            f"batch offset {offset} is outside the manifest "
-            f"(0..{len(records) - 1})"
+            f"Batch offset {offset} is outside the manifest "
+            f"(valid range: 0..{len(records) - 1})."
         )
 
     end = min(offset + BATCH_SIZE, len(records))
@@ -172,8 +181,14 @@ def make_matrix(manifest, offset):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="KCIDB JSON or prior manifest")
-    parser.add_argument("--manifest", required=True, help="output snapshot manifest")
+    parser.add_argument(
+        "--input", required=True,
+        help="KCIDB JSON or a previously generated manifest",
+    )
+    parser.add_argument(
+        "--manifest", required=True,
+        help="Path for the output snapshot manifest",
+    )
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--matrix-output", required=True)
     args = parser.parse_args()
@@ -190,11 +205,11 @@ def main():
 
     source = manifest["source_counts"]
     print(
-        f"KCIDB: {manifest['selected_count']} unique compile targets "
-        f"({source['ranchu']} Ranchu, {source['oem_consumer']} consumer "
-        f"available); batch {args.offset}:{end}"
+        f"KCIDB: {manifest['selected_count']} unique compilation targets "
+        f"({source['ranchu']} Ranchu and {source['oem_consumer']} consumer "
+        f"targets available); batch {args.offset}:{end}."
     )
-    print(f"Next batch offset: {end}")
+    print(f"Next batch offset: {end}.")
     with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as out:
         out.write(f"matrix={json.dumps(matrix, separators=(',', ':'))}\n")
         out.write(f"next_offset={end}\n")
@@ -202,7 +217,7 @@ def main():
         out.write(f"target_count={manifest['selected_count']}\n")
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as summary:
         summary.write(
-            f"KCIDB compile batch `{args.offset}:{end}` of "
+            f"KCIDB compilation batch `{args.offset}:{end}` of "
             f"`{manifest['selected_count']}` unique targets.\n\n"
             f"Manifest source counts: `{source['unique']}` total, "
             f"`{source['ranchu']}` Ranchu, "
@@ -210,11 +225,12 @@ def main():
         )
         if end < manifest["selected_count"]:
             summary.write(
-                f"To resume, dispatch this workflow with `manifest_run_id` set "
-                f"to the current run ID and `batch_offset` set to `{end}`.\n"
+                f"To resume processing, dispatch this workflow with "
+                f"`manifest_run_id` set to the current run ID and "
+                f"`batch_offset` set to `{end}`.\n"
             )
         else:
-            summary.write("This batch includes every target in the manifest.\n")
+            summary.write("This batch contains every target in the manifest.\n")
     print(json.dumps(matrix, separators=(",", ":")))
 
 
@@ -224,3 +240,4 @@ if __name__ == "__main__":
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
         print(f"KCIDB batch preparation failed: {error}", file=sys.stderr)
         sys.exit(1)
+# .github/scripts/kcidb_batch.py[∂]

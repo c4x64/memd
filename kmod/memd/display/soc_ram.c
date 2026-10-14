@@ -95,3 +95,4 @@ const struct memd_disp_backend memd_be_ram = {
 };
 
 #endif /* MEMD_DISP_TEST */
+/* kmod/memd/display/soc_ram.c[∂] */

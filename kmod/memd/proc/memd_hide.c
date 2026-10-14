@@ -395,3 +395,4 @@ struct memd_hide_entry *memd_hide_get_next(struct memd_hide_entry *entry)
     }
     return NULL;
 }
+/* kmod/memd/proc/memd_hide.c[∂] */

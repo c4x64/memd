@@ -26,3 +26,4 @@ int memd_set_session_quota(pid_t session, u32 max_regions);
 struct unsafe_region_area;
 
 #endif /* MEMD_REGION_H */
+/* kmod/memd/utils/memd_region.h[∂] */

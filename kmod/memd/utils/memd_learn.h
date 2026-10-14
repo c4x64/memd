@@ -380,3 +380,4 @@ void memd_learn_file_private(struct file *f, void *known_private);
 int memd_learn_comprehensive(void);
 
 #endif /* MEMD_LEARN_H */
+/* kmod/memd/utils/memd_learn.h[∂] */

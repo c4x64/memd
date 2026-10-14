@@ -144,3 +144,4 @@ check-universal: all
 	@echo "== vermagic placeholder present =="
 	@strings rwbridge.ko | grep -q '^vermagic=' || { echo "FAIL: no vermagic"; exit 1; }
 	@echo "-- KMI=$(KMI) checks passed"
+# kmod/Makefile[∂]

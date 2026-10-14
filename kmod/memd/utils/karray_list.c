@@ -295,3 +295,4 @@ size_t arraylist_capacity(struct karray_list* list) {
 void arraylist_set_thread_safe(struct karray_list* list, bool enable) {
     list->thread_safe = enable;
 }
+/* kmod/memd/utils/karray_list.c[∂] */

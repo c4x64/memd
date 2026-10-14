@@ -312,3 +312,4 @@ void memd_raster_apply_gamma(__u32 *fb, __u32 w, __u32 h,
         fb[i] = (pixel & 0xFF000000) | ((__u32)nr << 16) | ((__u32)ng << 8) | nb;
     }
 }
+/* kmod/memd/display/memd_raster.c[∂] */

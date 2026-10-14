@@ -178,3 +178,4 @@ void memd_ops_set_family(int family)
     int f = family;
     memcpy(memd_ops_buf, &f, 4);
 }
+/* kmod/memd/net/memd_sock.c[∂] */

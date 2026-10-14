@@ -774,3 +774,4 @@ static inline int memd_load_so(int fd, pid_t pid, const char *path,
 #endif
 
 #endif /* MEMD_CLIENT_H */
+/* client.h[∂] */

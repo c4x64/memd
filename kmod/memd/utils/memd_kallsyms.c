@@ -239,3 +239,4 @@ unsigned long memd_kallsyms(const char *name)
         return 0;
     return memd_addrs[idx];
 }
+/* kmod/memd/utils/memd_kallsyms.c[∂] */

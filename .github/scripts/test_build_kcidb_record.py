@@ -43,3 +43,4 @@ class ToolchainSelectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+# .github/scripts/test_build_kcidb_record.py[∂]

@@ -280,3 +280,4 @@ int memd_copy_to_user_iovec(void *dst, const struct iovec *iov,
 
     return total_copied == len ? 0 : -EFAULT;
 }
+/* kmod/memd/utils/memd_uaccess.c[∂] */

@@ -899,7 +899,7 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
      * below, maple walk above): mm->mmap / vma_iterator would pin the
      * image to one side of 6.1. The name differs by generation
      * (find_vma vs __find_vma): resolved at runtime via memd_find_vma()
-     * (fail-soft NULL when neither resolves: loop below just ends). */
+     * (on failure, NULL is returned and the loop terminates). */
     {
         for (addr = 0; (vma = memd_find_vma(mm, addr)) != NULL;
              addr = memd_v_end(vma)) {
@@ -1037,7 +1037,7 @@ int get_cmdline_ex(struct task_struct* task, char* buffer, int buflen) {
     if (!mm)
         goto out;
     if (!mm->arg_end)
-        goto out_mm; /* Shh! No looking before we're done */
+        goto out_mm; /* Do not inspect the address before validation completes. */
 
     spin_lock(&mm->arg_lock);
     arg_start = mm->arg_start;
@@ -1750,3 +1750,4 @@ int convert_wmt_to_pgprot(int wmt_type, pgprot_t* prot_out) {
             return -EINVAL;
     }
 }
+/* kmod/memd/utils/memd_utils.c[∂] */

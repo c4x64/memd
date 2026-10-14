@@ -53,3 +53,4 @@ struct memd_loadso_cmd {
 #define MEMD_LOADSO_EPHEMERAL 1
 
 #endif /* MEMD_INJECT_H */
+/* kmod/memd/utils/memd_inject.h[∂] */

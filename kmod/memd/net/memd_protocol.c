@@ -207,7 +207,7 @@ static int register_free_family(void) {
         return 0;
     }
 
-    memd_err("can't find any free proto_family!\n");
+    memd_err("No available proto_family could be found.\n");
     return err;
 }
 
@@ -349,3 +349,4 @@ int memd_get_sock_count(void)
 
     return count;
 }
+/* kmod/memd/net/memd_protocol.c[∂] */

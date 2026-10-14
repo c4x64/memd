@@ -89,3 +89,4 @@ static inline int memd_hwbp_list(struct task_struct *task, struct memd_hwbp_list
 }
 
 #endif
+/* kmod/memd/utils/memd_hwbp.h[∂] */

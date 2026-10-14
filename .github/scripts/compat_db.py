@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
-"""Kernel compatibility database: every known kernel -> artifact resolution.
+"""Kernel compatibility database: resolve each known kernel to an artifact.
 
-WHAT: materializes 1000+ real kernels from ground truth and proves each
-one resolves (via the same rules as spx.c/run.sh) to either an exact
+Purpose: materialize more than 1,000 real kernels from authoritative sources
+and verify that each resolves, by the rules in spx.c and run.sh, to an exact
 per-KMI matrix artifact, the universal fallback image, or a documented
-NO-GO. Fails loudly (exit 1) on any unresolved row or if the total
-drops below MIN_ROWS.
+NO-GO result. Exit with status 1 if any row remains unresolved or if the
+total falls below MIN_ROWS.
 
-ROW SOURCES (no fabricated kernels):
+Sources (no fabricated kernels):
   1. compat_tags.txt — 3150 real GKI release tags from kernel/common
-     (+refs snapshot). Tag names carry family+gen (android13-5.15-...),
+     (+refs snapshot). Tag names carry family and generation (android13-5.15-...),
      parsed mechanically; KMI stability means every tag of a supported
      family is served by that family's artifact.
   2. GKI_RELEASES cross product (imported, not duplicated) —
      (device/avd x version) per KMI. AVD names containing x86_64 resolve
-     to arch NO-GO (module is arm64-only); everything else is arm64.
-  3. Curated OEM/virtual families (below) — coarse, high-confidence
-     (model <-> kver-series + android generation) with provenance.
-     Exact patch strings are NOT claimed for these.
-  4. Parser self-tests — synthetic ranchu/Samsung-shaped release
-     strings proving suffix-tolerance of the matcher itself.
+     to an architecture-related NO-GO result (the module supports ARM64
+     only); all other entries are ARM64.
+  3. Curated OEM and virtual-device families (below), recorded at a
+     coarse but high-confidence level (model, kernel series, and Android
+     generation), with provenance. Exact patch-level versions are not
+     asserted for these entries.
+  4. Parser self-tests, using synthetic Ranchu- and Samsung-shaped
+     release strings to verify suffix tolerance in the matcher.
 
-MATCHING (mirrors spx.c selection and run.sh universal-first):
+Matching (mirrors spx.c selection and the universal-first policy in run.sh):
   exact per-KMI artifact if android{NN}-{maj}.{min} is packed,
   else universal image if the family is supported (5.10/5.15/6.1/6.6/6.12),
   else documented NO-GO (5.4 socket refusal, 6.18 unknown gen, x86_64,
@@ -191,3 +193,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+# .github/scripts/compat_db.py[∂]

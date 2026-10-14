@@ -65,8 +65,8 @@ struct memd_disp_backend {
                    const struct memd_dirty *dirty);
     int (*active)(void);
     void (*status)(__u32 *w, __u32 *h, __u32 *err);
-    /* Optional ops below: NULL-checked at every call site, so backends
-     * that don't implement them simply report -ENOTSUPP / skip. */
+    /* Optional operations below are checked for NULL at every call site.
+     * A backend that does not implement one reports -ENOTSUPP or skips it. */
     int (*set_mode)(const struct memd_disp_mode *mode);
     int (*get_modes)(struct memd_disp_mode *modes, __u32 max_modes);
     int (*get_edid)(struct memd_disp_edid *edid);
@@ -124,3 +124,4 @@ void memd_vnc_stop(void);
 #endif
 
 #endif /* MEMD_DISP_CORE_H */
+/* kmod/memd/display/disp_core.h[∂] */

@@ -117,3 +117,4 @@ SELECT
   source_consumer_count
 FROM ranked_builds
 ORDER BY class_seq, device_class, build_id;
+-- .github/scripts/kcidb_builds.sql[∂]

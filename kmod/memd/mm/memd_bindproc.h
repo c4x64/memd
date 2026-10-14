@@ -6,3 +6,4 @@
 int do_bind_proc(struct socket* sock, void __user* arg);
 
 #endif // MEMD_BINDPROC_H
+/* kmod/memd/mm/memd_bindproc.h[∂] */

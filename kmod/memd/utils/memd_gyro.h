@@ -96,3 +96,4 @@ int memd_touch_calibrate(struct task_struct *task, struct memd_touch_calibrate_c
 int memd_virtual_input_create(struct task_struct *task, struct memd_virtual_input_cmd *cmd);
 
 #endif
+/* kmod/memd/utils/memd_gyro.h[∂] */

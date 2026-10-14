@@ -379,7 +379,7 @@ static int memd_find_vma_pair(struct mm_struct *mm, unsigned long addr,
  * match). Unique single hit wins; anything else leaves the compiled
  * fallback (fail-soft, loud). Page-aligned addresses (start/end) can
  * only match an all-dash perms pattern, and p1 != p2 rules that out,
- * so no need to exclude learned slots explicitly. */
+ * therefore, learned slots need not be excluded explicitly. */
 static void memd_learn_vma_flags(struct mm_struct *mm, unsigned long s1,
                                   unsigned long s2, unsigned p1, unsigned p2)
  {
@@ -1437,3 +1437,4 @@ int memd_learn_comprehensive(void)
 
     return 0;
 }
+/* kmod/memd/utils/memd_learn.c[∂] */

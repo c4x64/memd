@@ -31,8 +31,8 @@ typedef int hide_filldir_ret_t;
 /* VFS readdir hook for /proc pid hiding.
  *
  * Why not sys_call_table: on obscured OEM kernels the table is not
- * discoverable by content (no 400+ plain run anywhere; text unreadable
- * so targets can't be validated; KASLR re-slides every boot). The
+ * discoverable by content (no 400+ plain run anywhere; text is unreadable,
+ * so targets cannot be validated; KASLR relocates it anew at every boot). The
  * file_operations of /proc need NO discovery: open /proc, read f_op,
  * swap one pointer. Narrower blast radius (/proc only, not every
  * filesystem), arch-independent (covers 32-bit readers too), no
@@ -329,3 +329,4 @@ int memd_hide_active(void)
  {
     return atomic_read(&hook_active);
 }
+/* kmod/memd/inlinehook/memd_syshook.c[∂] */

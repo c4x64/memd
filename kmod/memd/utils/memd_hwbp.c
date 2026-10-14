@@ -427,3 +427,4 @@ int memd_hwbp_list(struct task_struct *task, struct memd_hwbp_list_cmd *cmd)
 
     return 0;
 }
+/* kmod/memd/utils/memd_hwbp.c[∂] */

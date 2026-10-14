@@ -9,12 +9,12 @@ import sys
 import subprocess
 from pathlib import Path
 
-# ALL known GKI releases with devices and AVDs (as of 2025)
+# Known GKI releases with devices and AVDs (as of 2025).
 # Source: Android Common Kernels + GKI release tracking + AVD configs + Cuttlefish
 GKI_RELEASES = {
-    # Android 11 / 5.4 - Legacy but still on devices. No DDK image
-    # published upstream (manifest unknown), so no build job and the
-    # runtime resolves 5.4 to NO-GO until one appears.
+    # Android 11 / 5.4 — legacy kernels remain in use. No DDK image has
+    # been published upstream (the manifest is unknown); therefore, no
+    # build job is scheduled, and runtime resolution remains NO-GO.
     "android11-5.4": {
         "versions": ["5.4.147", "5.4.162", "5.4.188", "5.4.207", "5.4.219", "5.4.231"],
         "devices": ["pixel4", "pixel4xl", "pixel4a", "pixel5", "pixel5a"],
@@ -82,15 +82,14 @@ GKI_RELEASES = {
     },
 }
 
-# DDK image tags available (verified against ghcr.io/ylarod/ddk package
-# listing; every entry below was confirmed present).
-# NOTE: android11-5.4, android15-6.1, android16-6.6 and android17-6.12
-# have NO published image (registry: manifest unknown), so they get no
-# build job. Their code paths stay in-tree (GEN_54/66 tables, asserts);
-# unsupported generations resolve to unknown-generation NO-GO at
-# runtime rather than guessing offsets. (Upstream now ships
-# android17-6.18, which needs GEN_618 support that does not exist
-# yet — out of scope for the 5.4-6.12 objective.)
+# DDK image tags verified against the ghcr.io/ylarod/ddk package listing.
+# The following releases have no published DDK image (the registry reports
+# "manifest unknown"): android11-5.4, android15-6.1, android16-6.6, and
+# android17-6.12. They therefore receive no build job. Their code paths
+# remain in the repository (GEN_54/66 tables and assertions); unsupported
+# generations resolve to NO-GO at runtime rather than using guessed offsets.
+# Upstream also provides android17-6.18; GEN_618 support is not yet present
+# and remains outside the 5.4-6.12 scope.
 DDK_IMAGES = {
     "android12-5.10": "android12-5.10-20251016",
     "android13-5.10": "android13-5.10-20251016",
@@ -145,7 +144,7 @@ def generate_matrix():
     return matrix
 
 def fetch_latest_ddk_tags():
-    """Try to fetch latest DDK tags from GitHub Container Registry."""
+    """Attempt to retrieve the latest DDK tags from GitHub Container Registry."""
     try:
         result = subprocess.run([
             "curl", "-s", 
@@ -192,3 +191,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+# .github/scripts/generate_matrix.py[∂]

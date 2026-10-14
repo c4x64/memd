@@ -302,3 +302,4 @@ const struct memd_disp_backend memd_be_drm = {
     .active = memd_drm_active,
     .status = memd_drm_status,
 };
+/* kmod/memd/display/soc_drm.c[∂] */
