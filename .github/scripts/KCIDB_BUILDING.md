@@ -12,8 +12,12 @@ Actions artifact named `kernelci-manifest`.
 
 Before running the workflow, create a repository Actions secret named
 `KCIDB_GCP_CREDENTIALS` and place within it a Google service-account JSON
-key. The service account must be permitted to create BigQuery query jobs
-in `kernelci-production` and to read the `kernelci_production` dataset.
+key. BigQuery query jobs are billed to the GCP project identified by the
+key's `project_id`; the workflow reads the source tables from
+`kernelci-production.kernelci_production`. Enable the BigQuery API and grant
+the service account BigQuery Job User (`roles/bigquery.jobUser`) on its
+credential project. It must also have BigQuery Data Viewer
+(`roles/bigquery.dataViewer`) access to the `kernelci_production` dataset.
 This key is used solely by the manifest-query job; kernel builds do not
 require it.
 

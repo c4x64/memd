@@ -99,7 +99,7 @@ jobs:
         if: ${{ !inputs.manifest_run_id }}
         uses: google-github-actions/setup-gcloud@v2
         with:
-          project_id: kernelci-production
+          project_id: ${{ fromJSON(secrets.KCIDB_GCP_CREDENTIALS).project_id }}
 
       - name: Download prior manifest
         if: ${{ inputs.manifest_run_id != '' }}
@@ -112,10 +112,12 @@ jobs:
 
       - name: Query verified KernelCI builds
         if: ${{ !inputs.manifest_run_id }}
+        env:
+          KCIDB_GCP_PROJECT_ID: ${{ fromJSON(secrets.KCIDB_GCP_CREDENTIALS).project_id }}
         run: |
           mkdir -p "$RUNNER_TEMP/kernelci"
           if ! bq query \
-            --project_id=kernelci-production \
+            --project_id="$KCIDB_GCP_PROJECT_ID" \
             --use_legacy_sql=false \
             --format=json \
             --max_rows=0 \
