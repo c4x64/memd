@@ -96,7 +96,7 @@ struct memd_disp_backend {
  * of the core needs no changes: with install refusing, no backend ever
  * activates, no thread ever spawns, and status/frame/readback report
  * inactive. Set to 0 to activate. */
-#define MEMD_DISP_TODO 1
+#define MEMD_DISP_TODO 0
 
 int memd_core_install(__u32 backend, __u32 width, __u32 height);
 int memd_core_uninstall(void);
