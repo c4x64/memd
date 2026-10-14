@@ -89,26 +89,11 @@ fi
 [ -n "$KO" ] || die "rwbridge.ko not found (pass path as \$1 or place next to run.sh)"
 KVER=$(uname -r 2>/dev/null)
 log "kernel: $KVER"
-# 1b. Artifact selection: 7 auto builds match uname -r (the 8th,
-# android14-6.1-dbg, is forensics-only: load it via explicit $1).
-# Exact (kver+android generation) wins; kver-only siblings are fallback
-# (vendor releases without an android tag). Cross-generation attempts are
-# refused: wrong structs would mis-walk. Explicit $1 still wins.
-if [ -z "$KO" ]; then
-    KREL=$(uname -r 2>/dev/null)
-    KMAJ=$(echo "$KREL" | cut -d. -f1); KMIN=$(echo "$KREL" | cut -d. -f2 | cut -d- -f1)
-    KV="$KMAJ.$KMIN"
-    for pass in exact kver; do
-        for kmi in android11-5.4 android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1 android15-6.1 android15-6.6 android16-6.6 android16-6.12 android17-6.12; do
-            kkver=$(echo "$kmi" | cut -d- -f2); kgen=$(echo "$kmi" | cut -d- -f1);
-            [ "$kkver" = "$KV" ] || continue
-            if [ "$pass" = exact ]; then case "$KREL" in *"$kgen"*) ;; *) continue;; esac; fi
-            for c in "${SCRIPT_DIR}/rwbridge-${kmi}.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge-${kmi}.ko"; do
-                if [ -f "$c" ]; then KO="$c"; break 3; fi
-            done
-        done
-    done
-fi
+# NOTE: per-KMI auto-selection used to live here (exact kver+generation,
+# then kver-only fallback). Removed: KO is always set above (universal
+# image preferred) or we already died; the stale block referenced KMI
+# names with no published artifacts and could never run. Explicit $1
+# still wins via the selection above.
 [ -n "$KO" ] || die "no artifact matches $KVER (need per-KMI build; see README)"
 log "artifact selected: $KO"
 # finit-force helper (version-magic override via raw finit_module: device
