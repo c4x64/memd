@@ -18,6 +18,16 @@ jobs:
       - name: Verify compat database
         run: python3 .github/scripts/compat_db.py
 
+      - name: Verify client.h matches kernel headers
+        run: python3 .github/scripts/check_client_h.py
+
+      - name: Compile-check client.h (C89 + C++)
+        run: |
+          printf '#include "client.h"\nint main(void){return 0;}\n' > /tmp/client_t.c
+          cp /tmp/client_t.c /tmp/client_t.cpp
+          gcc -fsyntax-only -Wall -Werror -std=gnu89 -I. /tmp/client_t.c
+          g++ -fsyntax-only -Wall -Werror -I. /tmp/client_t.cpp
+
   generate-matrix:
     name: Generate Build Matrix
     runs-on: ubuntu-latest
