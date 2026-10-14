@@ -631,7 +631,9 @@ struct cred *memd_t_cred(struct task_struct *t)
  {
     if (memd_learned.t_cred >= 0)
         return *(struct cred **)((char *)t + memd_learned.t_cred);
-    return t->cred;
+    /* task->cred is const-qualified (RCU); callers must not write
+     * through it — all stores go via computed addresses. */
+    return (struct cred *)t->cred;
 }
 
 static unsigned long memd_stack_size_learned;
