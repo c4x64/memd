@@ -194,6 +194,7 @@ static int memd_elf_lookup(struct task_struct *t, uintptr_t symtab,
     if (gnuhash) {
         /* ELF64 GNU-hash header is four u32 words (nbuckets, symoffset,
          * bloom_size, bloom_shift); bloom words follow at +16. */
+        unsigned long nbuckets, bloom_size;
         u32 nbuckets32 = 0, symoff32 = 0, bloom32 = 0, shift32 = 0;
         if (memd_task_copy_ok(t, 0, gnuhash, &nbuckets32, 4))
             return -EFAULT;
