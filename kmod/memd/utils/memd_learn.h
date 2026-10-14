@@ -232,13 +232,9 @@ int memd_learn_extended(void);
      *(void **)((char *)(f) + memd_learned_ext.f_private) : \
      (f)->private_data)
 
-/* Writer twin of memd_f_private (release path NULL-ing). */
-static inline void memd_f_private_set(struct file *f, void *v) {
-    if (memd_learned_ext.f_private >= 0)
-        *(void **)((char *)f + memd_learned_ext.f_private) = v;
-    else
-        f->private_data = v;
-}
+/* Writer twin of memd_f_private (release path NULL-ing). Real function
+ * (not inline: struct file is incomplete in this header). */
+void memd_f_private_set(struct file *f, void *v);
 
 /* Learn f_private from an exact anchor (our own anon_inode file whose
  * private pointer we set at creation). Declared here, defined in

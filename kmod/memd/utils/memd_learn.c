@@ -974,6 +974,16 @@ void memd_learn_file_private(struct file *f, void *known_private)
     }
 }
 
+void memd_f_private_set(struct file *f, void *v)
+ {
+    if (!f)
+        return;
+    if (memd_learned_ext.f_private >= 0)
+        *(void **)((char *)f + memd_learned_ext.f_private) = v;
+    else
+        f->private_data = v;
+}
+
 static void memd_learn_thread_struct(void)
  {
     struct task_struct *t = current;
