@@ -213,7 +213,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 32
-      matrix: ${{ fromJson(needs.prepare-kcidb-batch.outputs.matrix) }}
+      # DEBUG-EXP: static probe to isolate dynamic-matrix evaluation.
+      matrix: {"index": [0, 1]}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
