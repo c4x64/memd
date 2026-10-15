@@ -1,6 +1,6 @@
 /* /proc/kallsyms self-parse resolver. See header for the universality
- * argument. Only stable file APIs (filp_open, kernel_read) are imported;
- * everything else is exact-name matching on text. */
+ * argument. File access itself arrives via MEMD_IOCTL_BOOTSTRAP; no
+ * file helper is directly imported. */
 #include "memd_kallsyms.h"
 
 #include <linux/err.h>
@@ -88,6 +88,13 @@ static const char *memd_wanted[] = {
     /* Remote-call engine (inject/memd_inject.c): stop/wait + icache */
     "wait_task_inactive",
     "flush_dcache_page",
+    /* Indirect-call wrappers (utils/memd_utils.c): resolved, never
+     * imported, so trimmed/GKI-protected kernels still load. */
+    "kernel_read",
+    "__put_cred",
+    "send_signal",
+    "do_send_sig_info",
+    "set_memory_x",
 };
 
 #define MEMD_NWANT (sizeof(memd_wanted) / sizeof(memd_wanted[0]))
