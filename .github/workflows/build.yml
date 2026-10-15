@@ -83,7 +83,7 @@ jobs:
     if: needs.kcidb-readiness.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.batch.outputs.matrix }}
+      start_offset: ${{ steps.batch.outputs.start_offset }}
       next_offset: ${{ steps.batch.outputs.next_offset }}
       target_count: ${{ steps.batch.outputs.target_count }}
     steps:
@@ -203,18 +203,24 @@ jobs:
           retention-days: 90
 
   compile-kcidb-batch:
-    name: Compile batch target ${{ matrix.index }}
+    # Stride workers: a static 32-slot axis (dynamic matrices silently
+    # fail job creation). Worker W builds global indices
+    # start_offset+W, +W+32, ... — the full batch every run, no matrix
+    # plumbing, no giant outputs.
+    name: Compile batch worker ${{ matrix.worker }}
     needs: prepare-kcidb-batch
-    # An empty batch (BigQuery denied/unavailable) must skip explicitly:
-    # a zero-combination matrix leaves no job record and fails the run.
+    # An empty batch must skip explicitly: zero work with no record fails.
     if: needs.prepare-kcidb-batch.outputs.target_count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
       fail-fast: false
       max-parallel: 32
-      # DEBUG-EXP: static probe to isolate dynamic-matrix evaluation.
-      matrix: {"index": [0, 1]}
+      matrix:
+        worker: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+    env:
+      BATCH_START: ${{ needs.prepare-kcidb-batch.outputs.start_offset }}
+      BATCH_END: ${{ needs.prepare-kcidb-batch.outputs.batch_end }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -226,40 +232,49 @@ jobs:
         with:
           name: kernelci-manifest
 
-      - name: Resolve batch target key
-        id: target
-        run: |
-          TK=$(python3 .github/scripts/kcidb_batch.py \
-            --manifest manifest.json \
-            --target-key-for-index "${{ matrix.index }}")
-          echo "target_key=$TK" >> "$GITHUB_OUTPUT"
-
       - name: Restore kernel source cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/rwbridge/kernel/${{ steps.target.outputs.target_key }}
-          key: rwbridge-kernel-${{ runner.os }}-${{ steps.target.outputs.target_key }}
+          path: ~/.cache/rwbridge/kernel
+          key: rwbridge-kernel-${{ runner.os }}-batch-${{ needs.prepare-kcidb-batch.outputs.start_offset }}
+          restore-keys: |
+            rwbridge-kernel-${{ runner.os }}-batch-
 
-      - name: Prepare kernel and compile rwbridge
+      - name: Compile assigned stride targets
         run: |
-          set -o pipefail
-          python3 .github/scripts/build_kcidb_record.py \
-            --manifest manifest.json \
-            --index "${{ matrix.index }}" \
-            --target-key "${{ steps.target.outputs.target_key }}" \
-            --cache-root "$HOME/.cache/rwbridge/kernel" \
-            --workspace "$RUNNER_TEMP/kernel-build-${{ matrix.index }}" \
-            2>&1 | tee "$RUNNER_TEMP/compile.log"
+          set -u
+          mkdir -p batch-results
+          i=$((BATCH_START + ${{ matrix.worker }}))
+          while [ "$i" -lt "$BATCH_END" ]; do
+            TK=$(python3 .github/scripts/kcidb_batch.py \
+              --manifest manifest.json --target-key-for-index "$i")
+            WS="$RUNNER_TEMP/kernel-build-$i"
+            if python3 .github/scripts/build_kcidb_record.py \
+              --manifest manifest.json \
+              --index "$i" \
+              --target-key "$TK" \
+              --cache-root "$HOME/.cache/rwbridge/kernel" \
+              --workspace "$WS" \
+              > "$WS.log" 2>&1; then
+              ST="pass"
+            else
+              ST="fail"
+            fi
+            echo "{\"index\":$i,\"target_key\":\"$TK\",\"status\":\"$ST\"}" >> batch-results/worker-${{ matrix.worker }}.jsonl
+            cp "$WS.log" "batch-results/$i.log" 2>/dev/null || true
+            cp "$WS/result.json" "batch-results/$i.result.json" 2>/dev/null || true
+            cp kmod/rwbridge.ko "batch-results/$i.ko" 2>/dev/null || true
+            rm -rf "$WS"
+            i=$((i + 32))
+          done
+          echo "worker ${{ matrix.worker }} done"
 
-      - name: Store compile output on GitHub
+      - name: Store batch worker output
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-compile-${{ matrix.index }}-${{ steps.target.outputs.target_key }}
-          path: |
-            ${{ runner.temp }}/compile.log
-            ${{ runner.temp }}/kernel-build-${{ matrix.index }}/result.json
-            kmod/rwbridge.ko
+          name: kernelci-batch-${{ needs.prepare-kcidb-batch.outputs.start_offset }}-worker-${{ matrix.worker }}
+          path: batch-results/
           if-no-files-found: warn
           retention-days: 30
 

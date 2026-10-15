@@ -234,7 +234,7 @@ def main():
     )
     print(f"Next batch offset: {end}.")
     with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as out:
-        out.write(f"matrix={json.dumps(matrix, separators=(',', ':'))}\n")
+        out.write(f"start_offset={args.offset}\n")
         out.write(f"next_offset={end}\n")
         out.write(f"batch_end={end}\n")
         out.write(f"target_count={manifest['selected_count']}\n")

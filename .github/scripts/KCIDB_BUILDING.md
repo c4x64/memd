@@ -25,13 +25,16 @@ credential project. It must also have BigQuery Data Viewer
 This key is used solely by the manifest-query job; kernel builds do not
 require it.
 
-Each run compiles at most 250 manifest records, with at most 32 jobs
-running concurrently. A batch result stores its module, result JSON, and build
-log as GitHub Actions artifacts. Kernel source checkouts are cached by
-target key in GitHub Actions Cache; entries are retained on a best-effort
+Each run compiles one batch of at most 250 manifest records using 32
+stride workers (worker W builds global indices start+W, start+W+32,
+...). A static worker axis is used deliberately: dynamic matrices
+silently fail job creation. Each worker records per-target pass/fail
+rows (`worker-N.jsonl`) plus logs, result JSON, and the built module
+on success; failures never abort the worker's remaining targets so one
+bad tree cannot hide the rest. Kernel source checkouts are cached per
+batch in GitHub Actions Cache; entries are retained on a best-effort
 basis and may be evicted. Kernel sources and build outputs are not saved
 to a device.
-Build failures are reported per target rather than skipped. The module
 contains architecture- and kernel-version-specific code; accordingly,
 cross-architecture and older-kernel jobs may reveal portability
 deficiencies until the relevant code paths have been revised.
