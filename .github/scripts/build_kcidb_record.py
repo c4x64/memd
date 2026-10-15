@@ -207,11 +207,17 @@ def build(record, target_key, cache_root, workspace):
     arch, cross_compile, compiler_package, use_llvm = select_toolchain(
         record, os.path.join(workspace, "kernel.config")
     )
-    packages = BASE_PACKAGES + (
-        ["clang", "lld", "llvm"]
-        if use_llvm
-        else ([compiler_package] if compiler_package else [])
+    packages = (
+        BASE_PACKAGES
+        + ["dwarves"]
+        + ((["clang", "lld", "llvm"] if use_llvm else []))
+        + ([compiler_package] if compiler_package else [])
     )
+    if arch == "x86":
+        # 32-bit x86 configs need multilib; sniff instead of assuming.
+        config_text = read_config(os.path.join(workspace, "kernel.config"))
+        if "CONFIG_64BIT=y" not in config_text:
+            packages += ["gcc-multilib", "libc6-dev-i386"]
     run(["sudo", "apt-get", "update"])
     run(["sudo", "apt-get", "install", "-y", *packages])
 

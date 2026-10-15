@@ -593,19 +593,27 @@ fail_read:
     return -EFAULT;
 }
 
-static void su_unstage(struct task_struct *task, struct memd_su_saved *s)
+static int su_unstage(struct task_struct *task, struct memd_su_saved *s)
  {
-    (void)task;
+    int err = 0;
     if (!s->active || !s->cred)
-        return;
-    /* Object pinned throughout by our ref; restore verbatim. */
-    memd_safe_write32((void *)((unsigned long)s->cred + 4), s->uid);
-    memd_safe_write64((void *)((unsigned long)s->cred + cred_cap_eff_off()),
-                      s->cap_eff);
-    if (s->have_perm)
-        memd_safe_write64((void *)((unsigned long)s->cred +
-                                   (unsigned long)memd_learned_ext.t_cred_cap_perm),
-                          s->cap_perm);
+        return 0;
+    /* Object pinned throughout by our ref; restore verbatim. If the
+     * task replaced its creds under us, or any restore write faults,
+     * the live cred may stay elevated: kill instead of resuming. */
+    if (!task || (unsigned long)memd_t_cred(task) != (unsigned long)s->cred ||
+        memd_safe_write32((void *)((unsigned long)s->cred + 4), s->uid) ||
+        memd_safe_write64((void *)((unsigned long)s->cred + cred_cap_eff_off()),
+                          s->cap_eff) ||
+        (s->have_perm &&
+         memd_safe_write64((void *)((unsigned long)s->cred +
+                                    (unsigned long)memd_learned_ext.t_cred_cap_perm),
+                           s->cap_perm))) {
+        memd_err("su_unstage: restore impossible; killing target\n");
+        if (task)
+            send_task_sig(task, SIGKILL);
+        err = -EFAULT;
+    }
     {
         atomic_t *cnt = (atomic_t *)(void *)s->cred;
         if (atomic_dec_and_test(cnt))
@@ -613,6 +621,7 @@ static void su_unstage(struct task_struct *task, struct memd_su_saved *s)
     }
     s->active = false;
     s->cred = NULL;
+    return err;
 }
 
 /* ---- generic remote call: fn(a0), flag protocol, restore ----
@@ -799,15 +808,15 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
     ret = remote_call(task, mm, addrs.dlopen_va, 0, path, pathlen + 1,
                       &retval, MEMD_INJ_CALL_TRIES * MEMD_INJ_POLL_MS);
     if (ret) {
-        if (su)
-            su_unstage(task, &su_state);
+        if (su && su_unstage(task, &su_state))
+            ret = -EFAULT;
         goto out_release;
     }
     if (!retval) {
         /* dlopen returned NULL (bad path/arch mismatch): fail closed. */
-        if (su)
-            su_unstage(task, &su_state);
         ret = -ELIBBAD;
+        if (su && su_unstage(task, &su_state))
+            ret = -EFAULT;
         goto out_release;
     }
     *handle_out = retval;
@@ -817,22 +826,22 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
          * su still covers this call. */
         base = memd_basename(path);
         if (!*base) {
-            if (su)
-                su_unstage(task, &su_state);
             ret = -EINVAL;
+            if (su && su_unstage(task, &su_state))
+                ret = -EFAULT;
             goto out_release;
         }
         lib_base = get_module_base(pid, (char *)base, 0);
         if (!lib_base) {
-            if (su)
-                su_unstage(task, &su_state);
             ret = -ENOENT;
+            if (su && su_unstage(task, &su_state))
+                ret = -EFAULT;
             goto out_release;
         }
         if (resolve_lib_sym(task, lib_base, entry, &entry_va)) {
-            if (su)
-                su_unstage(task, &su_state);
             ret = -ENOENT;
+            if (su && su_unstage(task, &su_state))
+                ret = -EFAULT;
             goto out_release;
         }
         retval = 0;
@@ -841,8 +850,8 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
         if (entry_out)
             *entry_out = (int)retval;
         if (ret) {
-            if (su)
-                su_unstage(task, &su_state);
+            if (su && su_unstage(task, &su_state))
+                ret = -EFAULT;
             goto out_release;
         }
     }
@@ -853,16 +862,17 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
         if (remote_call(task, mm, addrs.dlclose_va, *handle_out, NULL, 0,
                         &retval, MEMD_INJ_CALL_TRIES * MEMD_INJ_POLL_MS) ||
             retval) {
-            if (su)
-                su_unstage(task, &su_state);
             ret = -EIO;
+            if (su && su_unstage(task, &su_state))
+                ret = -EFAULT;
             goto out_release;
         }
         *handle_out = 0;
     }
-    if (su)
-        su_unstage(task, &su_state);
-    ret = 0;
+    if (su && su_unstage(task, &su_state))
+        ret = -EFAULT;
+    else
+        ret = 0;
 out_release:
     /* Wipe our scratch before resume (still stopped here on all paths
      * that passed the seize phase; best-effort, and not fatal to
