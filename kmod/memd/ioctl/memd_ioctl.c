@@ -478,7 +478,12 @@ prepare_fault:
 }
 
 #if !defined(ARCH_HAS_VALID_PHYS_ADDR_RANGE) || defined(MODULE)
-static inline int memk_valid_phys_addr_range(uintptr_t addr, size_t size) { return addr + size <= __pa(high_memory); }
+static inline int memk_valid_phys_addr_range(uintptr_t addr, size_t size) {
+    uintptr_t lim = __pa(high_memory);
+    if (size > lim)
+        return 0;
+    return addr <= lim - size;
+}
 #define IS_VALID_PHYS_ADDR_RANGE(x, y) memk_valid_phys_addr_range(x, y)
 #else
 #define IS_VALID_PHYS_ADDR_RANGE(x, y) valid_phys_addr_range(x, y)
@@ -841,7 +846,7 @@ int do_read_physical_memory_ioremap(struct socket* sock, void* arg) {
 
     // Validate size
     if (cmd.size == 0 || cmd.size > PAGE_SIZE) {
-        return -EFAULT;
+        return -EINVAL;
     }
 
     // Validate and convert memory type
@@ -871,14 +876,24 @@ int do_read_physical_memory_ioremap(struct socket* sock, void* arg) {
         return -EFAULT;
     }
 
-    mapped = memd_ioremap_prot(pa, cmd.size, prot);
+    /* memd_ioremap_prot returns the page-base mapping; add the page
+     * offset back so the copy hits the translated bytes, not up to
+     * 4095B before them. The request must not cross the page. */
+    {
+    unsigned long ioff = pa & ~PAGE_MASK;
+    void *map_base;
+    if (ioff + cmd.size > PAGE_SIZE)
+        return -EINVAL;
+    map_base = mapped = memd_ioremap_prot(pa & PAGE_MASK, PAGE_SIZE, prot);
     if (!mapped) {
         memd_err("failed to ioremap physical address 0x%lx\n", pa);
         return -ENOMEM;
     }
+    mapped = (void *)((char *)map_base + ioff);
+    }
 
     ret = memd_copy_to_user((void*)cmd.dst_va, mapped, cmd.size);
-    iounmap(mapped);
+    iounmap((void *)((uintptr_t)mapped & PAGE_MASK));
 
     return ret ? -EACCES : 0;
 }
@@ -896,7 +911,7 @@ int do_write_physical_memory_ioremap(struct socket* sock, void* arg) {
 
     // Validate size
     if (cmd.size == 0 || cmd.size > PAGE_SIZE) {
-        return -EFAULT;
+        return -EINVAL;
     }
 
     // Validate and convert memory type
@@ -926,14 +941,21 @@ int do_write_physical_memory_ioremap(struct socket* sock, void* arg) {
         return -EFAULT;
     }
 
-    mapped = memd_ioremap_prot(pa, cmd.size, prot);
+    {
+    unsigned long ioff = pa & ~PAGE_MASK;
+    void *map_base;
+    if (ioff + cmd.size > PAGE_SIZE)
+        return -EINVAL;
+    map_base = mapped = memd_ioremap_prot(pa & PAGE_MASK, PAGE_SIZE, prot);
     if (!mapped) {
         memd_err("failed to ioremap physical address 0x%lx\n", pa);
         return -ENOMEM;
     }
+    mapped = (void *)((char *)map_base + ioff);
+    }
 
     ret = memd_copy_from_user(mapped, (void*)cmd.dst_va, cmd.size);
-    iounmap(mapped);
+    iounmap((void *)((uintptr_t)mapped & PAGE_MASK));
 
     return ret ? -EACCES : 0;
 }
