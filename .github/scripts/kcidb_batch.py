@@ -173,24 +173,22 @@ def make_matrix(manifest, offset):
     records = manifest["records"]
     if offset < 0 or offset >= len(records):
         raise ValueError(
-            f"Batch offset {offset} is outside the manifest "
-            f"(valid range: 0..{len(records) - 1})."
+            f"batch offset {offset} is outside the manifest "
+            f"(0..{len(records) - 1})"
         )
 
     end = min(offset + BATCH_SIZE, len(records))
-    matrix = {
-        "include": [
-            {"index": index, "target_key": target_key(records[index])}
-            for index in range(offset, end)
-        ]
-    }
+    # Axis form (not include-only): include-only matrices with no axes
+    # confuse job creation (missing job records, red runs). The job
+    # resolves its record from the manifest artifact by global index.
+    matrix = {"index": list(range(offset, end))}
     return matrix, end
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--input", required=True,
+        "--input", required=False,
         help="KCIDB JSON or a previously generated manifest",
     )
     parser.add_argument(
@@ -198,8 +196,21 @@ def main():
         help="Path for the output snapshot manifest",
     )
     parser.add_argument("--offset", type=int, default=0)
-    parser.add_argument("--matrix-output", required=True)
+    parser.add_argument("--matrix-output", required=False)
+    parser.add_argument(
+        "--target-key-for-index", type=int, default=None,
+        help="print the target key for a manifest record index and exit",
+    )
     args = parser.parse_args()
+
+    if args.target_key_for_index is not None:
+        with open(args.manifest, encoding="utf-8") as stream:
+            manifest = json.load(stream)
+        print(target_key(manifest["records"][args.target_key_for_index]))
+        return
+
+    if not args.input or not args.matrix_output:
+        parser.error("--input and --matrix-output are required in batch mode")
 
     manifest = load_snapshot(args.input)
     with open(args.manifest, "w", encoding="utf-8") as stream:

@@ -89,10 +89,23 @@ class KcidbBatchTests(unittest.TestCase):
             second, second_end = kcidb_batch.make_matrix(manifest, first_end)
             final, final_end = kcidb_batch.make_matrix(manifest, second_end)
 
-        self.assertEqual([row["index"] for row in first["include"]], [0, 1])
-        self.assertEqual([row["index"] for row in second["include"]], [2, 3])
-        self.assertEqual([row["index"] for row in final["include"]], [4])
+        # Axis form: plain global index lists (see make_matrix).
+        self.assertEqual(first["index"], [0, 1])
+        self.assertEqual(second["index"], [2, 3])
+        self.assertEqual(final["index"], [4])
         self.assertEqual(final_end, 5)
+
+    def test_target_key_for_index_roundtrip(self):
+        manifest = {
+            "records": [make_record(index) for index in range(3)],
+        }
+        for index in range(3):
+            self.assertEqual(
+                kcidb_batch.target_key(manifest["records"][index]),
+                kcidb_batch.target_key(manifest["records"][index]),
+            )
+        keys = {kcidb_batch.target_key(r) for r in manifest["records"]}
+        self.assertEqual(len(keys), 3)
 
 
 if __name__ == "__main__":

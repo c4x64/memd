@@ -168,9 +168,9 @@ jobs:
           set -euo pipefail
           if [ -z "$MANIFEST_RUN_ID" ] && [ "$MIRROR_OK" != "true" ] && [ "${{ steps.query.outputs.ok }}" != "true" ]; then
             printf '{"source":"kernelci-production.kernelci_production","source_counts":{"unique":0,"ranchu":0,"oem_consumer":0},"selected_count":0,"records":[]}' > "$RUNNER_TEMP/kernelci/manifest.json"
-            printf '{"include":[]}' > "$RUNNER_TEMP/kernelci/matrix.json"
+            printf '{"index":[]}' > "$RUNNER_TEMP/kernelci/matrix.json"
             {
-              echo 'matrix={"include":[]}'
+              echo 'matrix={"index":[]}'
               echo "next_offset=0"
               echo "batch_end=0"
               echo "target_count=0"
@@ -203,7 +203,7 @@ jobs:
           retention-days: 90
 
   compile-kcidb-batch:
-    name: Compile ${{ matrix.index }} (${{ matrix.target_key }})
+    name: Compile batch target ${{ matrix.index }}
     needs: prepare-kcidb-batch
     # An empty batch (BigQuery denied/unavailable) must skip explicitly:
     # a zero-combination matrix leaves no job record and fails the run.
@@ -225,11 +225,19 @@ jobs:
         with:
           name: kernelci-manifest
 
+      - name: Resolve batch target key
+        id: target
+        run: |
+          TK=$(python3 .github/scripts/kcidb_batch.py \
+            --manifest manifest.json \
+            --target-key-for-index "${{ matrix.index }}")
+          echo "target_key=$TK" >> "$GITHUB_OUTPUT"
+
       - name: Restore kernel source cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/rwbridge/kernel/${{ matrix.target_key }}
-          key: rwbridge-kernel-${{ runner.os }}-${{ matrix.target_key }}
+          path: ~/.cache/rwbridge/kernel/${{ steps.target.outputs.target_key }}
+          key: rwbridge-kernel-${{ runner.os }}-${{ steps.target.outputs.target_key }}
 
       - name: Prepare kernel and compile rwbridge
         run: |
@@ -237,7 +245,7 @@ jobs:
           python3 .github/scripts/build_kcidb_record.py \
             --manifest manifest.json \
             --index "${{ matrix.index }}" \
-            --target-key "${{ matrix.target_key }}" \
+            --target-key "${{ steps.target.outputs.target_key }}" \
             --cache-root "$HOME/.cache/rwbridge/kernel" \
             --workspace "$RUNNER_TEMP/kernel-build-${{ matrix.index }}" \
             2>&1 | tee "$RUNNER_TEMP/compile.log"
@@ -246,7 +254,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-compile-${{ matrix.index }}-${{ matrix.target_key }}
+          name: kernel-compile-${{ matrix.index }}-${{ steps.target.outputs.target_key }}
           path: |
             ${{ runner.temp }}/compile.log
             ${{ runner.temp }}/kernel-build-${{ matrix.index }}/result.json
