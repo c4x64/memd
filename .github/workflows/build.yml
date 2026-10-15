@@ -80,7 +80,6 @@ jobs:
   prepare-kcidb-batch:
     name: Prepare verified KernelCI batch
     needs: kcidb-readiness
-    if: needs.kcidb-readiness.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     outputs:
       start_offset: ${{ steps.batch.outputs.start_offset }}
