@@ -111,6 +111,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Query verified KernelCI builds
+        id: query
         if: ${{ !inputs.manifest_run_id }}
         env:
           KCIDB_GCP_PROJECT_ID: ${{ fromJSON(secrets.KCIDB_GCP_CREDENTIALS).project_id }}
@@ -130,8 +131,17 @@ jobs:
               echo "BigQuery output before failure:" >&2
               cat "$RUNNER_TEMP/kernelci/query.json" >&2
             fi
-            exit 1
+            # Credentials without dataset access must not fail the whole
+            # run: degrade to an empty batch with a visible warning.
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            rm -f "$RUNNER_TEMP/kernelci/query.json"
+            {
+              echo "WARNING: KernelCI BigQuery query failed (see log);"
+              echo "emitting an empty compile batch for this run."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
 
       - name: Validate manifest and select batch
         id: batch
@@ -140,6 +150,18 @@ jobs:
           BATCH_OFFSET: ${{ inputs.batch_offset }}
         run: |
           set -euo pipefail
+          if [ "${{ steps.query.outputs.ok }}" = "false" ] && [ -z "$MANIFEST_RUN_ID" ]; then
+            printf '{"source":"kernelci-production.kernelci_production","source_counts":{"unique":0,"ranchu":0,"oem_consumer":0},"selected_count":0,"records":[]}' > "$RUNNER_TEMP/kernelci/manifest.json"
+            printf '{"include":[]}' > "$RUNNER_TEMP/kernelci/matrix.json"
+            {
+              echo 'matrix={"include":[]}'
+              echo "next_offset=0"
+              echo "batch_end=0"
+              echo "target_count=0"
+            } >> "$GITHUB_OUTPUT"
+            echo "Empty KernelCI batch recorded (BigQuery unavailable)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ -n "$MANIFEST_RUN_ID" ]; then
             INPUT="$RUNNER_TEMP/kernelci/manifest.json"
           else
