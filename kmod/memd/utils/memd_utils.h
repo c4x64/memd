@@ -3,6 +3,7 @@
 
 #include <linux/mm.h>
 #include <linux/mm_types.h>
+#include <linux/pid.h>
 #include <linux/types.h>
 #include <linux/version.h>
 #include "memd_common.h"
