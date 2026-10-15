@@ -243,7 +243,8 @@ static inline int connect(const char *module_id) {
         return -1;
     }
     int n = snprintf(hello, sizeof(hello), "%s%s\n", kHelloPrefix, module_id);
-    if (n <= 0 || write(sock, hello, (size_t)n) != (ssize_t)n) {
+    if (n <= 0 || (size_t)n >= sizeof(hello) ||
+        write(sock, hello, (size_t)n) != (ssize_t)n) {
         close(sock);
         return -1;
     }
