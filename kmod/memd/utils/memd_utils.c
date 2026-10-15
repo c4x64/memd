@@ -117,7 +117,7 @@ void memd_put_cred(struct cred *cred)
  * kernels). do_send_sig_info has the same (sig, info, task, type)
  * shape; prefer send_signal where it resolves. -ESRCH when neither
  * is available. */
-int memd_send_signal(int sig, struct kernel_siginfo *info,
+int memd_send_signal(int sig, struct siginfo *info,
                      struct task_struct *task, enum pid_type type)
  {
     static int (*fn_send)(int, struct kernel_siginfo *,
@@ -132,10 +132,12 @@ int memd_send_signal(int sig, struct kernel_siginfo *info,
         fn_send = (void *)kallsyms_lookup_name_ex("send_signal");
         fn_do = (void *)kallsyms_lookup_name_ex("do_send_sig_info");
     }
+    /* struct siginfo shares the si_signo/si_errno/si_code prefix the
+     * callee reads; same object the direct call always passed. */
     if (fn_send)
-        return fn_send(sig, info, task, type);
+        return fn_send(sig, (struct kernel_siginfo *)info, task, type);
     if (fn_do)
-        return fn_do(sig, info, task, type);
+        return fn_do(sig, (struct kernel_siginfo *)info, task, type);
     return -ESRCH;
 }
 

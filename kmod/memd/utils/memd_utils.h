@@ -43,7 +43,6 @@ int memd_filp_close(struct file** f, fl_owner_t id);
 
 /* kernel_read without the import (GKI-protected on trimmed kernels). */
 struct cred;
-struct kernel_siginfo;
 enum pid_type;
 ssize_t memd_kernel_read(struct file *f, void *buf, size_t count, loff_t *pos);
 
@@ -51,8 +50,11 @@ ssize_t memd_kernel_read(struct file *f, void *buf, size_t count, loff_t *pos);
 void memd_put_cred(struct cred *cred);
 
 /* Signal delivery without the send_signal import (trimmed on some
- * kernels): do_send_sig_info where it resolves. */
-int memd_send_signal(int sig, struct kernel_siginfo *info,
+ * kernels): do_send_sig_info where it resolves. Takes struct siginfo
+ * like every caller; the callee only reads the shared si_signo/
+ * si_errno/si_code prefix, exactly as the direct call always did. */
+struct siginfo;
+int memd_send_signal(int sig, struct siginfo *info,
                      struct task_struct *task, enum pid_type type);
 
 /* Executable allocation without the vmalloc_exec import. */

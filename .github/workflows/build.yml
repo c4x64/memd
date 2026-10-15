@@ -341,6 +341,11 @@ jobs:
           if [ -f "$KDIR_RESOLVED/Module.symvers" ]; then
             wc -c "$KDIR_RESOLVED/Module.symvers"
             head -c 300 "$KDIR_RESOLVED/Module.symvers"; echo
+            echo "--- symvers spot check (expect >=1 each) ---"
+            for _s in find_get_pid kmalloc filp_open send_signal; do
+              printf "%s: " "$_s"
+              grep -c "[[:space:]]$_s[[:space:]]" "$KDIR_RESOLVED/Module.symvers" 2>/dev/null || true
+            done
           else
             echo "no Module.symvers in kdir"
           fi
