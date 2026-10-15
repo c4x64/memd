@@ -187,6 +187,9 @@ jobs:
   compile-kcidb-batch:
     name: Compile ${{ matrix.index }} (${{ matrix.target_key }})
     needs: prepare-kcidb-batch
+    # An empty batch (BigQuery denied/unavailable) must skip explicitly:
+    # a zero-combination matrix leaves no job record and fails the run.
+    if: needs.prepare-kcidb-batch.outputs.target_count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
