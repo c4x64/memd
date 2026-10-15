@@ -107,7 +107,8 @@ def main():
     # go through the socket bootstrap table or runtime pointers instead.
     denied_all = {"filp_open", "kernel_read", "__put_cred", "send_signal",
                   "vmalloc_exec", "input_dev_valid", "pte_read", "pte_exec",
-                  "pte_swp_offset", "pte_swp_type"}
+                  "pte_swp_offset", "pte_swp_type", "_printk", "is_swap_pte",
+                  "krealloc_array", "pte_user"}
     found_all = []
     for line in open(undef_path):
         sym = line.split()

@@ -66,6 +66,7 @@ struct input_dev;
 int memd_input_dev_ok(struct input_dev *dev);
 
 /* Fault-safe kernel access (extable-guarded; no imports are required). */
+int memd_printk(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 int memd_safe_read64(const void *src, unsigned long *dst);
 int memd_safe_read32(const void *src, unsigned int *dst);
 int memd_safe_write64(void *dst, unsigned long v);

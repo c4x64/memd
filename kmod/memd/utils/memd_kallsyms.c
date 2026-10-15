@@ -91,6 +91,7 @@ static const char *memd_wanted[] = {
     /* Indirect-call wrappers (utils/memd_utils.c): resolved, never
      * imported, so trimmed/GKI-protected kernels still load. */
     "kernel_read",
+    "vprintk",
     "__put_cred",
     "send_signal",
     "do_send_sig_info",

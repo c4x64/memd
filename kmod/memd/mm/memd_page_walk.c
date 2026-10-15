@@ -56,6 +56,17 @@ static inline unsigned long memd_pte_swp_offset(pte_t pte)
  {
     return (pte_val(pte) >> 8) & ((1UL << 50) - 1);
 }
+/* Generic is_swap_pte/pte_user without the imports (both missing from
+ * trimmed DDK maps): a non-present entry with nonzero bits is swap;
+ * USER lives at ARMv8 AP[1] (bit 6) on every generation. */
+static inline int memd_is_swap_pte(pte_t pte)
+ {
+    return !pte_present(pte) && pte_val(pte);
+}
+static inline int memd_pte_user(pte_t pte)
+ {
+    return !!(pte_val(pte) & (1UL << 6));
+}
 
 // Function to merge and print contiguous memory regions
 static void print_merged_region(unsigned long* start, unsigned long* end) {
@@ -304,7 +315,7 @@ static int walk_pte_level_ctx(pmd_t *pmd, unsigned long addr, unsigned long end,
                         ctx->stats->anon_pages++;
                 }
             }
-        } else if (ctx->include_swap && is_swap_pte(pte)) {
+        } else if (ctx->include_swap && memd_is_swap_pte(pte)) {
             if (ctx->stats)
                 ctx->stats->swap_entries++;
 
@@ -559,7 +570,7 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
 
     pte_t pte = *ptep;
     if (!pte_present(pte)) {
-        if (is_swap_pte(pte)) {
+        if (memd_is_swap_pte(pte)) {
             info->swapped = true;
             info->swap_offset = memd_pte_swp_offset(pte);
             info->swap_type = memd_pte_swp_type(pte);
@@ -575,7 +586,7 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
     info->exec = memd_pte_exec(pte);
     info->dirty = pte_dirty(pte);
     info->young = pte_young(pte);
-    info->user = pte_user(pte);
+    info->user = memd_pte_user(pte);
     info->huge = false;
 
     return 0;

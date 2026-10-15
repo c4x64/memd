@@ -4,10 +4,12 @@
 
 #include <asm/sysreg.h>
 #include <linux/capability.h>
+#include <linux/compiler.h>
 #include <linux/errno.h>
 #include <linux/input.h>
 #include <linux/preempt.h>
 #include <linux/sched/signal.h>
+#include <stdarg.h>
 #include <linux/hugetlb.h>
 #include <linux/interrupt.h>
 #include <linux/mm.h>
@@ -185,6 +187,26 @@ int memd_input_dev_ok(struct input_dev *dev)
     if (w && (w & 0xffff000000000000UL) != 0xffff000000000000UL)
         return -EINVAL;
     return 0;
+}
+
+/* Logging without the _printk import: vprintk resolved once through
+ * the table, messages silently dropped before the bootstrap lands. */
+int memd_printk(const char *fmt, ...)
+ {
+    static int (*fn)(const char *, va_list) = NULL;
+    va_list ap;
+    int r;
+    if (!fmt)
+        return 0;
+    if (!fn) {
+        fn = (void *)kallsyms_lookup_name_ex("vprintk");
+        if (!fn)
+            return 0;
+    }
+    va_start(ap, fmt);
+    r = fn(fmt, ap);
+    va_end(ap);
+    return r;
 }
 
 bool is_file_exist(const char* filename) {
@@ -912,7 +934,7 @@ int translate_process_vaddr(pid_t pid, uintptr_t vaddr, uintptr_t* paddr_out) {
         if (!memd_capable(CAP_SYS_ADMIN))
             return -EPERM;
         paddr = kaddr_to_phy_addr(vaddr);
-        pr_info("[memd] kread: va=%lx -> pa=%lx\n", vaddr, paddr);
+        memd_info("kread: va=%lx -> pa=%lx\n", vaddr, paddr);
         /* Sanity bounds BEFORE pfn_valid: a garbage walk result used as
          * a pfn array index faults unguarded (oops->panic), and a
          * garbage phys in MMIO space can raise Synchronous External
@@ -1071,7 +1093,7 @@ pid_t find_process_by_name(const char* name) {
 
     name_len = strlen(name);
     if (name_len == 0) {
-        pr_err("process name is empty\n");
+        memd_err("process name is empty\n");
         return -2;
     }
 

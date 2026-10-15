@@ -4,6 +4,7 @@
 #include <linux/hugetlb.h>
 #include <linux/interrupt.h>
 #include <linux/mm.h>
+#include <linux/overflow.h>
 #include <linux/pgtable.h>
 #include <linux/printk.h>
 #include <linux/proc_fs.h>
@@ -38,12 +39,19 @@ static int ensure_capacity(struct karray_list* list, size_t min_capacity) {
         return 0;
 
     size_t new_capacity = list->capacity + (list->capacity >> 1);
+    size_t bytes;
+    void **new_data;
     if (new_capacity < min_capacity)
         new_capacity = min_capacity;
-
-    void** new_data = krealloc_array(list->data, new_capacity, sizeof(void*), GFP_KERNEL);
+    /* krealloc_array without the import (missing from trimmed DDK
+     * maps): overflow-checked kmalloc + copy + free. */
+    if (check_mul_overflow(new_capacity, sizeof(void *), &bytes))
+        return -ENOMEM;
+    new_data = kmalloc(bytes, GFP_KERNEL);
     if (!new_data)
         return -ENOMEM;
+    memcpy(new_data, list->data, list->size * sizeof(void *));
+    kfree(list->data);
 
     list->data = new_data;
     list->capacity = new_capacity;
@@ -274,12 +282,19 @@ int arraylist_reserve(struct karray_list* list, size_t capacity) {
 }
 
 int arraylist_shrink_to_fit(struct karray_list* list) {
+    size_t bytes;
+    void **new_data;
     if (list->size == list->capacity)
         return 0;
 
-    void** new_data = krealloc_array(list->data, list->size, sizeof(void*), GFP_KERNEL);
+    if (check_mul_overflow(list->size, sizeof(void *), &bytes))
+        return -ENOMEM;
+    new_data = kmalloc(bytes, GFP_KERNEL);
     if (!new_data && list->size > 0)
         return -ENOMEM;
+    if (list->size > 0)
+        memcpy(new_data, list->data, list->size * sizeof(void *));
+    kfree(list->data);
 
     list->data = new_data;
     list->capacity = list->size;

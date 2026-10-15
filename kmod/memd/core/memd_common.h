@@ -7,30 +7,26 @@
 #include <net/sock.h>
 #include "memd_utils.h"
 
-/* printk ABI pin: 5.10-baseline headers emit a direct printk reference,
- * but some vendor kernels (proven: Samsung 5.15) export only _printk
- * (5.15+ headers emit that form via their own macro, skipped here).
- * Redirect every printk call site to _printk: present in the 5.10
- * baseline map (CI-gated above) and on all newer targets (proven by
- * the matrix builds, which already import it). Same signature family
- * — behavior-identical. */
-#ifndef printk
-#define printk _printk
-#endif
-
+/* Logging without the _printk import (missing from trimmed DDK maps
+ * and GKI-protected on trimmed kernels): everything routes through
+ * memd_printk, which calls a runtime-resolved vprintk and silently
+ * drops messages until the bootstrap ioctl lands. Format-checked via
+ * __printf attribute. Debug variants are hard no-ops (their two call
+ * sites pass side-effect-free args; release builds emitted nothing
+ * anyway since DBG only adds -g, never -DDEBUG). */
 #define MEMD_LOG_PREFIX "[memd] "
-#define memd_info(fmt, ...) pr_info(MEMD_LOG_PREFIX fmt, ##__VA_ARGS__)
-#define memd_warn(fmt, ...) pr_warn(MEMD_LOG_PREFIX fmt, ##__VA_ARGS__)
-#define memd_err(fmt, ...) pr_err(MEMD_LOG_PREFIX fmt, ##__VA_ARGS__)
-#define memd_debug(fmt, ...) pr_debug(MEMD_LOG_PREFIX fmt, ##__VA_ARGS__)
+#define memd_info(fmt, ...) memd_printk(KERN_INFO MEMD_LOG_PREFIX fmt, ##__VA_ARGS__)
+#define memd_warn(fmt, ...) memd_printk(KERN_WARNING MEMD_LOG_PREFIX fmt, ##__VA_ARGS__)
+#define memd_err(fmt, ...) memd_printk(KERN_ERR MEMD_LOG_PREFIX fmt, ##__VA_ARGS__)
+#define memd_debug(fmt, ...) do { } while (0)
 
-#define ovo_info(fmt, ...) pr_info(MEMD_LOG_PREFIX "%s: " fmt, __func__, ##__VA_ARGS__)
+#define ovo_info(fmt, ...) memd_printk(KERN_INFO MEMD_LOG_PREFIX "%s: " fmt, __func__, ##__VA_ARGS__)
 
-#define ovo_warn(fmt, ...) pr_warn(MEMD_LOG_PREFIX "%s: " fmt, __func__, ##__VA_ARGS__)
+#define ovo_warn(fmt, ...) memd_printk(KERN_WARNING MEMD_LOG_PREFIX "%s: " fmt, __func__, ##__VA_ARGS__)
 
-#define ovo_err(fmt, ...) pr_err(MEMD_LOG_PREFIX "%s: " fmt, __func__, ##__VA_ARGS__)
+#define ovo_err(fmt, ...) memd_printk(KERN_ERR MEMD_LOG_PREFIX "%s: " fmt, __func__, ##__VA_ARGS__)
 
-#define ovo_debug(fmt, ...) pr_debug(MEMD_LOG_PREFIX "%s: " fmt, __func__, ##__VA_ARGS__)
+#define ovo_debug(fmt, ...) do { } while (0)
 
 #define LUCKY_LUO 0x00000000faceb00c
 
