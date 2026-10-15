@@ -49,11 +49,13 @@ def load_snapshot(path):
     if isinstance(payload, dict):
         records = payload.get("records")
         source_counts = payload.get("source_counts")
+        source = payload.get("source") or "kernelci-production.kernelci_production"
         if not isinstance(records, list) or not isinstance(source_counts, dict):
             raise ValueError("The manifest must contain records and source_counts.")
     elif isinstance(payload, list):
         records = payload
         source_counts = None
+        source = "kernelci-production.kernelci_production"
     else:
         raise ValueError(
             "KCIDB query output must be a JSON array or a manifest object."
@@ -71,7 +73,7 @@ def load_snapshot(path):
             raise ValueError(f"Row {index}: a JSON object was expected.")
         for field in REQUIRED_FIELDS:
             _required_text(record, field, index)
-        if record["device_class"] not in {"ranchu", "oem_consumer"}:
+        if record["device_class"] not in {"ranchu", "oem_consumer", "maestro"}:
             raise ValueError(
                 f"Row {index}: unsupported device_class "
                 f"{record['device_class']!r}."
@@ -116,7 +118,12 @@ def load_snapshot(path):
 
     ranchu_count = sum(r["device_class"] == "ranchu" for r in normalized)
     consumer_count = sum(r["device_class"] == "oem_consumer" for r in normalized)
-    if not ranchu_count or not consumer_count:
+    maestro_count = sum(r["device_class"] == "maestro" for r in normalized)
+    if maestro_count and maestro_count == len(normalized):
+        # All-Maestro mirror manifest: its own coverage class, recorded
+        # in source provenance instead of the Ranchu/consumer split.
+        pass
+    elif not ranchu_count or not consumer_count:
         raise ValueError(
             "The KCIDB snapshot must contain both Ranchu and consumer builds."
         )
@@ -145,11 +152,12 @@ def load_snapshot(path):
         raise ValueError("Per-class source counts are smaller than the snapshot.")
 
     return {
-        "source": "kernelci-production.kernelci_production",
+        "source": source,
         "source_counts": {
             "unique": total,
             "ranchu": ranchu_total,
             "oem_consumer": consumer_total,
+            "maestro": maestro_count,
         },
         "selected_count": len(normalized),
         "records": normalized,
@@ -204,10 +212,12 @@ def main():
         stream.write("\n")
 
     source = manifest["source_counts"]
+    classes = "%d Ranchu and %d consumer" % (source["ranchu"], source["oem_consumer"])
+    if source.get("maestro"):
+        classes = "%d Maestro mirror" % source["maestro"]
     print(
         f"KCIDB: {manifest['selected_count']} unique compilation targets "
-        f"({source['ranchu']} Ranchu and {source['oem_consumer']} consumer "
-        f"targets available); batch {args.offset}:{end}."
+        f"({classes} targets available); batch {args.offset}:{end}."
     )
     print(f"Next batch offset: {end}.")
     with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as out:
@@ -219,9 +229,10 @@ def main():
         summary.write(
             f"KCIDB compilation batch `{args.offset}:{end}` of "
             f"`{manifest['selected_count']}` unique targets.\n\n"
-            f"Manifest source counts: `{source['unique']}` total, "
-            f"`{source['ranchu']}` Ranchu, "
-            f"`{source['oem_consumer']}` consumer.\n\n"
+            f"Manifest source (`{manifest.get('source', 'unknown')}`) counts: "
+            f"`{source['unique']}` total, `{source['ranchu']}` Ranchu, "
+            f"`{source['oem_consumer']}` consumer, "
+            f"`{source.get('maestro', 0)}` Maestro mirror.\n\n"
         )
         if end < manifest["selected_count"]:
             summary.write(

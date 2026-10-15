@@ -66,12 +66,15 @@ jobs:
           KCIDB_GCP_CREDENTIALS: ${{ secrets.KCIDB_GCP_CREDENTIALS }}
           MANIFEST_RUN_ID: ${{ inputs.manifest_run_id }}
         run: |
-          if [ -n "$MANIFEST_RUN_ID" ] || [ -n "$KCIDB_GCP_CREDENTIALS" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "KernelCI compilation is enabled for a new query or manifest resumption." >> "$GITHUB_STEP_SUMMARY"
+          # The Maestro mirror needs no credentials, so the batch is
+          # always attempted; BigQuery stays as an authenticated fallback.
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          if [ -n "$MANIFEST_RUN_ID" ]; then
+            echo "KernelCI compilation will resume from the given manifest." >> "$GITHUB_STEP_SUMMARY"
+          elif [ -n "$KCIDB_GCP_CREDENTIALS" ]; then
+            echo "Mirror first; BigQuery fallback available." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "KernelCI compilation has been skipped. Add the \`KCIDB_GCP_CREDENTIALS\` repository secret to enable BigQuery queries." >> "$GITHUB_STEP_SUMMARY"
+            echo "No BigQuery credentials: Maestro mirror only." >> "$GITHUB_STEP_SUMMARY"
           fi
 
   prepare-kcidb-batch:
@@ -89,14 +92,26 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Fetch Maestro mirror manifest
+        id: mirror
+        if: ${{ inputs.manifest_run_id == '' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/kernelci"
+          if python3 .github/scripts/kcidb_mirror.py \
+            --manifest "$RUNNER_TEMP/kernelci/mirror.json"; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Authenticate to KernelCI BigQuery
-        if: ${{ !inputs.manifest_run_id }}
+        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' }}
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.KCIDB_GCP_CREDENTIALS }}
 
       - name: Set up BigQuery CLI
-        if: ${{ !inputs.manifest_run_id }}
+        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' }}
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ fromJSON(secrets.KCIDB_GCP_CREDENTIALS).project_id }}
@@ -112,7 +127,7 @@ jobs:
 
       - name: Query verified KernelCI builds
         id: query
-        if: ${{ !inputs.manifest_run_id }}
+        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' }}
         env:
           KCIDB_GCP_PROJECT_ID: ${{ fromJSON(secrets.KCIDB_GCP_CREDENTIALS).project_id }}
         run: |
@@ -147,10 +162,11 @@ jobs:
         id: batch
         env:
           MANIFEST_RUN_ID: ${{ inputs.manifest_run_id }}
+          MIRROR_OK: ${{ steps.mirror.outputs.ok }}
           BATCH_OFFSET: ${{ inputs.batch_offset }}
         run: |
           set -euo pipefail
-          if [ "${{ steps.query.outputs.ok }}" = "false" ] && [ -z "$MANIFEST_RUN_ID" ]; then
+          if [ -z "$MANIFEST_RUN_ID" ] && [ "$MIRROR_OK" != "true" ] && [ "${{ steps.query.outputs.ok }}" != "true" ]; then
             printf '{"source":"kernelci-production.kernelci_production","source_counts":{"unique":0,"ranchu":0,"oem_consumer":0},"selected_count":0,"records":[]}' > "$RUNNER_TEMP/kernelci/manifest.json"
             printf '{"include":[]}' > "$RUNNER_TEMP/kernelci/matrix.json"
             {
@@ -159,11 +175,13 @@ jobs:
               echo "batch_end=0"
               echo "target_count=0"
             } >> "$GITHUB_OUTPUT"
-            echo "Empty KernelCI batch recorded (BigQuery unavailable)." >> "$GITHUB_STEP_SUMMARY"
+            echo "Empty KernelCI batch recorded (mirror and BigQuery unavailable)." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ -n "$MANIFEST_RUN_ID" ]; then
             INPUT="$RUNNER_TEMP/kernelci/manifest.json"
+          elif [ "$MIRROR_OK" = "true" ]; then
+            INPUT="$RUNNER_TEMP/kernelci/mirror.json"
           else
             INPUT="$RUNNER_TEMP/kernelci/query.json"
           fi

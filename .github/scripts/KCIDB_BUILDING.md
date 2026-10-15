@@ -1,14 +1,18 @@
 # KernelCI Kernel Build Batches
 
-The `prepare-kcidb-batch` job retrieves valid `kernelci` builds from the
-`kernelci-production.kernelci_production` BigQuery dataset. It includes
-every eligible distinct kernel/configuration/architecture target across
-Ranchu and consumer builds and requires at least 10,001 targets. The
-manifest validator checks the complete query result against BigQuery's
-source count; a truncated result is rejected rather than reported as
-complete. The source count and each target's source URL, commit, `.config`
-URL, architecture, and configuration name are retained in a GitHub
-Actions artifact named `kernelci-manifest`.
+The `prepare-kcidb-batch` job retrieves verified KernelCI builds from
+the public Maestro mirror first (`https://api.kernelci.org`, no
+credentials needed; `kcidb_mirror.py` pages passing `kbuild` nodes and
+maps them onto the manifest schema with `device_class: "maestro"`).
+BigQuery (`kernelci-production.kernelci_production`) remains as an
+authenticated fallback when the mirror falls short, and a prior
+manifest artifact can be resumed via `manifest_run_id`. Every source
+requires at least 10,001 unique targets. The manifest validator checks
+a complete result against the source counts; a truncated result is
+rejected rather than reported as complete. The source count and each
+target's source URL, commit, `.config` URL, architecture, and
+configuration name are retained in a GitHub Actions artifact named
+`kernelci-manifest`.
 
 Before running the workflow, create a repository Actions secret named
 `KCIDB_GCP_CREDENTIALS` and place within it a Google service-account JSON
