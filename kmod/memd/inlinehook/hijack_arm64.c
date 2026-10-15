@@ -183,7 +183,7 @@ struct memd_trampoline *memd_create_trampoline(void *target, void *handler, size
     if (!tramp)
         return NULL;
 
-    tramp_code = vmalloc_exec(tramp_size);
+    tramp_code = memd_vmalloc_exec(tramp_size);
     if (!tramp_code) {
         kfree(tramp);
         return NULL;

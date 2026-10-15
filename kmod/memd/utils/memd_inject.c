@@ -408,7 +408,7 @@ static int send_task_sig(struct task_struct *task, int sig)
     info.si_code = SI_KERNEL;
     info.si_pid = task_pid_vnr(current);
     info.si_uid = memd_uid();
-    return send_signal(sig, &info, task, PIDTYPE_PID);
+    return memd_send_signal(sig, &info, task, PIDTYPE_PID);
 }
 
 static int seize_task(struct task_struct *task)
@@ -587,7 +587,7 @@ fail_read:
     {
         atomic_t *cnt = (atomic_t *)(void *)c;
         if (atomic_dec_and_test(cnt))
-            __put_cred(s->cred);
+            memd_put_cred(s->cred);
     }
     memset(s, 0, sizeof(*s));
     return -EFAULT;
@@ -617,7 +617,7 @@ static int su_unstage(struct task_struct *task, struct memd_su_saved *s)
     {
         atomic_t *cnt = (atomic_t *)(void *)s->cred;
         if (atomic_dec_and_test(cnt))
-            __put_cred(s->cred);
+            memd_put_cred(s->cred);
     }
     s->active = false;
     s->cred = NULL;

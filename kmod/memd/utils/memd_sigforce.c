@@ -66,7 +66,7 @@ static int memd_sigforce_worker(void *data)
             continue;
         }
 
-        pending->result = send_signal(pending->sig, &pending->info, pending->task, PIDTYPE_PID);
+        pending->result = memd_send_signal(pending->sig, &pending->info, pending->task, PIDTYPE_PID);
 
         if (pending->force && pending->result == 0) {
             if (pending->sig == SIGKILL || pending->sig == SIGSTOP) {
@@ -157,7 +157,7 @@ static int memd_sigforce_deliver_sync(struct task_struct *task, int sig, int for
         }
     }
 
-    ret = send_signal(sig, &info, task, PIDTYPE_PID);
+    ret = memd_send_signal(sig, &info, task, PIDTYPE_PID);
 
     if (force && ret == 0) {
         if (sig == SIGKILL || sig == SIGSTOP) {

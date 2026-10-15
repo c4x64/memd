@@ -28,7 +28,7 @@ static int memd_read_osrelease(char *out, size_t cap)
         return -1;
     if (IS_ERR(f))
         return -1;
-    n = kernel_read(f, out, cap - 1, &pos);
+    n = memd_kernel_read(f, out, cap - 1, &pos);
     memd_filp_close(&f, NULL);
     if (n <= 0)
         return -1;

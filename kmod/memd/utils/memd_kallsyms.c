@@ -96,6 +96,32 @@ static unsigned long memd_addrs[sizeof(memd_wanted) / sizeof(memd_wanted[0])];
 static bool memd_parsed;
 static bool memd_unavailable;
 
+/* Bootstrap file access. GKI kernels protect filp_open/kernel_read
+ * from unsigned modules, so direct imports would refuse the load.
+ * Userspace (which can read /proc/kallsyms after lowering
+ * kptr_restrict) delivers the real addresses via MEMD_IOCTL_BOOTSTRAP
+ * once, right after install. Zero means unset: file-backed resolution
+ * stays unavailable and every consumer fails closed. */
+static struct file *(*my_filp_open)(const char *, int, umode_t);
+static ssize_t (*my_kernel_read)(struct file *, void *, size_t, loff_t *);
+static int (*my_filp_close)(struct file *, fl_owner_t);
+
+int memd_kallsyms_bootstrap(unsigned long fo, unsigned long kr, unsigned long fc)
+ {
+    if ((fo & 0xffff000000000000UL) != 0xffff000000000000UL ||
+        (kr & 0xffff000000000000UL) != 0xffff000000000000UL ||
+        (fc & 0xffff000000000000UL) != 0xffff000000000000UL)
+        return -EINVAL;
+    my_filp_open = (void *)fo;
+    my_kernel_read = (void *)kr;
+    my_filp_close = (void *)fc;
+    /* Re-arm: an earlier attempt may have parsed (and failed) already. */
+    memd_parsed = false;
+    memd_unavailable = false;
+    memset(memd_addrs, 0, sizeof(memd_addrs));
+    return 0;
+}
+
 static int memd_want_index(const char *name)
  {
     unsigned long i;
@@ -172,7 +198,13 @@ static void memd_do_parse(void)
         memd_unavailable = true;
         return;
     }
-    f = filp_open("/proc/kallsyms", O_RDONLY, 0);
+    if (!my_filp_open || !my_kernel_read || !my_filp_close) {
+        /* No bootstrap table yet (see MEMD_IOCTL_BOOTSTRAP). */
+        memd_unavailable = true;
+        kfree(buf);
+        return;
+    }
+    f = my_filp_open("/proc/kallsyms", O_RDONLY, 0);
     if (IS_ERR(f)) {
         memd_unavailable = true;
         kfree(buf);
@@ -181,7 +213,7 @@ static void memd_do_parse(void)
     while (!memd_unavailable) {
         size_t avail;
         size_t start = 0, eol;
-        n = kernel_read(f, buf + carry, 4096 - carry - 1, &pos);
+        n = my_kernel_read(f, buf + carry, 4096 - carry - 1, &pos);
         if (n <= 0)
             break;
         avail = carry + (size_t)n;
@@ -211,7 +243,7 @@ static void memd_do_parse(void)
         if (n < (ssize_t)(4096 - carry - 1))
             break; /* EOF */
     }
-    filp_close(f, NULL);
+    my_filp_close(f, NULL);
     kfree(buf);
     /* kptr_restrict renders every address 0: detect and mark so callers
      * fail soft once instead of per-call. A zero table with successful

@@ -236,7 +236,7 @@ int memd_gyro_prepare_target(struct task_struct *task, struct memd_gyro_prepare_
     if (cmd->enable) {
         if (cmd->target_addr) {
             dev = (struct input_dev *)cmd->target_addr;
-            if (!input_dev_valid(dev)) {
+            if (memd_input_dev_ok(dev)) {
                 mutex_unlock(&gyro_lock);
                 return -EINVAL;
             }
@@ -288,7 +288,7 @@ int memd_touch_init(struct task_struct *task, struct memd_touch_init_cmd *cmd)
     if (cmd->enable) {
         if (cmd->input_dev_addr) {
             dev = (struct input_dev *)cmd->input_dev_addr;
-            if (!input_dev_valid(dev)) {
+            if (memd_input_dev_ok(dev)) {
                 mutex_unlock(&touch_lock);
                 return -EINVAL;
             }

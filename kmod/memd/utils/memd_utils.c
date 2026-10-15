@@ -4,7 +4,10 @@
 
 #include <asm/sysreg.h>
 #include <linux/capability.h>
+#include <linux/errno.h>
+#include <linux/input.h>
 #include <linux/preempt.h>
+#include <linux/sched/signal.h>
 #include <linux/hugetlb.h>
 #include <linux/interrupt.h>
 #include <linux/mm.h>
@@ -79,6 +82,106 @@ int memd_filp_close(struct file** f, fl_owner_t id) {
     }
 
     reserve_flip_close(f, id);
+    return 0;
+}
+
+/* kernel_read without the import (GKI-protected on trimmed kernels).
+ * Resolved through the kallsyms table once the bootstrap ioctl lands;
+ * -ENODEV until then. Callers already treat <0 as failure. */
+ssize_t memd_kernel_read(struct file *f, void *buf, size_t count, loff_t *pos)
+ {
+    static ssize_t (*fn)(struct file *, void *, size_t, loff_t *) = NULL;
+    if (!fn) {
+        fn = (void *)kallsyms_lookup_name_ex("kernel_read");
+        if (!fn)
+            return -ENODEV;
+    }
+    return fn(f, buf, count, pos);
+}
+
+/* __put_cred without the import (same story). Drop-a-ref only. */
+void memd_put_cred(struct cred *cred)
+ {
+    static void (*fn)(struct cred *) = NULL;
+    if (!cred)
+        return;
+    if (!fn) {
+        fn = (void *)kallsyms_lookup_name_ex("__put_cred");
+        if (!fn)
+            return;
+    }
+    fn(cred);
+}
+
+/* Signal delivery without the send_signal import (trimmed on some
+ * kernels). do_send_sig_info has the same (sig, info, task, type)
+ * shape; prefer send_signal where it resolves. -ESRCH when neither
+ * is available. */
+int memd_send_signal(int sig, struct kernel_siginfo *info,
+                     struct task_struct *task, enum pid_type type)
+ {
+    static int (*fn_send)(int, struct kernel_siginfo *,
+                          struct task_struct *, enum pid_type) = NULL;
+    static int (*fn_do)(int, struct kernel_siginfo *,
+                        struct task_struct *, enum pid_type) = NULL;
+    static bool probed = false;
+    if (!task || !info)
+        return -ESRCH;
+    if (!probed) {
+        probed = true;
+        fn_send = (void *)kallsyms_lookup_name_ex("send_signal");
+        fn_do = (void *)kallsyms_lookup_name_ex("do_send_sig_info");
+    }
+    if (fn_send)
+        return fn_send(sig, info, task, type);
+    if (fn_do)
+        return fn_do(sig, info, task, type);
+    return -ESRCH;
+}
+
+/* Executable allocation without the vmalloc_exec import (trimmed on
+ * some kernels): plain vmalloc (universally imported) + set_memory_x
+ * through the table. NULL when the remap helper is unavailable. */
+void *memd_vmalloc_exec(unsigned long size)
+ {
+    static int (*fn_set_x)(unsigned long, int) = NULL;
+    static bool probed = false;
+    void *p;
+    if (!size)
+        return NULL;
+    if (!probed) {
+        probed = true;
+        fn_set_x = (void *)kallsyms_lookup_name_ex("set_memory_x");
+    }
+    if (!fn_set_x)
+        return NULL;
+    p = vmalloc(size);
+    if (!p)
+        return NULL;
+    if (fn_set_x((unsigned long)p, (int)(PAGE_ALIGN(size) >> PAGE_SHIFT))) {
+        vfree(p);
+        return NULL;
+    }
+    return p;
+}
+
+/* struct input_dev plausibility without the input_dev_valid import
+ * (absent on trimmed kernels). Canonical pointer + probe-readable
+ * name/phys header words; anything else is -EINVAL. Fail closed. */
+int memd_input_dev_ok(struct input_dev *dev)
+ {
+    unsigned long w;
+    if (!dev || ((unsigned long)dev & 0xffff000000000000UL) != 0xffff000000000000UL)
+        return -EINVAL;
+    /* struct input_dev head: name, phys, uniq are the first pointers. */
+    if (memd_safe_read64(&((struct input_dev *)dev)->name, &w))
+        return -EINVAL;
+    if (w && (w & 0xffff000000000000UL) != 0xffff000000000000UL)
+        return -EINVAL;
+    if (memd_safe_read64(&((struct input_dev *)dev)->phys, &w))
+        return -EINVAL;
+    if (w && (w & 0xffff000000000000UL) != 0xffff000000000000UL)
+        return -EINVAL;
     return 0;
 }
 

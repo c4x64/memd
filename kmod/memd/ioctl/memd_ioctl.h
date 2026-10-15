@@ -268,6 +268,17 @@ struct memd_page_perms_cmd {
 #define MEMD_IOCTL_LOAD_SOTOAPP _IOWR('W', 38, struct memd_loadso_cmd)
 #define MEMD_IOCTL_LOAD_SOSUTOAPP _IOWR('W', 39, struct memd_loadso_cmd)
 
+/* Symbol bootstrap (struct below): userspace delivers kernel addresses
+ * for file helpers GKI protects from unsigned modules, so the kallsyms
+ * parser needs no direct imports. Lowest free number after 39. */
+struct memd_bootstrap_cmd {
+    __u64 filp_open;   /* Input: kernel address of filp_open */
+    __u64 kernel_read; /* Input: kernel address of kernel_read */
+    __u64 filp_close;  /* Input: kernel address of filp_close */
+    int result;        /* Output: 0 ok, else -errno */
+};
+#define MEMD_IOCTL_BOOTSTRAP _IOWR('W', 40, struct memd_bootstrap_cmd)
+
 /* IOCTL command for hiding status (hook active, hidden count) */
 struct memd_hide_status_cmd {
     int active; /* Output: 1 if the getdents64 filter is installed */
@@ -338,6 +349,7 @@ int do_touch_calibrate(struct socket* sock, void __user* arg);
 int do_virtual_input_create(struct socket* sock, void __user* arg);
 int do_load_sotoapp(struct socket* sock, void __user* arg);
 int do_load_sosutoapp(struct socket* sock, void __user* arg);
+int do_bootstrap(struct socket* sock, void __user* arg);
 
 typedef int (*ioctl_handler_t)(struct socket* sock, void __user* arg);
 
@@ -390,6 +402,7 @@ static const struct ioctl_cmd_map {
     {.cmd = MEMD_IOCTL_VIRTUAL_INPUT_CREATE, .handler = do_virtual_input_create},
     {.cmd = MEMD_IOCTL_LOAD_SOTOAPP, .handler = do_load_sotoapp},
     {.cmd = MEMD_IOCTL_LOAD_SOSUTOAPP, .handler = do_load_sosutoapp},
+    {.cmd = MEMD_IOCTL_BOOTSTRAP, .handler = do_bootstrap},
     {.cmd = 0, .handler = NULL} /* Sentinel to mark end of array */
 };
 

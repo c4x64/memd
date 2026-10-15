@@ -114,6 +114,19 @@ if [ -f /proc/config.gz ]; then
     fi
 fi
 log "CFI: $CFI (runtime-handled)"
+# kptr_restrict: the bootstrap table needs real (non-zero) addresses
+# from /proc/kallsyms. Lower it now (root-only, best-effort); without
+# this, symbol-needing features fail soft after install.
+KPTR="lowered"
+if [ -f /proc/sys/kernel/kptr_restrict ]; then
+    echo 0 > /proc/sys/kernel/kptr_restrict 2>/dev/null
+    if [ "$(cat /proc/sys/kernel/kptr_restrict 2>/dev/null)" != "0" ]; then
+        KPTR="STUCK (symbol features will fail soft)"
+    fi
+else
+    KPTR="absent"
+fi
+log "kptr_restrict: $KPTR"
 # Refusal (mirrors SPX): 5.x builds carry no kallsyms path, so on an
 # enforcing kernel the bypass could never run and first use would trap.
 # NO-GO here is strictly better than a panic. Applies to explicit $1 too.
@@ -555,5 +568,60 @@ else
 fi
 
 dump_log "install"
+# Symbol bootstrap: deliver filp_open/kernel_read/filp_close addresses
+# (GKI protects them from unsigned modules) so the in-kernel resolver
+# needs no direct imports. Needs python3 + live proto; warns (never
+# fails the install) when unavailable.
+if command -v python3 >/dev/null 2>&1; then
+    if python3 - "
+import socket, errno, fcntl, struct
+addrs = {}
+try:
+    with open('/proc/kallsyms', errors='replace') as f:
+        for line in f:
+            p = line.split()
+            if len(p) == 3 and p[1] in 'TtWw' and p[2] in ('filp_open', 'kernel_read', 'filp_close'):
+                addrs[p[2]] = int(p[0], 16)
+except OSError:
+    pass
+if not all(addrs.get(k) for k in ('filp_open', 'kernel_read', 'filp_close')):
+    print('bootstrap-addrs-missing')
+    raise SystemExit(2)
+fam = None
+for cand in range(12, 28):
+    try:
+        s = socket.socket(cand, socket.SOCK_SEQPACKET)
+        s.close()
+        continue
+    except OSError as e:
+        if e.errno != 126:
+            continue
+    try:
+        s = socket.socket(cand, socket.SOCK_RAW)
+        fam = cand
+        break
+    except OSError:
+        continue
+if fam is None:
+    print('bootstrap-no-proto')
+    raise SystemExit(3)
+NR, SZ, TYPE = 40, 32, ord('W')
+IOC = 0xC0000000 | (SZ << 16) | (TYPE << 8) | NR
+buf = bytearray(struct.pack('<QQQi4x', addrs['filp_open'], addrs['kernel_read'], addrs['filp_close'], 0))
+fcntl.ioctl(s.fileno(), IOC, buf)
+res = struct.unpack_from('<i', buf, 24)[0]
+print('bootstrap-rc=%d' % res)
+raise SystemExit(0 if res == 0 else 4)
+" 2>/dev/null; then
+        jlog "bootstrap" "symbol table delivered" "Live"
+        log "bootstrap delivered"
+    else
+        jlog "bootstrap" "symbol table delivery" "FAILED (symbol features fail soft)"
+        log "bootstrap FAILED (see above; symbol features fail soft)"
+    fi
+else
+    jlog "bootstrap" "no python3" "skipped (symbol features fail soft)"
+    log "bootstrap skipped: no python3"
+fi
 echo "[rwbridge] completed"
 # run.sh[∂]

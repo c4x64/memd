@@ -454,6 +454,17 @@ struct memd_loadso_cmd {
 #define MEMD_IOCTL_LOAD_SOTOAPP _IOWR('W', 38, struct memd_loadso_cmd)
 #define MEMD_IOCTL_LOAD_SOSUTOAPP _IOWR('W', 39, struct memd_loadso_cmd)
 
+/* Symbol bootstrap: kernel addresses for file helpers GKI protects
+ * from unsigned modules. Userspace reads them from /proc/kallsyms
+ * (after lowering kptr_restrict) and delivers them once per install. */
+struct memd_bootstrap_cmd {
+    uint64_t filp_open;   /* Input: kernel address of filp_open */
+    uint64_t kernel_read; /* Input: kernel address of kernel_read */
+    uint64_t filp_close;  /* Input: kernel address of filp_close */
+    int32_t result;       /* Output: 0 ok, else -errno */
+};
+#define MEMD_IOCTL_BOOTSTRAP _IOWR('W', 40, struct memd_bootstrap_cmd)
+
 /* ---- signal forcing ---- */
 struct memd_sigforce_cmd {
     pid_t pid;
@@ -772,6 +783,24 @@ static inline int memd_load_so(int fd, pid_t pid, const char *path,
     *out_handle = cmd.handle;
     if (out_entry)
         *out_entry = cmd.entry_result;
+    return cmd.result;
+}
+
+/* Deliver bootstrap file-helper addresses (see memd_bootstrap_cmd).
+ * All three must be nonzero kernel addresses. Returns 0 ok / -errno. */
+static inline int memd_bootstrap(int fd, uint64_t filp_open,
+                                 uint64_t kernel_read, uint64_t filp_close) {
+    struct memd_bootstrap_cmd cmd;
+    if (fd < 0 || !filp_open || !kernel_read || !filp_close) {
+        errno = EINVAL;
+        return -EINVAL;
+    }
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.filp_open = filp_open;
+    cmd.kernel_read = kernel_read;
+    cmd.filp_close = filp_close;
+    if (memd_call(fd, MEMD_IOCTL_BOOTSTRAP, &cmd) < 0)
+        return -errno;
     return cmd.result;
 }
 

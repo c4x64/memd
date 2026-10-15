@@ -6,6 +6,7 @@
 #include <linux/preempt.h>
 
 #include "memd_hide.h"
+#include "memd_kallsyms.h"
 #include "memd_learn.h"
 #include "memd_hwbp.h"
 #include "memd_gyro.h"
@@ -1384,6 +1385,22 @@ int do_virtual_input_create(struct socket* sock, void __user* arg)
         return -ESRCH;
     ret = memd_virtual_input_create(task, &cmd);
     put_task_struct(task);
+    if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+
+int do_bootstrap(struct socket* sock, void __user* arg)
+ {
+    struct memd_bootstrap_cmd cmd;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    cmd.result = memd_kallsyms_bootstrap((unsigned long)cmd.filp_open,
+                                         (unsigned long)cmd.kernel_read,
+                                         (unsigned long)cmd.filp_close);
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
     return 0;

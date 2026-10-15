@@ -17,7 +17,7 @@
 #include "memd_learn.h"
 
 struct page_walk_context {
-    struct mm_struct *mm;
+    struct mm_struct* mm;
     struct page_walk_stats *stats;
     unsigned long *region_start;
     unsigned long *region_end;
@@ -30,6 +30,32 @@ struct page_walk_context {
     bool include_swap;
     unsigned long flags;
 };
+
+/* ARM64 PTE bit ops without the pte_read/pte_exec/pte_swp_* imports
+ * (trimmed on some kernels). Bit positions are ARMv8 page-table
+ * architecture (AP[2:1] at [7:6], UXN at [54], swap type/offset at
+ * [7:3]/[57:8]), identical to the generic pte_* semantics. */
+#define MEMD_PTE_USER_BIT (1UL << 6)
+#define MEMD_PTE_RDONLY_BIT (1UL << 7)
+#define MEMD_PTE_UXN_BIT (1UL << 54)
+static inline int memd_pte_read(pte_t pte)
+ {
+    unsigned long v = pte_val(pte);
+    return (v & MEMD_PTE_USER_BIT) && !(v & MEMD_PTE_RDONLY_BIT);
+}
+static inline int memd_pte_exec(pte_t pte)
+ {
+    unsigned long v = pte_val(pte);
+    return (v & MEMD_PTE_USER_BIT) && !(v & MEMD_PTE_UXN_BIT);
+}
+static inline unsigned long memd_pte_swp_type(pte_t pte)
+ {
+    return (pte_val(pte) >> 3) & 0x1fUL;
+}
+static inline unsigned long memd_pte_swp_offset(pte_t pte)
+ {
+    return (pte_val(pte) >> 8) & ((1UL << 50) - 1);
+}
 
 // Function to merge and print contiguous memory regions
 static void print_merged_region(unsigned long* start, unsigned long* end) {
@@ -259,9 +285,9 @@ static int walk_pte_level_ctx(pmd_t *pmd, unsigned long addr, unsigned long end,
 
             if (ctx->flags & PAGE_WALK_PERMS) {
                 unsigned int prot = 0;
-                if (pte_read(pte)) prot |= PROT_READ;
+                if (memd_pte_read(pte)) prot |= PROT_READ;
                 if (pte_write(pte)) prot |= PROT_WRITE;
-                if (pte_exec(pte)) prot |= PROT_EXEC;
+                if (memd_pte_exec(pte)) prot |= PROT_EXEC;
                 if (ctx->stats)
                     ctx->stats->pages_by_prot[prot]++;
             }
@@ -535,8 +561,8 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
     if (!pte_present(pte)) {
         if (is_swap_pte(pte)) {
             info->swapped = true;
-            info->swap_offset = pte_swp_offset(pte);
-            info->swap_type = pte_swp_type(pte);
+            info->swap_offset = memd_pte_swp_offset(pte);
+            info->swap_type = memd_pte_swp_type(pte);
         }
         return -ENOENT;
     }
@@ -544,9 +570,9 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
     info->page_size = PAGE_SIZE;
     info->pfn = pte_pfn(pte);
     info->present = true;
-    info->read = pte_read(pte);
+    info->read = memd_pte_read(pte);
     info->write = pte_write(pte);
-    info->exec = pte_exec(pte);
+    info->exec = memd_pte_exec(pte);
     info->dirty = pte_dirty(pte);
     info->young = pte_young(pte);
     info->user = pte_user(pte);

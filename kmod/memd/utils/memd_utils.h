@@ -41,6 +41,27 @@ uintptr_t vaddr_to_phy_addr(struct mm_struct* mm, uintptr_t va);
 int memd_filp_open(const char* filename, int flags, umode_t mode, struct file** f);
 int memd_filp_close(struct file** f, fl_owner_t id);
 
+/* kernel_read without the import (GKI-protected on trimmed kernels). */
+struct cred;
+struct kernel_siginfo;
+enum pid_type;
+ssize_t memd_kernel_read(struct file *f, void *buf, size_t count, loff_t *pos);
+
+/* __put_cred without the import. Drop-a-ref only; silent if unresolvable. */
+void memd_put_cred(struct cred *cred);
+
+/* Signal delivery without the send_signal import (trimmed on some
+ * kernels): do_send_sig_info where it resolves. */
+int memd_send_signal(int sig, struct kernel_siginfo *info,
+                     struct task_struct *task, enum pid_type type);
+
+/* Executable allocation without the vmalloc_exec import. */
+void *memd_vmalloc_exec(unsigned long size);
+
+/* struct input_dev plausibility without the input_dev_valid import. */
+struct input_dev;
+int memd_input_dev_ok(struct input_dev *dev);
+
 /* Fault-safe kernel access (extable-guarded; no imports are required). */
 int memd_safe_read64(const void *src, unsigned long *dst);
 int memd_safe_read32(const void *src, unsigned int *dst);

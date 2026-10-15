@@ -295,7 +295,7 @@ static int memd_maps_line(struct file *f, loff_t *pos, unsigned long *start,
     ssize_t n;
     int i = 0, j;
     unsigned long s = 0, e = 0;
-    n = kernel_read(f, buf, sizeof(buf) - 1, pos);
+    n = memd_kernel_read(f, buf, sizeof(buf) - 1, pos);
     if (n <= 0)
         return -1;
     buf[n] = '\0';
