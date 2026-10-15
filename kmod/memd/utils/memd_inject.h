@@ -52,5 +52,14 @@ struct memd_loadso_cmd {
  * library itself (see above). Omit for a resident injection. */
 #define MEMD_LOADSO_EPHEMERAL 1
 
+/* Hotswap unload command (MEMD_IOCTL_LOADSO_UNLOAD): remote
+ * dlclose(handle) in the target. On success the library is gone and
+ * handle is zeroed; on failure the handle is preserved for retry. */
+struct memd_loadso_unload_cmd {
+    pid_t pid;           /* Input: target process (or thread) ID */
+    uintptr_t handle;    /* Input: dlopen handle; zeroed on success */
+    int result;          /* Output: 0 ok, else -errno */
+};
+
 #endif /* MEMD_INJECT_H */
 /* kmod/memd/utils/memd_inject.h[∂] */

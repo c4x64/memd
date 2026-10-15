@@ -268,6 +268,10 @@ struct memd_page_perms_cmd {
 #define MEMD_IOCTL_LOAD_SOTOAPP _IOWR('W', 38, struct memd_loadso_cmd)
 #define MEMD_IOCTL_LOAD_SOSUTOAPP _IOWR('W', 39, struct memd_loadso_cmd)
 
+/* Hotswap unload (struct in memd_inject.h): remote dlclose(handle) in
+ * the target. Lowest free number after 40. */
+#define MEMD_IOCTL_LOADSO_UNLOAD _IOWR('W', 41, struct memd_loadso_unload_cmd)
+
 /* Symbol bootstrap (struct below): userspace delivers kernel addresses
  * for file helpers GKI protects from unsigned modules, so the kallsyms
  * parser needs no direct imports. Lowest free number after 39. */
@@ -349,6 +353,7 @@ int do_touch_calibrate(struct socket* sock, void __user* arg);
 int do_virtual_input_create(struct socket* sock, void __user* arg);
 int do_load_sotoapp(struct socket* sock, void __user* arg);
 int do_load_sosutoapp(struct socket* sock, void __user* arg);
+int do_loadso_unload(struct socket* sock, void __user* arg);
 int do_bootstrap(struct socket* sock, void __user* arg);
 
 typedef int (*ioctl_handler_t)(struct socket* sock, void __user* arg);
@@ -402,6 +407,7 @@ static const struct ioctl_cmd_map {
     {.cmd = MEMD_IOCTL_VIRTUAL_INPUT_CREATE, .handler = do_virtual_input_create},
     {.cmd = MEMD_IOCTL_LOAD_SOTOAPP, .handler = do_load_sotoapp},
     {.cmd = MEMD_IOCTL_LOAD_SOSUTOAPP, .handler = do_load_sosutoapp},
+    {.cmd = MEMD_IOCTL_LOADSO_UNLOAD, .handler = do_loadso_unload},
     {.cmd = MEMD_IOCTL_BOOTSTRAP, .handler = do_bootstrap},
     {.cmd = 0, .handler = NULL} /* Sentinel to mark end of array */
 };

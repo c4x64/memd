@@ -44,6 +44,9 @@ jobs:
       - name: Test KernelCI batch preparation
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
+      - name: Test module loader tools
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
+
       - name: Verify client.h matches kernel headers
         run: python3 .github/scripts/check_client_h.py
 
@@ -53,6 +56,11 @@ jobs:
           cp /tmp/client_t.c /tmp/client_t.cpp
           gcc -fsyntax-only -Wall -Werror -std=gnu89 -I. /tmp/client_t.c
           g++ -fsyntax-only -Wall -Werror -I. /tmp/client_t.cpp
+
+      - name: Compile-check memd.hpp (C++17)
+        run: |
+          printf '#include "memd.hpp"\nint main(void){return 0;}\n' > /tmp/memd_hpp_t.cpp
+          g++ -fsyntax-only -Wall -Werror -std=c++17 -I. /tmp/memd_hpp_t.cpp
 
   kcidb-readiness:
     name: Check KernelCI credentials

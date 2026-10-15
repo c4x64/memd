@@ -438,7 +438,8 @@ struct memd_virtual_input_cmd {
  * loadsosutoapp: same, but uid 0 + all capabilities for the duration of
  * the dlopen call only (euid/fsuid untouched — see kmod header), then
  * restored. MEMD_LOADSO_EPHEMERAL dlcloses after init so the linker
- * itself unloads the library (traceless-by-unload). */
+ * itself unloads the library (traceless-by-unload). MEMD_IOCTL_LOADSO_UNLOAD
+ * drops a resident library the same way (hotswap primitive). */
 struct memd_loadso_cmd {
     pid_t pid;           /* Input: target process (or thread) ID */
     char path[256];      /* Input: absolute .so path, NUL-terminated */
@@ -449,10 +450,18 @@ struct memd_loadso_cmd {
     int entry_result;    /* Output: entry return, truncated to int */
 };
 
+/* Hotswap unload: remote dlclose(handle). Zeroes handle on success. */
+struct memd_loadso_unload_cmd {
+    pid_t pid;           /* Input: target process (or thread) ID */
+    uintptr_t handle;    /* Input: dlopen handle; zeroed on success */
+    int result;          /* Output: 0 ok, else -errno */
+};
+
 #define MEMD_LOADSO_EPHEMERAL 1
 
 #define MEMD_IOCTL_LOAD_SOTOAPP _IOWR('W', 38, struct memd_loadso_cmd)
 #define MEMD_IOCTL_LOAD_SOSUTOAPP _IOWR('W', 39, struct memd_loadso_cmd)
+#define MEMD_IOCTL_LOADSO_UNLOAD _IOWR('W', 41, struct memd_loadso_unload_cmd)
 
 /* Symbol bootstrap: kernel addresses for file helpers GKI protects
  * from unsigned modules. Userspace reads them from /proc/kallsyms
@@ -784,6 +793,48 @@ static inline int memd_load_so(int fd, pid_t pid, const char *path,
     if (out_entry)
         *out_entry = cmd.entry_result;
     return cmd.result;
+}
+
+/* Drop a resident library: remote dlclose(handle) in the target. The
+ * linker unmaps it and cleans its lists (hotswap primitive). Returns
+ * 0 ok / -errno; handle is zeroed by the driver on success. */
+static inline int memd_unload_so(int fd, pid_t pid, uintptr_t handle) {
+    struct memd_loadso_unload_cmd cmd;
+    if (fd < 0 || pid <= 0 || !handle) {
+        errno = EINVAL;
+        return -EINVAL;
+    }
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.pid = pid;
+    cmd.handle = handle;
+    if (memd_call(fd, MEMD_IOCTL_LOADSO_UNLOAD, &cmd) < 0)
+        return -errno;
+    return cmd.result;
+}
+
+/* Hotswap: load a new library (persistent, entry runs), then unload
+ * the old handle. Returns 0 ok / -errno; the new handle and the entry
+ * result come back via out params. On unload failure the new library
+ * stays resident and its handle is returned (caller decides). */
+static inline int memd_hotswap_so(int fd, pid_t pid, uintptr_t old_handle,
+                                  const char *path, const char *entry,
+                                  int su, uintptr_t *out_handle,
+                                  int *out_entry) {
+    uintptr_t handle = 0;
+    int entry_result = 0, r;
+    if (fd < 0 || pid <= 0 || !path || !path[0] || !out_handle) {
+        errno = EINVAL;
+        return -EINVAL;
+    }
+    r = memd_load_so(fd, pid, path, entry, su, 0, &handle, &entry_result);
+    if (r < 0)
+        return r;
+    *out_handle = handle;
+    if (out_entry)
+        *out_entry = entry_result;
+    if (old_handle && old_handle != handle)
+        return memd_unload_so(fd, pid, old_handle);
+    return 0;
 }
 
 /* Deliver bootstrap file-helper addresses (see memd_bootstrap_cmd).

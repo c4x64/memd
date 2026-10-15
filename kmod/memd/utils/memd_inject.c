@@ -45,6 +45,7 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
@@ -399,7 +400,14 @@ static int resolve_lib_sym(struct task_struct *t, uintptr_t base,
     return 0;
 }
 
-/* ---- seize / release (SIGSTOP + wait_task_inactive, SIGCONT) ---- */
+/* ---- seize / release (SIGSTOP + wait_task_inactive, SIGCONT) ----
+ * All entry points below serialize on memd_inj_mutex: concurrent
+ * inject/unload calls on one target would otherwise share the same
+ * below-SP scratch and clobber each other's stub/regs. Sleepable
+ * (ioctl process context; remote_call sleeps), never held across
+ * anything but one inject/unload operation. */
+static DEFINE_MUTEX(memd_inj_mutex);
+
 static int send_task_sig(struct task_struct *task, int sig)
  {
     struct siginfo info;
@@ -593,7 +601,8 @@ fail_read:
     return -EFAULT;
 }
 
-static int su_unstage(struct task_struct *task, struct memd_su_saved *s)
+static int su_unstage(struct task_struct *task, struct memd_su_saved *s,
+                      bool *killed_out)
  {
     int err = 0;
     if (!s->active || !s->cred)
@@ -612,6 +621,8 @@ static int su_unstage(struct task_struct *task, struct memd_su_saved *s)
         memd_err("su_unstage: restore impossible; killing target\n");
         if (task)
             send_task_sig(task, SIGKILL);
+        if (killed_out)
+            *killed_out = true;
         err = -EFAULT;
     }
     {
@@ -631,7 +642,8 @@ static int su_unstage(struct task_struct *task, struct memd_su_saved *s)
  * original regs restored (caller SIGCONTs exactly once at the end). */
 static int remote_call(struct task_struct *task, struct mm_struct *mm,
                        uintptr_t fn, uintptr_t a0, const void *extra,
-                       size_t extralen, uintptr_t *retval, int timeout_ms)
+                       size_t extralen, uintptr_t *retval, int timeout_ms,
+                       bool *killed_out)
  {
     unsigned long saved[MEMD_PT_NREGS], regs[MEMD_PT_NREGS];
     uintptr_t regs_va, sp, base, flag_va, path_va, stub_va;
@@ -678,8 +690,16 @@ static int remote_call(struct task_struct *task, struct mm_struct *mm,
     regs[2] = (uint64_t)flag_va;
     regs[MEMD_PT_PC] = (uint64_t)stub_va;
     regs[30] = (uint64_t)(stub_va + 36);
-    if (write_regs(task, regs_va, regs))
+    /* A killed target must not be wiped (stub may be executing) but
+     * still gets SIGCONT so the pending SIGKILL is delivered instead
+     * of leaking a stopped thread. Callers check *killed_out. */
+    if (write_regs(task, regs_va, regs)) {
+        /* Still STOPPED but regs torn: never resume, fail closed. */
+        send_task_sig(task, SIGKILL);
+        if (killed_out)
+            *killed_out = true;
         return -EFAULT;
+    }
     memd_inj_release(task);
     ret = -ETIMEDOUT;
     for (tries = 0; tries * MEMD_INJ_POLL_MS < timeout_ms; tries++) {
@@ -700,11 +720,15 @@ static int remote_call(struct task_struct *task, struct mm_struct *mm,
         /* Cannot safely recapture a running, hijacked thread. */
         memd_err("remote_call: target %d cannot be recaptured; killing\n", task->pid);
         send_task_sig(task, SIGKILL);
+        if (killed_out)
+            *killed_out = true;
         return -ETIMEDOUT;
     }
     if (write_regs(task, regs_va, saved)) {
         memd_err("remote_call: register restore failed for target %d\n", task->pid);
         send_task_sig(task, SIGKILL);
+        if (killed_out)
+            *killed_out = true;
         return -EFAULT;
     }
     return ret;
@@ -756,6 +780,7 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
     size_t pathlen, entrylen;
     const char *base;
     int ret, ephemeral;
+    bool killed = false;
     if (!path || !handle_out)
         return -EFAULT;
     *handle_out = 0;
@@ -770,15 +795,28 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
     if (entry && (entrylen == 0 || entrylen >= 64 || strchr(entry, '/')))
         return -EINVAL;
     ephemeral = (flags & MEMD_LOADSO_EPHEMERAL) != 0;
-    if (!is_pid_alive(pid))
-        return -ESRCH;
+    if (pid == task_pid_vnr(current))
+        return -EINVAL;
+    mutex_lock(&memd_inj_mutex);
+    if (!is_pid_alive(pid)) {
+        ret = -ESRCH;
+        goto out_lock;
+    }
     task = get_target_task(pid);
-    if (!task)
-        return -ESRCH;
+    if (!task) {
+        ret = -ESRCH;
+        goto out_lock;
+    }
     mm = get_task_mm(task);
     if (!mm) {
         ret = -ESRCH;
         goto out_task;
+    }
+    /* Refuse same-mm targets (sibling thread or self via another TID):
+     * hijacking our own address space below-SP scratch corrupts us. */
+    if (mm == current->mm) {
+        ret = -EINVAL;
+        goto out_mm;
     }
     memd_learn_task_stack_once();
     /* Remote reg restore depends on a usable, learned kernel stack
@@ -806,16 +844,17 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
         goto out_release;
     }
     ret = remote_call(task, mm, addrs.dlopen_va, 0, path, pathlen + 1,
-                      &retval, MEMD_INJ_CALL_TRIES * MEMD_INJ_POLL_MS);
+                      &retval, MEMD_INJ_CALL_TRIES * MEMD_INJ_POLL_MS,
+                      &killed);
     if (ret) {
-        if (su && su_unstage(task, &su_state))
+        if (su && su_unstage(task, &su_state, &killed))
             ret = -EFAULT;
         goto out_release;
     }
     if (!retval) {
         /* dlopen returned NULL (bad path/arch mismatch): fail closed. */
         ret = -ELIBBAD;
-        if (su && su_unstage(task, &su_state))
+        if (su && su_unstage(task, &su_state, &killed))
             ret = -EFAULT;
         goto out_release;
     }
@@ -827,30 +866,31 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
         base = memd_basename(path);
         if (!*base) {
             ret = -EINVAL;
-            if (su && su_unstage(task, &su_state))
+            if (su && su_unstage(task, &su_state, &killed))
                 ret = -EFAULT;
             goto out_release;
         }
         lib_base = get_module_base(pid, (char *)base, 0);
         if (!lib_base) {
             ret = -ENOENT;
-            if (su && su_unstage(task, &su_state))
+            if (su && su_unstage(task, &su_state, &killed))
                 ret = -EFAULT;
             goto out_release;
         }
         if (resolve_lib_sym(task, lib_base, entry, &entry_va)) {
             ret = -ENOENT;
-            if (su && su_unstage(task, &su_state))
+            if (su && su_unstage(task, &su_state, &killed))
                 ret = -EFAULT;
             goto out_release;
         }
         retval = 0;
         ret = remote_call(task, mm, entry_va, *handle_out, NULL, 0,
-                          &retval, MEMD_INJ_CALL_TRIES * MEMD_INJ_POLL_MS);
+                          &retval, MEMD_INJ_CALL_TRIES * MEMD_INJ_POLL_MS,
+                          &killed);
         if (entry_out)
             *entry_out = (int)retval;
         if (ret) {
-            if (su && su_unstage(task, &su_state))
+            if (su && su_unstage(task, &su_state, &killed))
                 ret = -EFAULT;
             goto out_release;
         }
@@ -860,29 +900,34 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
          * linker; no knowledge of the layout is required here. */
         retval = 0;
         if (remote_call(task, mm, addrs.dlclose_va, *handle_out, NULL, 0,
-                        &retval, MEMD_INJ_CALL_TRIES * MEMD_INJ_POLL_MS) ||
+                        &retval, MEMD_INJ_CALL_TRIES * MEMD_INJ_POLL_MS,
+                        &killed) ||
             retval) {
             ret = -EIO;
-            if (su && su_unstage(task, &su_state))
+            if (su && su_unstage(task, &su_state, &killed))
                 ret = -EFAULT;
             goto out_release;
         }
         *handle_out = 0;
     }
-    if (su && su_unstage(task, &su_state))
+    if (su && su_unstage(task, &su_state, &killed))
         ret = -EFAULT;
     else
         ret = 0;
 out_release:
     /* Wipe our scratch before resume (still stopped here on all paths
      * that passed the seize phase; best-effort, and not fatal to
-     * the injection). */
-    wipe_scratch(task);
+     * the injection). Skipped after a kill: the stub may be executing
+     * and SIGCONT must go through to deliver the pending SIGKILL. */
+    if (!killed)
+        wipe_scratch(task);
     memd_inj_release(task);
 out_mm:
     mmput(mm);
 out_task:
     put_task_struct(task);
+out_lock:
+    mutex_unlock(&memd_inj_mutex);
     return ret;
 }
 
@@ -925,6 +970,98 @@ int do_load_sosutoapp(struct socket* sock, void __user* arg)
     cmd.result = ret;
     cmd.handle = handle;
     cmd.entry_result = entry_result;
+    if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+
+/* ---- top-level unload: remote dlclose(handle) ----
+ * Hotswap primitive (see LXGR.hpp): drops a resident library the same
+ * way the ephemeral path does — the target's own linker unmaps it and
+ * cleans its lists, so no maps/solist residue remains. Same seize/
+ * remote-call/restore/wipe discipline as inject_so, minus su/path. */
+static int unload_so(pid_t pid, uintptr_t handle)
+ {
+    struct task_struct *task = NULL;
+    struct mm_struct *mm = NULL;
+    uintptr_t libc_base, retval;
+    struct memd_elf_addrs addrs;
+    bool killed = false;
+    int ret;
+    if (!handle)
+        return -EINVAL;
+    if (pid == task_pid_vnr(current))
+        return -EINVAL;
+    mutex_lock(&memd_inj_mutex);
+    if (!is_pid_alive(pid)) {
+        ret = -ESRCH;
+        goto out_lock;
+    }
+    task = get_target_task(pid);
+    if (!task) {
+        ret = -ESRCH;
+        goto out_lock;
+    }
+    mm = get_task_mm(task);
+    if (!mm) {
+        ret = -ESRCH;
+        goto out_task;
+    }
+    /* Refuse same-mm targets (sibling thread or self via another TID):
+     * hijacking our own address space below-SP scratch corrupts us. */
+    if (mm == current->mm) {
+        ret = -EINVAL;
+        goto out_mm;
+    }
+    memd_learn_task_stack_once();
+    if (memd_thread_size() != 16384u && memd_thread_size() != 65536u) {
+        ret = -ENODEV;
+        goto out_mm;
+    }
+    libc_base = get_module_base(pid, "libc.so", 0);
+    if (!libc_base) {
+        ret = -ENOENT;
+        goto out_mm;
+    }
+    if (resolve_libc_syms(task, libc_base, &addrs, 1)) {
+        ret = -ENOENT;
+        goto out_mm;
+    }
+    if (seize_task(task)) {
+        ret = -ETIMEDOUT;
+        goto out_mm;
+    }
+    retval = 0;
+    ret = remote_call(task, mm, addrs.dlclose_va, handle, NULL, 0,
+                      &retval, MEMD_INJ_CALL_TRIES * MEMD_INJ_POLL_MS,
+                      &killed);
+    if (!ret && retval)
+        ret = -EIO;
+    if (!killed)
+        wipe_scratch(task);
+    memd_inj_release(task);
+out_mm:
+    mmput(mm);
+out_task:
+    put_task_struct(task);
+out_lock:
+    mutex_unlock(&memd_inj_mutex);
+    return ret;
+}
+
+int do_loadso_unload(struct socket* sock, void __user* arg)
+ {
+    struct memd_loadso_unload_cmd cmd;
+    int ret;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    ret = unload_so(cmd.pid, cmd.handle);
+    cmd.result = ret;
+    if (!ret)
+        cmd.handle = 0;
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
     return 0;
