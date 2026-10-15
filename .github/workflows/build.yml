@@ -335,6 +335,15 @@ jobs:
           [ -d "$KDIR_RESOLVED" ] || { echo "FATAL: no kdir for $IMG (KERNEL_SRC=$KERNEL_SRC)"; ls /opt/ddk/kdir/; exit 1; }
           echo "kdir=$KDIR_RESOLVED"
           ls "$KDIR_RESOLVED" | head -20
+          # Symvers census: empty/missing Module.symvers here means
+          # modpost emits CRC-less modules (6.x DDKs), which no-FORCE_LOAD
+          # kernels refuse. This line documents it per DDK in the log.
+          if [ -f "$KDIR_RESOLVED/Module.symvers" ]; then
+            wc -c "$KDIR_RESOLVED/Module.symvers"
+            head -c 300 "$KDIR_RESOLVED/Module.symvers"; echo
+          else
+            echo "no Module.symvers in kdir"
+          fi
           
           if command -v pahole >/dev/null 2>&1 && [ -f "$KDIR_RESOLVED/vmlinux" ]; then
             echo "=== pahole task_struct ($IMG) ==="
