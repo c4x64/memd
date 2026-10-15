@@ -8,7 +8,9 @@ import os
 import sys
 
 MIN_TARGETS = 10_001
-BATCH_SIZE = 256
+# Stays under GitHub's 256-job matrix ceiling with margin: a batch that
+# hits the ceiling exactly fails job creation with no job record.
+BATCH_SIZE = 250
 IDENTITY_FIELDS = (
     "kernel_hash",
     "git_repository_url",

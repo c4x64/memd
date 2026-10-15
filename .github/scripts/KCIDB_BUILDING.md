@@ -25,7 +25,7 @@ credential project. It must also have BigQuery Data Viewer
 This key is used solely by the manifest-query job; kernel builds do not
 require it.
 
-Each run compiles at most 256 manifest records, with at most 32 jobs
+Each run compiles at most 250 manifest records, with at most 32 jobs
 running concurrently. A batch result stores its module, result JSON, and build
 log as GitHub Actions artifacts. Kernel source checkouts are cached by
 target key in GitHub Actions Cache; entries are retained on a best-effort
