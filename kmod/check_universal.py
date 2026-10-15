@@ -102,6 +102,23 @@ def main():
             cfi_bad.append(sym)
     if cfi_bad:
         die("CFI imports in artifact: " + " ".join(sorted(set(cfi_bad))))
+    # Every artifact: deny imports proven missing or GKI-protected on
+    # trimmed kernels (ranchu 6.1: unknown-symbol load refusal). These
+    # go through the socket bootstrap table or runtime pointers instead.
+    denied_all = {"filp_open", "kernel_read", "__put_cred", "send_signal",
+                  "vmalloc_exec", "input_dev_valid", "pte_read", "pte_exec",
+                  "pte_swp_offset", "pte_swp_type"}
+    found_all = []
+    for line in open(undef_path):
+        sym = line.split()
+        if not sym:
+            continue
+        sym = sym[-1].split('.')[0]
+        if sym in denied_all:
+            found_all.append(sym)
+    if found_all:
+        die("denied imports (use bootstrap/runtime indirection): " +
+            " ".join(sorted(set(found_all))))
     # Universal image only: deny imports that vendor kernels strip even
     # when GKI exports them (proven on Samsung 5.15). pfn_valid goes
     # through memd_pfn_ok (runtime chain); MMIO uses volatile access;
