@@ -1,0 +1,5 @@
+# ExampleModule branch root
+build/
+*.o
+*.dex
+local.properties
