@@ -28,7 +28,12 @@ bool memd_hide_contains_ns(pid_t pid, struct pid_namespace *ns);
 int memd_hide_get_ns_count(struct pid_namespace *ns);
 int memd_hide_collect_pids(pid_t *buf, size_t buf_size, size_t *count,
                             struct pid_namespace *ns);
+/* Debug-only unpinned traversal: no in-tree callers. Lookup runs under
+ * hide_lock but the returned pointer takes no ref, so it is valid only
+ * while the caller otherwise guarantees the entry's lifetime. */
 struct memd_hide_entry *memd_hide_get_first(void);
+/* Debug-only unpinned traversal: no in-tree callers. Same lifetime rule
+ * as memd_hide_get_first; NULL input yields NULL. */
 struct memd_hide_entry *memd_hide_get_next(struct memd_hide_entry *entry);
 
 #endif /* MEMD_HIDE_H */

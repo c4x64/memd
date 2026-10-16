@@ -35,6 +35,21 @@ REQUIRED_FIELDS = (
 )
 
 
+def _count_number(value, field, row_number):
+    """Source-count field as int; junk becomes ValueError, not TypeError."""
+    if isinstance(value, bool):
+        raise ValueError(
+            "Row %d: source count %s is not a number." % (row_number, field)
+        )
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    raise ValueError(
+        "Row %d: source count %s is not a number." % (row_number, field)
+    )
+
+
 def _required_text(record, field, row_number):
     value = record.get(field)
     if not isinstance(value, str) or not value.strip():
@@ -106,9 +121,12 @@ def load_snapshot(path):
         if all(record.get(field) is not None for field in count_fields):
             metadata.add(
                 (
-                    int(record["source_unique_count"]),
-                    int(record["source_ranchu_count"]),
-                    int(record["source_consumer_count"]),
+                    _count_number(record["source_unique_count"],
+                                  "source_unique_count", index),
+                    _count_number(record["source_ranchu_count"],
+                                  "source_ranchu_count", index),
+                    _count_number(record["source_consumer_count"],
+                                  "source_consumer_count", index),
                 )
             )
 
@@ -137,9 +155,16 @@ def load_snapshot(path):
             raise ValueError("The KCIDB query returned inconsistent source counts.")
         total, ranchu_total, consumer_total = metadata.pop()
     elif source_counts is not None:
-        total = int(source_counts["unique"])
-        ranchu_total = int(source_counts["ranchu"])
-        consumer_total = int(source_counts["oem_consumer"])
+        for key in ("unique", "ranchu", "oem_consumer"):
+            if source_counts.get(key) is None:
+                raise ValueError(
+                    "The manifest source_counts has no %r." % key
+                )
+        total = _count_number(source_counts["unique"], "unique", -1)
+        ranchu_total = _count_number(source_counts["ranchu"], "ranchu", -1)
+        consumer_total = _count_number(
+            source_counts["oem_consumer"], "oem_consumer", -1
+        )
     else:
         total, ranchu_total, consumer_total = (
             len(normalized),
@@ -210,14 +235,27 @@ def main():
     if args.target_key_for_index is not None:
         with open(args.manifest, encoding="utf-8") as stream:
             manifest = json.load(stream)
+        if not isinstance(manifest, dict) or not isinstance(
+            manifest.get("records"), list
+        ):
+            raise ValueError(
+                "The manifest contains no target records list."
+            )
         records = manifest["records"]
         index = args.target_key_for_index
-        if index < 0 or index >= len(records):
+        if not records or index < 0 or index >= len(records):
             raise ValueError(
                 "target index %d is outside the manifest (0..%d)"
                 % (index, len(records) - 1)
             )
-        print(target_key(records[index]))
+        row = records[index]
+        if not isinstance(row, dict) or any(
+            field not in row for field in IDENTITY_FIELDS
+        ):
+            raise ValueError(
+                "manifest record %d has no complete identity fields." % index
+            )
+        print(target_key(row))
         return
 
     if not args.input or not args.matrix_output:
@@ -270,8 +308,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, KeyError, IndexError, TypeError,
-            json.JSONDecodeError) as error:
+    except (OSError, ValueError) as error:
         print(f"KCIDB batch preparation failed: {error}", file=sys.stderr)
         sys.exit(1)
 # .github/scripts/kcidb_batch.py[∂]

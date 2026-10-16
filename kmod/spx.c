@@ -794,7 +794,10 @@ int main(int argc, char **argv)
      * (major.minor) so 6.1 never matches 6.12. Cross-generation attempts
      * are refused outright: a wrong generation's structs would mis-walk,
      * strictly worse than not loading. All -dbg forensics builds are
-     * NEVER auto-selected — explicit --ko only. */
+     * NEVER auto-selected — explicit --ko only. Universal-first ordering
+     * below mirrors run.sh (same first pick for the same kernel); run.sh
+     * has no matrix fallback (explicit $1 only), SPX tries the matrix
+     * matches after universal. */
     state_load(&st);
     {
         struct utsname u;
@@ -811,6 +814,16 @@ int main(int argc, char **argv)
         if (sscanf(rel, "%d.%d", &g_kmaj, &g_kmin) != 2) {
             g_kmaj = 0;
             g_kmin = 0;
+        }
+        /* android11-5.4 is documented NO-GO: no DDK image was ever
+         * published (matrix excludes it; universal is a 5.10 baseline
+         * and the in-kernel layout tables leave 5.4 unmapped). Refuse
+         * before any attempt, including explicit --ko (mirrors run.sh). */
+        if (g_kmaj == 5 && g_kmin == 4) {
+            jlog("select", "NO-GO: android11-5.4 unsupported (no DDK image)");
+            if (jfp)
+                fclose(jfp);
+            return 1;
         }
         for (pass = 0; pass < 2 && norder < SPX_NFLAVORS - 1; pass++) {
             for (f = 0; f < SPX_NFLAVORS - 1 && norder < SPX_NFLAVORS - 1; f++) {

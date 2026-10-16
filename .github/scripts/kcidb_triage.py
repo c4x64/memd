@@ -22,6 +22,16 @@ ERROR_RE = re.compile(
 )
 
 
+def _record_text(record, field, index):
+    """Required manifest string field; ValueError (not KeyError) if absent."""
+    value = record.get(field) if isinstance(record, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            "manifest record %d has no usable %r" % (index, field)
+        )
+    return value.strip()
+
+
 def load_results(results_dir):
     rows = {}
     for path in sorted(glob.glob(os.path.join(results_dir, "worker-*.jsonl"))):
@@ -32,11 +42,32 @@ def load_results(results_dir):
                     continue
                 try:
                     row = json.loads(line)
-                    rows[int(row["index"])] = row
-                except (ValueError, KeyError, TypeError) as error:
+                except ValueError as error:
                     raise ValueError(
                         "%s:%d: bad result row: %s" % (path, lineno, error)
                     )
+                if not isinstance(row, dict) or "index" not in row:
+                    raise ValueError(
+                        "%s:%d: bad result row: not an indexed object"
+                        % (path, lineno)
+                    )
+                index = row["index"]
+                if isinstance(index, bool):
+                    raise ValueError(
+                        "%s:%d: bad result row: index is not an integer"
+                        % (path, lineno)
+                    )
+                if isinstance(index, int):
+                    pass
+                elif (isinstance(index, str)
+                        and index.strip().lstrip("-").isdigit()):
+                    index = int(index.strip())
+                else:
+                    raise ValueError(
+                        "%s:%d: bad result row: index %r is not an integer"
+                        % (path, lineno, row["index"])
+                    )
+                rows[index] = row
     return rows
 
 
@@ -67,24 +98,35 @@ def triage(manifest_path, results_dir):
     by_tree_branch = Counter()
     failures = []
     for index, record in records.items():
+        if not isinstance(record, dict):
+            raise ValueError("manifest record %d is not an object" % index)
+        architecture = _record_text(record, "architecture", index)
+        tree_name = _record_text(record, "tree_name", index)
+        branch = _record_text(record, "kernel_branch", index)
+        config = _record_text(record, "config_name", index)
+        commit = _record_text(record, "kernel_hash", index)
         row = rows.get(index)
         status = (row or {}).get("status", "missing")
-        by_arch[(record["architecture"], status)] += 1
-        by_compiler[(record.get("compiler", "?"), status)] += 1
-        by_tree_branch[
-            (record["tree_name"], record["kernel_branch"], status)
-        ] += 1
+        if not isinstance(status, str):
+            raise ValueError(
+                "result row %d has a non-string status %r" % (index, status)
+            )
+        compiler = record.get("compiler") or "?"
+        target_key = str((row or {}).get("target_key", "?"))[:16]
+        by_arch[(architecture, status)] += 1
+        by_compiler[(compiler, status)] += 1
+        by_tree_branch[(tree_name, branch, status)] += 1
         if status != "pass":
             failures.append(
                 {
                     "index": index,
                     "status": status,
-                    "arch": record["architecture"],
+                    "arch": architecture,
                     "compiler": record.get("compiler"),
-                    "config": record["config_name"],
-                    "branch": record["kernel_branch"],
-                    "commit": record["kernel_hash"][:12],
-                    "target_key": (row or {}).get("target_key", "?")[:16],
+                    "config": config,
+                    "branch": branch,
+                    "commit": commit[:12],
+                    "target_key": target_key,
                     "log_hits": first_errors(
                         os.path.join(results_dir, "%d.log" % index)
                     ),
@@ -111,7 +153,7 @@ def main(argv=None):
 
     try:
         report = triage(args.manifest, args.results_dir)
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except (OSError, ValueError) as error:
         print("triage failed: %s" % error, file=sys.stderr)
         return 1
     total = report["total"]

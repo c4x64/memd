@@ -26,6 +26,9 @@ static int memd_read_osrelease(char *out, size_t cap)
         return -1;
     if (memd_filp_open("/proc/sys/kernel/osrelease", O_RDONLY, 0, &f) != 0)
         return -1;
+    /* Load-bearing, not redundant: memd_filp_open returns 0 for any
+     * non-NULL result including ERR_PTR, so a failed filp_open arrives
+     * here as return 0 with f == ERR_PTR. */
     if (IS_ERR(f))
         return -1;
     n = memd_kernel_read(f, out, cap - 1, &pos);
@@ -46,6 +49,12 @@ static int memd_read_osrelease(char *out, size_t cap)
 
 int memd_net_gen(void)
  {
+    /* No lock: concurrent first-use may recompute, which is benign and
+     * idempotent. The result is a pure function of osrelease content
+     * (a boot-constant string) parsed with only stack-local state, so
+     * every racer computes the same gen; the -2 sentinel means "unset",
+     * -1 means "unknown, fail closed". Worst case is duplicate
+     * memd_info logs, never a wrong generation. */
     static int gen = -2;
     char rel[72];
     int i, maj, min, j;

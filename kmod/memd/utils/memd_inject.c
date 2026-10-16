@@ -10,7 +10,7 @@
  *     one sane candidate (pc/sp/pstate checks) or abort.
  *  5. write stub + path + flag words into below-sp scratch with
  *     memd_copy_to_task (writes verified by return code), flush each
- *     touched page for icache coherence, save regs, set pc/x0/x2/lr
+ *     touched page for icache coherence, save regs, set pc/x0/x19/lr
  *     (readback-verified), SIGCONT, poll the flag with timeout.
  *  6. re-STOP, restore saved regs (verified), optional dlclose round
  *     (ephemeral), su restore, final SIGCONT, drop refs.
@@ -53,6 +53,16 @@
 #include <linux/signal.h>
 #include <linux/string.h>
 
+/* Timing budget vs mutex hold (DoS lens). Every remote_call runs under
+ * memd_inj_mutex because all ops share one below-SP scratch window, so a
+ * worst-case inject holds the mutex ~5s (seize) + 3x10s (dlopen, entry,
+ * dlclose) ~= 35s. The 10s per-call budget stands: real constructors
+ * (relocations, dex work on low-end parts) take seconds and a shorter
+ * fuse would turn slow targets into spurious recapture-kills. The hog is
+ * bounded, fail-closed (timeout always recaptures or kills, never leaks
+ * a hijacked thread), and admin-only (CAP_SYS_ADMIN callers), so an
+ * unprivileged target cannot weaponize it — worst case a second admin
+ * ioctl waits. Do not shorten without measuring slow-device init. */
 #define MEMD_INJ_SEIZE_TRIES 250   /* 250 x 20ms = 5s to reach STOPPED */
 #define MEMD_INJ_CALL_TRIES  500   /* 500 x 20ms = 10s for dlopen return */
 #define MEMD_INJ_POLL_MS     20
@@ -711,9 +721,14 @@ static int remote_call(struct task_struct *task, struct mm_struct *mm,
     if (flush_user_range(mm, stub_va, sizeof(stub) + 1024))
         return -EFAULT;
     regs[0] = extralen ? (uint64_t)path_va : (uint64_t)a0;
-    regs[2] = (uint64_t)flag_va;
     regs[19] = (uint64_t)flag_va;
     regs[MEMD_PT_PC] = (uint64_t)stub_va;
+    /* x30 preset: clobbered by the stub's BLR before the call, so it
+     * never steers execution (the stub ends in B ., never RET). Kept as
+     * a crash breadcrumb: LR inside our scratch identifies the hijack
+     * window post-mortem. x2 is deliberately NOT set (dead store
+     * removed): the stub takes the flag via x19 only; x1/x3 are rebuilt
+     * in-stub and x0 carries path/handle. */
     regs[30] = (uint64_t)(stub_va + 40);
     /* Run with SP below the scratch: dlopen pushes frames and signal
      * frames land below SP, so leaving SP above the stub would let the
@@ -828,6 +843,7 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
     const char *base;
     int ret, ephemeral;
     bool killed = false;
+    bool touched = false;
     if (!path || !handle_out)
         return -EFAULT;
     *handle_out = 0;
@@ -886,16 +902,28 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
         ret = -ETIMEDOUT;
         goto out_mm;
     }
-    /* Close the resolve-vs-seize TOCTOU: a pre-seize exec/remap would
-     * leave libc_base (and the decoded fn VAs) pointing at the old
-     * address space. Re-read while stopped; any drift aborts. */
+    /* Close the resolve-vs-seize TOCTOU. Pre-seize reads are read-only
+     * and bounded (access_process_vm pins per page under the target's
+     * own mmap lock; every short read aborts), so a racing exec/remap
+     * can only yield stale bytes, never a kernel fault — but a stale
+     * decode could still point at the wrong fn even when the base is
+     * unchanged. Re-read while stopped and re-decode: the stopped-time
+     * values below are authoritative and the only ones ever executed.
+     * The pre-seize pass is just a fail-fast probe so we never STOP a
+     * target we cannot call into. */
     {
         uintptr_t fresh;
+        struct memd_elf_addrs fresh_addrs;
         fresh = get_module_base(pid, "libc.so", 0);
         if (!fresh || fresh != libc_base) {
             ret = -ENOENT;
             goto out_release;
         }
+        if (resolve_libc_syms(task, fresh, &fresh_addrs, ephemeral)) {
+            ret = -ENOENT;
+            goto out_release;
+        }
+        addrs = fresh_addrs;
     }
     if (su && su_stage(task, &su_state)) {
         ret = -EACCES;
@@ -904,6 +932,7 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
     ret = remote_call(task, mm, addrs.dlopen_va, 0, path, pathlen + 1,
                       &retval, MEMD_INJ_CALL_TRIES * MEMD_INJ_POLL_MS,
                       &killed);
+    touched = true;
     if (ret) {
         if (su && su_unstage(task, &su_state, &killed))
             ret = -EFAULT;
@@ -945,6 +974,7 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
         ret = remote_call(task, mm, entry_va, *handle_out, NULL, 0,
                           &retval, MEMD_INJ_CALL_TRIES * MEMD_INJ_POLL_MS,
                           &killed);
+        touched = true;
         if (entry_out)
             *entry_out = (int)retval;
         if (ret) {
@@ -957,6 +987,7 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
         /* Linker unloads itself: maps/solist cleaned by Android's own
          * linker; no knowledge of the layout is required here. */
         retval = 0;
+        touched = true;
         if (remote_call(task, mm, addrs.dlclose_va, *handle_out, NULL, 0,
                         &retval, MEMD_INJ_CALL_TRIES * MEMD_INJ_POLL_MS,
                         &killed) ||
@@ -976,8 +1007,10 @@ out_release:
     /* Wipe our scratch before resume (still stopped here on all paths
      * that passed the seize phase; best-effort, and not fatal to
      * the injection). Skipped after a kill: the stub may be executing
-     * and SIGCONT must go through to deliver the pending SIGKILL. */
-    if (!killed)
+     * and SIGCONT must go through to deliver the pending SIGKILL.
+     * Skipped when no remote_call ever ran (early aborts): nothing was
+     * written, matching unload_so which never wipes pre-call paths. */
+    if (!killed && touched)
         wipe_scratch(task);
     memd_inj_release(task);
 out_mm:
@@ -1037,7 +1070,10 @@ int do_load_sosutoapp(struct socket* sock, void __user* arg)
  * Hotswap primitive (see LXGR.hpp): drops a resident library the same
  * way the ephemeral path does — the target's own linker unmaps it and
  * cleans its lists, so no maps/solist residue remains. Same seize/
- * remote-call/restore/wipe discipline as inject_so, minus su/path. */
+ * remote-call/restore/wipe discipline as inject_so (identical timeouts,
+ * recapture-kill, and wipe rules via the shared remote_call path);
+ * only su/path/entry handling differs. Error codes differ by domain
+ * (ELIBBAD on dlopen-NULL vs EIO on dlclose-nonzero), not by policy. */
 static int unload_so(pid_t pid, uintptr_t handle)
  {
     struct task_struct *task = NULL;
@@ -1089,15 +1125,24 @@ static int unload_so(pid_t pid, uintptr_t handle)
         ret = -ETIMEDOUT;
         goto out_mm;
     }
-    /* Same resolve-vs-seize TOCTOU as inject_so: abort on drift. */
+    /* Same resolve-vs-seize TOCTOU as inject_so: re-read while stopped
+     * and re-decode (see above); the stopped-time addrs are the only
+     * ones ever executed. */
     {
         uintptr_t fresh;
+        struct memd_elf_addrs fresh_addrs;
         fresh = get_module_base(pid, "libc.so", 0);
         if (!fresh || fresh != libc_base) {
             memd_inj_release(task);
             ret = -ENOENT;
             goto out_mm;
         }
+        if (resolve_libc_syms(task, fresh, &fresh_addrs, 1)) {
+            memd_inj_release(task);
+            ret = -ENOENT;
+            goto out_mm;
+        }
+        addrs = fresh_addrs;
     }
     retval = 0;
     ret = remote_call(task, mm, addrs.dlclose_va, handle, NULL, 0,

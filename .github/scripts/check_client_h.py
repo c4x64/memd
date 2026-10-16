@@ -360,6 +360,49 @@ def compute_layouts(raw, wanted):
     return out
 
 
+def find_size_collisions(kops, klay, knorm):
+    """Flag shared (type, nr) pairs whose structs encode the same _IOWR code.
+
+    The _IOWR number folds in the struct SIZE, so any two ops sharing a
+    (type, nr) key with equal layout sizes dispatch to the same code --
+    even when their field layouts differ completely. The older canon-body
+    check above only catches byte-identical bodies; this LP64 size check
+    closes the same-size/different-layout hole (e.g. a hypothetical
+    8-byte {int a; int b;} vs 8-byte {short x[4];} on one number).
+    Body-identical pairs are already reported above and skipped here.
+    """
+    errors = []
+    by_code = {}
+    for name, (code, struct) in sorted(kops.items()):
+        if name in EXCLUDED_OPS:
+            continue
+        by_code.setdefault(code, []).append((name, struct))
+    for code, members in sorted(by_code.items()):
+        if len(members) < 2:
+            continue
+        sizes = {}
+        for name, struct in members:
+            if struct == "int":
+                sizes[name] = (struct, 4)
+            elif struct in klay:
+                sizes[name] = (struct, klay[struct][1])
+            # Absent structs are reported by the canon gate; skip here.
+        seen = {}
+        for name, (struct, size) in sorted(sizes.items()):
+            if size in seen:
+                other, ostruct = seen[size]
+                if knorm.get(struct) == knorm.get(ostruct):
+                    continue  # body-identical: already reported above
+                errors.append(
+                    "ioctl code collision on '%s': %s (%s, %d bytes) and "
+                    "%s (%s, %d bytes) encode the same _IOWR number "
+                    "despite different layouts"
+                    % (code, other, ostruct, size, name, struct, size))
+            else:
+                seen[size] = (name, struct)
+    return errors
+
+
 def compare_layouts(knorm, clay, needed):
     """Byte-compare kernel vs client layouts. Returns error strings."""
     errors = []
@@ -407,7 +450,62 @@ def format_layouts(layouts, needed):
     return lines
 
 
+def synthetic_size_collision_selftest():
+    """Prove the size gate catches what the body gate misses.
+
+    Builds two synthetic structs with EQUAL size (8) but DIFFERENT
+    layouts sharing one (type, nr) key, then runs both the canon-body
+    check and find_size_collisions over them:
+      - the body check must MISS (bodies differ) -- the Round-4 hole;
+      - the LP64 size check must FLAG (sizes equal => same _IOWR code).
+    Returns 0 when the gate behaves that way, 1 otherwise. Run with:
+        python3 .github/scripts/check_client_h.py --self-test
+    """
+    raw = {
+        # 8 bytes: a@0+4 b@4+4.
+        "synth_alpha_cmd": "uint32_t a; uint32_t b;",
+        # 8 bytes: w@0+8. Same size, one field instead of two.
+        "synth_beta_cmd": "uint64_t w;",
+    }
+    kops = {
+        "MEMD_IOCTL_SYNTH_ALPHA": ("W99", "synth_alpha_cmd"),
+        "MEMD_IOCTL_SYNTH_BETA": ("W99", "synth_beta_cmd"),
+    }
+    try:
+        klay = compute_layouts(raw, set(raw))
+    except ValueError as error:
+        print("self-test FAIL: layout engine rejected synthetics: %s" % error)
+        return 1
+    for struct, want in (("synth_alpha_cmd", 8), ("synth_beta_cmd", 8)):
+        got = klay[struct][1]
+        if got != want:
+            print("self-test FAIL: %s laid out as %d, want %d"
+                  % (struct, got, want))
+            return 1
+    knorm = {n: canon_type(b) for n, b in raw.items()}
+    # The legacy body check sees different bodies => silent (the hole).
+    bodies = {knorm["synth_alpha_cmd"], knorm["synth_beta_cmd"]}
+    body_would_flag = len(bodies) < 2
+    size_errors = find_size_collisions(kops, klay, knorm)
+    print("self-test synthetics: alpha %s | beta %s"
+          % (" ".join("%s@%d+%d" % (l, o, s) for l, o, s in klay["synth_alpha_cmd"][0]),
+             " ".join("%s@%d+%d" % (l, o, s) for l, o, s in klay["synth_beta_cmd"][0])))
+    print("self-test body gate would flag: %s (want False = the old hole)"
+          % body_would_flag)
+    print("self-test size gate errors: %r" % (size_errors,))
+    if body_would_flag:
+        print("self-test FAIL: synthetics unexpectedly body-identical")
+        return 1
+    if not size_errors:
+        print("self-test FAIL: size gate missed the same-size pair")
+        return 1
+    print("self-test PASS: same-size/different-layout pair FAILS the gate")
+    return 0
+
+
 def main():
+    if "--self-test" in sys.argv:
+        return synthetic_size_collision_selftest()
     errors = []
     ksrc = "\n".join(read(p) for p in KERN_FILES)
     csrc = read(CLIENT)
@@ -447,6 +545,8 @@ def main():
     # field inside _IOWR keeps the full codes distinct. Two different op
     # names with byte-identical struct bodies would still produce
     # identical codes -- a real dispatch collision -- so fail on that.
+    # (Same-size/different-layout pairs slip past this body check; they
+    # are caught by the LP64 size gate in the layout section below.)
     by_code = {}
     for name, (code, struct) in sorted(kops.items()):
         by_code.setdefault(code, []).append((name, struct))
@@ -488,6 +588,8 @@ def main():
     # LP64 byte-layout gate: exact offsets/sizes per struct, both sides.
     # Catches padding/reorder drift the canon (whitespace-folded) gate
     # cannot see. Runs anywhere (pure Python LP64 model, no toolchain).
+    klnorm = {}
+    knorm_lay = {}
     try:
         kraw_all = {}
         for p in KERN_FILES:
@@ -500,9 +602,26 @@ def main():
         klnorm = {STRUCT_ALIAS.get(n, n): v for n, v in klay.items()}
     except ValueError as error:
         errors.append("layout engine: %s" % error)
-        klnorm = {}
     else:
         errors.extend(compare_layouts(klnorm, clay, needed))
+        # Shared-number size gate: same (type, nr) + same LP64 size means
+        # the same full _IOWR code, whatever the field layouts. Runs on
+        # the kernel side (dispatch truth); client mirrors are covered by
+        # the byte-compare above.
+        knorm_raw = {STRUCT_ALIAS.get(n, n): b for n, b in kstructs.items()}
+        knorm_lay = {STRUCT_ALIAS.get(n, n): v for n, v in klay.items()}
+        errors.extend(find_size_collisions(kops, knorm_lay, knorm_raw))
+    # Evidence for the shared numbers (W21/W22/W23): sizes must differ.
+    shared_evidence = []
+    for code in ("W21", "W22", "W23"):
+        members = sorted(
+            "%s=%s:%sB" % (name, struct,
+                           knorm_lay[struct][1] if struct in knorm_lay else "?")
+            for name, (nr, struct) in sorted(kops.items())
+            if nr == code and name not in EXCLUDED_OPS)
+        if members:
+            shared_evidence.append("%s: %s" % (code, " vs ".join(members)))
+    print("check-client-h shared-number sizes: %s" % "; ".join(shared_evidence))
     # Exact offsets/sizes report: the evidence, not eyeballing.
     print("check-client-h layouts (LP64, kernel side):")
     for line in format_layouts(klnorm, needed):

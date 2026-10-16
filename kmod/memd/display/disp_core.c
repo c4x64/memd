@@ -309,7 +309,18 @@ static const struct memd_disp_backend *memd_find_be(__u32 id)
 
 /* Must hold g_core_mu. Starts the refresh thread once (idempotent) and
  * creates the flip workqueue if missing (destroyed on uninstall, so each
- * install owns exactly one; rmmod via uninstall leaks neither). */
+ * install owns exactly one; rmmod via uninstall leaks neither).
+ *
+ * Lifecycle proof (same shape as the round-4 workqueue proof):
+ * - Start exactly-once: early return while g_refresh_task lives, so a
+ *   second install without uninstall reuses the running thread (the
+ *   in-place teardown NULLs be/buffers under the same lock, and the
+ *   thread skips presents on NULL be — no stale present, no new task).
+ * - Stop exactly-once: only uninstall takes g_refresh_task (NULLing it
+ *   under the lock) and kthread_stops outside it; rmmod funnels through
+ *   uninstall (core/memd.c memd_exit), so no thread survives unload.
+ * - Install/uninstall serialization is g_inst_mu; the stop itself needs
+ *   only g_core_mu (kthread_stop sleeps, hence outside the lock). */
 static void memd_refresh_start_locked(void)
  {
     if (g_refresh_task)
@@ -828,6 +839,13 @@ int memd_core_get_modes(struct memd_disp_mode *modes, __u32 max_modes)
         rc = g_core.be->get_modes(modes, max_modes);
     } else if (g_core.mode_count > 0) {
         __u32 count = max_modes < g_core.mode_count ? max_modes : g_core.mode_count;
+        /* mode_count is core-owned (backends report via get_modes, so
+         * this stays 0 today): clamp the read bound to the array so a
+         * stale/corrupt count can never over-read available_modes. */
+        if (count > sizeof(g_core.available_modes) /
+                     sizeof(g_core.available_modes[0]))
+            count = sizeof(g_core.available_modes) /
+                    sizeof(g_core.available_modes[0]);
         memcpy(modes, g_core.available_modes, count * sizeof(struct memd_disp_mode));
         rc = count;
     } else {

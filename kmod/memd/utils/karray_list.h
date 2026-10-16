@@ -32,7 +32,14 @@ void* arraylist_get_ts(struct karray_list* list, size_t index);
 void* arraylist_remove_ts(struct karray_list* list, size_t index);
 size_t arraylist_size_ts(struct karray_list* list);
 
-/* Iterator support */
+/* Iterator support (borrow, no ownership): the iterator holds a raw
+ * list pointer and takes no ref. The caller must not destroy the list
+ * (arraylist_destroy) or free/replace its backing store
+ * (arraylist_shrink_to_fit) while any iterator is alive, must release
+ * every iterator (arraylist_iterator_release) before destroying the
+ * list, and must not share one iterator across threads. Elements must
+ * stay alive for the iteration; concurrent _ts growth may still
+ * skip/duplicate entries (slots are re-checked under the lock). */
 struct karray_iterator {
     struct karray_list* list;
     size_t index;

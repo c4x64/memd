@@ -65,7 +65,14 @@ static int memd_sfb_open(__u32 w, __u32 h)
     if (of_property_read_u32(np, "width", &pw) ||
         of_property_read_u32(np, "height", &ph) ||
         of_property_read_u32(np, "stride", &stride) ||
-        !pw || !ph || !stride || pw > 4096 || ph > 4096) {
+        !pw || !ph || !stride || pw > 4096 || ph > 4096 ||
+        stride > 4096 * 4) {
+        /* stride cap: a row wider than a full 4096-wide 32bpp panel
+         * cannot be real padding (hostile DT requesting a giant
+         * stride would otherwise pass the resource check below and
+         * buy a giant memremap for h rows). All-zero DT dies on
+         * !pw/!ph/!stride above; short-stride dies on the row check
+         * below. */
         of_node_put(np);
         return -ENODEV;
     }

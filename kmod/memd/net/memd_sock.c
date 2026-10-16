@@ -60,6 +60,9 @@ static int memd_ioctl(struct socket* sock, unsigned int cmd, unsigned long arg) 
     int i;
     for (i = 0; i < ARRAY_SIZE(ioctl_handlers); i++) {
         if (cmd == ioctl_handlers[i].cmd) {
+            /* The {0, NULL} sentinel is the sole NULL-handler entry and
+             * sits last, so this skips exactly the sentinel (cmd 0 falls
+             * through to -ENOTTY below); identical to break here. */
             if (ioctl_handlers[i].handler == NULL) {
                 continue;
             }

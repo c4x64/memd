@@ -95,7 +95,10 @@ def map_node(node):
             return None
         if not tree or not str(tree).strip():
             return None
-    except (ValueError, AttributeError):
+    except ValueError:
+        # require_https only raises ValueError (non-string inputs are
+        # rejected by isinstance, never by attribute access), so nothing
+        # broader is caught here.
         return None
 
     architecture = str(data.get("arch") or "").strip().lower()
@@ -109,7 +112,9 @@ def map_node(node):
         return None
     try:
         config_url = require_https(artifacts.get("_config"), "artifacts._config")
-    except (ValueError, AttributeError):
+    except ValueError:
+        # Same as above: artifacts is a checked dict, require_https only
+        # raises ValueError.
         return None
     compiler = data.get("compiler")
     if not compiler or not str(compiler).strip():

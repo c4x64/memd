@@ -135,8 +135,18 @@ def read_config(path):
         return stream.read()
 
 
+def _need_text(record, field):
+    """Required manifest string field; ValueError (not KeyError) if absent."""
+    value = record.get(field) if isinstance(record, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            "The manifest target has no usable %r." % field
+        )
+    return value.strip()
+
+
 def select_toolchain(record, config_path):
-    architecture = record["architecture"].strip().lower()
+    architecture = _need_text(record, "architecture").lower()
     if architecture == "powerpc":
         config = read_config(config_path)
         if "CONFIG_CPU_LITTLE_ENDIAN=y" in config:
@@ -157,13 +167,12 @@ def select_toolchain(record, config_path):
         else:
             toolchain = TOOLCHAINS["mips"]
     else:
-        try:
-            toolchain = TOOLCHAINS[architecture]
-        except KeyError as error:
+        if architecture not in TOOLCHAINS:
             raise ValueError(
                 "No cross-toolchain mapping is defined for KernelCI "
                 f"architecture {architecture!r}."
-            ) from error
+            )
+        toolchain = TOOLCHAINS[architecture]
 
     arch, cross_compile, compiler_package = toolchain
     if "clang" in str(record.get("compiler", "")).lower():
@@ -293,12 +302,35 @@ def main():
 
     with open(args.manifest, encoding="utf-8") as stream:
         manifest = json.load(stream)
-    try:
-        record = manifest["records"][args.index]
-    except (KeyError, IndexError, TypeError) as error:
+    if not isinstance(manifest, dict) or not isinstance(
+        manifest.get("records"), list
+    ):
+        raise ValueError("The manifest contains no target records list.")
+    if not isinstance(args.index, int) or isinstance(args.index, bool):
+        raise ValueError("The target index is not an integer.")
+    if args.index < 0 or args.index >= len(manifest["records"]):
         raise ValueError(
             f"The manifest contains no target at index {args.index}."
-        ) from error
+        )
+    record = manifest["records"][args.index]
+    if not isinstance(record, dict):
+        raise ValueError(
+            f"The manifest target at index {args.index} is not an object."
+        )
+    for field in (
+        "build_id",
+        "checkout_id",
+        "kernel_version",
+        "kernel_hash",
+        "kernel_branch",
+        "git_repository_url",
+        "tree_name",
+        "architecture",
+        "config_name",
+        "config_url",
+        "device_class",
+    ):
+        _need_text(record, field)
     expected_key = hashlib.sha256(
         "\0".join(str(record[field]) for field in (
             "kernel_hash",
@@ -323,7 +355,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, KeyError, AttributeError, TypeError,
+    except (OSError, ValueError,
             subprocess.CalledProcessError) as error:
         print(f"KernelCI module build failed: {error}", file=sys.stderr)
         sys.exit(1)

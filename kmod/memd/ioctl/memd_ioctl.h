@@ -137,6 +137,13 @@ struct memd_hide_proc_cmd {
     int hide; /* Input: 1 to hide, 0 to unhide */
 };
 
+/* Trust model (no capable check here, and none inside give_root()):
+ * this call exists to GRANT root, so a privilege check would brick it.
+ * The gate is fd possession: only root can create the memd socket
+ * (memd_sock_create requires uid 0 + CAP_NET_BIND_SERVICE), and only an
+ * fd holder can reach this handler. Do NOT pass the fd to untrusted
+ * processes (inheritance / SCM_RIGHTS transfer escalates the receiver).
+ * Companion read/write/translate handlers share the same fd-gated model. */
 struct memd_give_root_cmd {
     int result; /* Output: 0 on success, negative error code on failure */
 };

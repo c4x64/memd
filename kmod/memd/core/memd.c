@@ -82,6 +82,10 @@ static int __init memd_init(void) {
         goto clean_gyro;
     }
 
+    /* Re-call is idempotent-safe: memd_learn_comprehensive already ran
+     * this, and the extended learners only assign on a unique hit
+     * (n == 1) and never write back failure, so a second pass can only
+     * confirm the same per-boot-constant offsets, never clobber them. */
     memd_learn_extended();
 
 #if defined(BUILD_HIDE_SIGNAL)

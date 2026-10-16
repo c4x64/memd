@@ -76,10 +76,15 @@ struct dentry *memd_file_dentry(struct file *f);
 /* Privilege checks without build-header cred offsets (capable() inlines
  * task->cred from build headers — wrong on foreign kernels = crash).
  * Learned cred offset + stable struct cred layout (usage@0, uid@4,
- * cap_effective low word@56, CI-asserted per generation). Fail closed
+ * cap_effective@56 low word, CI-asserted per generation). Both cap
+ * words supported (caps 32..63 read at base+4: kernel_cap_struct is
+ * definitionally two u32s); cap>=64 denied fail-closed. Fail closed
  * (deny) when unlearned. */
 int memd_capable(int cap);
 unsigned int memd_uid(void);
+/* Shared cred-uid offset (learned, else compiled fallback 4). Call
+ * sites in other units that still hard-code +4 should migrate here. */
+unsigned long memd_cred_uid_off(void);
 
 /* vma->vm_file learned the same way (known pathname match). */
 unsigned long memd_v_file(struct vm_area_struct *vma);
@@ -335,27 +340,24 @@ void memd_learn_file_private(struct file *f, void *known_private);
      *(struct k_sigaction **)((char *)memd_t_sighand(t) + memd_learned_ext.t_sighand_action) : \
      NULL)
 
-/* Fs struct readers */
-#define memd_t_fs_pwd(t) \
-    (memd_learned_ext.t_fs_pwd >= 0 ? \
-     *(struct path **)((char *)memd_t_fs(t) + memd_learned_ext.t_fs_pwd) : \
-     NULL)
+/* Fs struct readers: intentionally absent (fail closed). The t_fs base
+ * offset has no safe learner (fs->pwd/root are embedded struct paths,
+ * not pointers, so no pointer anchor exists), and these readers
+ * previously invoked a memd_t_fs() helper that does not exist, with an
+ * unguarded deref if it ever had. Parked at NULL until a guarded
+ * reader exists. Argument is unevaluated; nothing expands these today. */
+#define memd_t_fs_pwd(t) (NULL)
 
-#define memd_t_fs_root(t) \
-    (memd_learned_ext.t_fs_root >= 0 ? \
-     *(struct path **)((char *)memd_t_fs(t) + memd_learned_ext.t_fs_root) : \
-     NULL)
+#define memd_t_fs_root(t) (NULL)
 
-/* Nsproxy struct readers */
-#define memd_t_nsproxy_mnt_ns(t) \
-    (memd_learned_ext.t_nsproxy_mnt_ns >= 0 ? \
-     *(struct ns_common **)((char *)memd_t_nsproxy(t) + memd_learned_ext.t_nsproxy_mnt_ns) : \
-     NULL)
+/* Nsproxy struct readers: intentionally absent (fail closed). Same
+ * status as the fs readers above: no safe base learner (prior scans
+ * compared field addresses instead of targets and could never match)
+ * and the referenced memd_t_nsproxy() helper does not exist. Parked
+ * at NULL; argument unevaluated; nothing expands these today. */
+#define memd_t_nsproxy_mnt_ns(t) (NULL)
 
-#define memd_t_nsproxy_pid_ns(t) \
-    (memd_learned_ext.t_nsproxy_pid_ns >= 0 ? \
-     *(struct ns_common **)((char *)memd_t_nsproxy(t) + memd_learned_ext.t_nsproxy_pid_ns) : \
-     NULL)
+#define memd_t_nsproxy_pid_ns(t) (NULL)
 
 /* Cred struct readers */
 #define memd_t_cred_cap_eff(t) \

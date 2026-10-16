@@ -23,7 +23,9 @@
 static int free_family = AF_DECnet;
 
 /* Live counters (atomic: create/destroy/data paths). Converted to plain
- * s64 on copy-out in memd_get_sock_stats. */
+ * s64 on copy-out in memd_get_sock_stats. Informational only: no logic
+ * branches on them; rx_packets counts socket lifecycle events
+ * (create + destroy), not wire packets. */
 static struct {
     atomic64_t rx_bytes;
     atomic64_t tx_bytes;
@@ -275,7 +277,7 @@ static int memd_sock_create(struct net* net, struct socket* sock, int protocol, 
     list_add(&ws->list, &g_sock_list);
     spin_unlock(&g_sock_list_lock);
 
-    atomic64_inc(&g_sock_stats.rx_packets); /* creation count */
+    atomic64_inc(&g_sock_stats.rx_packets); /* lifecycle event, not wire rx (see above) */
 
     return 0;
 }
@@ -292,7 +294,7 @@ static void memd_sock_destruct(struct sock *sk)
     list_del(&ws->list);
     spin_unlock(&g_sock_list_lock);
 
-    atomic64_inc(&g_sock_stats.rx_packets); /* destruction count */
+    atomic64_inc(&g_sock_stats.rx_packets); /* lifecycle event, not wire rx (see above) */
 
     /* Sole list remover (cleanup never force-frees); release already
      * freed and NULLed the pages on the close path, so this only frees

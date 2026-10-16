@@ -235,13 +235,16 @@ static inline __u32 alpha_blend(__u32 src, __u32 dst)
 void memd_raster_composite_layers(__u32 *fb, __u32 w, __u32 h,
                                    struct memd_disp_layer *layers, __u32 layer_count)
  {
-    unsigned int order[8];
+    unsigned int order[MEMD_DISP_MAX_LAYERS];
     unsigned int n;
     unsigned int i, j, k;
     if (!fb || !w || !h || !layers || layer_count == 0)
         return;
-    if (layer_count > 8)
-        layer_count = 8;
+    /* Cap matches the core's layers[MEMD_DISP_MAX_LAYERS] bound (and
+     * the order[] above): core never passes more, this is belt-and-
+     * braces so a future caller cannot overrun either array. */
+    if (layer_count > MEMD_DISP_MAX_LAYERS)
+        layer_count = MEMD_DISP_MAX_LAYERS;
 
     /* Order by z_order without mutating the caller's array (core
      * remove/update rely on stable indices). */

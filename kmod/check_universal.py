@@ -33,10 +33,13 @@ def main():
         die("cannot read %s: %s" % (ko_path, e))
     if b[0:4] != b"\x7fELF" or b[4] != 2:
         die("not a 64-bit ELF")
-    e_shoff, = struct.unpack_from("<Q", b, 0x28)
-    e_shentsize, = struct.unpack_from("<H", b, 0x3A)
-    e_shnum, = struct.unpack_from("<H", b, 0x3C)
-    e_shstrndx, = struct.unpack_from("<H", b, 0x3E)
+    try:
+        e_shoff, = struct.unpack_from("<Q", b, 0x28)
+        e_shentsize, = struct.unpack_from("<H", b, 0x3A)
+        e_shnum, = struct.unpack_from("<H", b, 0x3C)
+        e_shstrndx, = struct.unpack_from("<H", b, 0x3E)
+    except struct.error:
+        die("truncated ELF header")
     if e_shentsize != 64 or e_shnum == 0 or e_shnum > 400:
         die("unexpected section table shape")
     if e_shstrndx >= e_shnum:
@@ -117,7 +120,7 @@ def main():
         die("empty undef file (nm produced no symbols?)")
     bad = []
     cfi_bad = []
-    for line in open(undef_path):
+    for line in undef_lines:
         sym = line.split()
         if not sym:
             continue
@@ -130,7 +133,7 @@ def main():
     # of CFI/ubsan imports: DDK CFI instrumentation must have been
     # neutralized above or the module cannot load on non-enforcing
     # kernels. Enforcing kernels are handled at runtime (cfi_bypass).
-    for line in open(undef_path):
+    for line in undef_lines:
         sym = line.split()
         if not sym:
             continue
@@ -142,12 +145,14 @@ def main():
     # Every artifact: deny imports proven missing or GKI-protected on
     # trimmed kernels (ranchu 6.1: unknown-symbol load refusal). These
     # go through the socket bootstrap table or runtime pointers instead.
-    denied_all = {"filp_open", "kernel_read", "__put_cred", "send_signal",
+    denied_all = {"filp_open", "kernel_read", "filp_close", "vprintk",
+                  "set_memory_x", "do_send_sig_info",
+                  "__put_cred", "send_signal",
                   "vmalloc_exec", "input_dev_valid", "pte_read", "pte_exec",
                   "pte_swp_offset", "pte_swp_type", "_printk", "is_swap_pte",
                   "krealloc_array", "pte_user"}
     found_all = []
-    for line in open(undef_path):
+    for line in undef_lines:
         sym = line.split()
         if not sym:
             continue
@@ -166,7 +171,7 @@ def main():
                   "register_kprobe", "unregister_kprobe",
                   "kallsyms_lookup_name"}
         found = []
-        for line in open(undef_path):
+        for line in undef_lines:
             sym = line.split()
             if not sym:
                 continue

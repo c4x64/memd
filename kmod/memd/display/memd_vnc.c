@@ -305,7 +305,15 @@ static int memd_vnc_fn(void *data)
     return 0;
 }
 
-/* Called with g_core_mu held (matches refresh thread discipline). */
+/* Called with g_core_mu held (matches refresh thread discipline).
+ * Start exactly-once: a second install without uninstall reuses the
+ * live server (early return); the in-place teardown NULLs be under the
+ * same lock, so the server's copy_front fails closed (-ENODEV, viewer
+ * dropped) instead of touching freed buffers. Stop exactly-once is the
+ * take-NULL-then-kthread_stop in memd_vnc_stop below; rmmod funnels
+ * through uninstall, so no server survives unload. Install vs
+ * uninstall are serialized by g_inst_mu, so the unguarded g_vnc_task
+ * test-and-set here cannot race. */
 void memd_vnc_start(void)
  {
     if (g_vnc_task)
@@ -315,7 +323,11 @@ void memd_vnc_start(void)
         g_vnc_task = NULL;
 }
 
-/* Called WITHOUT g_core_mu held (kthread_stop sleeps). */
+/* Called WITHOUT g_core_mu held (kthread_stop sleeps). Stop
+ * exactly-once: take-and-NULL is serialized by g_inst_mu (only
+ * uninstall runs here), so a double uninstall cannot double-stop;
+ * stopping before the workqueue destroy in uninstall keeps the serving
+ * thread from re-entering copy_front mid-teardown. */
 void memd_vnc_stop(void)
  {
     struct task_struct *t = g_vnc_task;

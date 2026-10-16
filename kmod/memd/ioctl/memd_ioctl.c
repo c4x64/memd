@@ -59,12 +59,19 @@ int do_debug_info(struct socket* sock, void* arg) {
      * mm_right that no field assignment touches; copy_to_user below
      * would otherwise leak kernel stack to userspace. */
     memset(&debug_info_cmd, 0, sizeof(debug_info_cmd));
+    /* No mmap lock here by construction (not an omission): this is
+     * current's OWN mm, pinned for the whole syscall — current cannot
+     * exit while executing, and only current itself (sequentially, no
+     * concurrency) can change current->mm. virt_to_phys needs no lock
+     * (linear map), pgd is fixed at fork, and ASID/mm_right are
+     * best-effort diagnostics (a rollover-stale value is reported, never
+     * used for translation). A foreign mm would need MM_READ_LOCK. */
     {
         struct mm_struct *dmm = memd_t_mm(current);
         debug_info_cmd.ttbr0_el1 = read_sysreg_s(SYS_TTBR0_EL1);
         debug_info_cmd.task_struct = (u64)current;
         debug_info_cmd.mm_struct = (u64)dmm;
-        debug_info_cmd.pgd_addr = (u64)memd_m_pgd(dmm);
+        debug_info_cmd.pgd_addr = dmm ? (u64)memd_m_pgd(dmm) : 0;
         debug_info_cmd.pgd_phys_addr = dmm ? virt_to_phys(memd_m_pgd(dmm)) : 0;
         debug_info_cmd.mm_asid = dmm ? ASID(dmm) : 0;
         debug_info_cmd.mm_right = dmm ?
@@ -540,6 +547,13 @@ int do_copy_process(struct socket* sock, void* arg) {
         return -EINVAL;
     }
 
+    /* Stubbed -ENOSYS below: reject nonzero dead fields NOW, so a
+     * future enablement cannot silently change their meaning for
+     * callers that already pass garbage. Fail closed on pid too. */
+    if (cmd.pid <= 0 || cmd.child_stack_size != 0 || cmd.flags != 0 ||
+        cmd.arg != NULL || cmd.child_tid != NULL) {
+        return -EINVAL;
+    }
 
     pid = find_get_pid(cmd.pid);
     if (!pid) {

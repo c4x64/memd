@@ -406,6 +406,9 @@ class MemdHppTwoTuTests(unittest.TestCase):
     CI gate usage (Linux-only link+run; build.yml is intentionally NOT
     touched this round): run from tools/ on a Linux host --
         python3 -m unittest test_lxgr_load.MemdHppTwoTuTests -v
+    CI-independent runner (manual + future CI): python3 tools/two_tu_gate.py
+    reports PASS/SKIP/FAIL with exit 0/1/2; the TU_A/TU_B sources below are
+    its single source of truth.
     On non-Linux hosts the link+run half SKIPS with a loud reason (the
     payload path needs Linux: abstract unix sockets, dladdr, link.h) and
     only the header syntax check runs.

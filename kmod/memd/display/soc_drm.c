@@ -34,6 +34,11 @@
 
 #include <linux/device.h>
 #include <drm/drm_file.h>
+/* Build-time only: proves the version-agnostic client blob below fits
+ * every baseline's struct drm_client (single artifact runs 5.10..6.12;
+ * layout drifts per build, so the blob stays fixed and drift fails the
+ * build, never the load). No runtime import comes from this header. */
+#include <drm/drm_client.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -82,6 +87,14 @@ static void *(*p_drm_client_framebuffer_create)(void *client, __u32 w,
 static void *(*p_drm_client_buffer_vmap)(void *buffer);
 static void (*p_drm_client_buffer_vunmap)(void *buffer);
 static int (*p_drm_client_modeset_commit)(void *client);
+/* Deletion IS a stable client API (drm_client_framebuffer_delete,
+ * void(struct drm_client_buffer *), present since the client API
+ * itself; same vintage as create in every 5.10..6.12 header). The old
+ * "no stable name" comment was wrong: wire it like the rest. Without
+ * it each install cycle would strand one GEM object + framebuffer
+ * (~w*h*4, bounded 1.2MB at 640x480) until drm_client_release; with
+ * it every create has a matching delete on all paths below. */
+static void (*p_drm_client_framebuffer_delete)(void *buffer);
 
 static struct {
     void *client;
@@ -92,8 +105,15 @@ static struct {
     int mapped_new;
     int last_errno;
     int seen;
+    /* Version-agnostic client blob (single artifact, no per-gen struct
+     * dependency at runtime). Build-asserted below against the baseline
+     * headers; growth fails the build for a bump, never the load. */
     unsigned char client_store[512];
 } g_drm;
+
+/* Blob must fit the build baseline's client (runtime kernels share the
+ * 5.10..6.12 client layout family; assert pins the assumption). */
+_Static_assert(sizeof(struct drm_client) <= 512, "drm client fits blob");
 
 static int memd_drm_match(struct device *dev, const void *data)
  {
@@ -167,9 +187,12 @@ static int memd_drm_open(__u32 w, __u32 h)
         memd_drm_resolve("drm_client_buffer_vunmap");
     p_drm_client_modeset_commit =
         memd_drm_resolve("drm_client_modeset_commit");
+    p_drm_client_framebuffer_delete =
+        memd_drm_resolve("drm_client_framebuffer_delete");
     if (!p_drm_client_init || !p_drm_client_release ||
         !p_drm_client_framebuffer_create || !p_drm_client_modeset_commit ||
-        !p_drm_client_buffer_vmap || !p_drm_client_buffer_vunmap) {
+        !p_drm_client_buffer_vmap || !p_drm_client_buffer_vunmap ||
+        !p_drm_client_framebuffer_delete) {
         put_device(d);
         return -ENODEV;
     }
@@ -194,9 +217,10 @@ static int memd_drm_open(__u32 w, __u32 h)
     if (!g_drm.mapped_new) {
         g_drm.vaddr = p_drm_client_buffer_vmap(g_drm.fb);
         if (!g_drm.vaddr) {
+            p_drm_client_framebuffer_delete(g_drm.fb);
+            g_drm.fb = NULL;
             p_drm_client_release(g_drm.client);
             g_drm.client = NULL;
-            g_drm.fb = NULL;
             return -ENODEV;
         }
     } else {
@@ -207,9 +231,10 @@ static int memd_drm_open(__u32 w, __u32 h)
         memcpy(&vf, &p_drm_client_buffer_vmap, sizeof(vf));
         memset(&map, 0, sizeof(map));
         if (vf(g_drm.fb, &map) || !map.addr || map.is_iomem) {
+            p_drm_client_framebuffer_delete(g_drm.fb);
+            g_drm.fb = NULL;
             p_drm_client_release(g_drm.client);
             g_drm.client = NULL;
-            g_drm.fb = NULL;
             return -ENODEV;
         }
         g_drm.vaddr = map.addr;
@@ -221,6 +246,8 @@ static int memd_drm_open(__u32 w, __u32 h)
         if (g_drm.fb && p_drm_client_buffer_vunmap)
             p_drm_client_buffer_vunmap(g_drm.fb);
         g_drm.vaddr = NULL;
+        if (g_drm.fb && p_drm_client_framebuffer_delete)
+            p_drm_client_framebuffer_delete(g_drm.fb);
         g_drm.fb = NULL;
         g_drm.w = g_drm.h = 0;
         g_drm.mapped_new = 0;
@@ -236,9 +263,10 @@ static void memd_drm_close(void)
  {
     if (g_drm.client && p_drm_client_buffer_vunmap && g_drm.fb)
         p_drm_client_buffer_vunmap(g_drm.fb);
-    /* NOTE: framebuffer delete API lands with the next forensics pass
-     * (name TBD from headers); the GEM object frees with client
-     * release in practice — bounded 1.2MB per install cycle, rare. */
+    /* Deterministic teardown: unmap, delete the framebuffer (GEM
+     * object freed here, not left to client release), then release. */
+    if (g_drm.fb && p_drm_client_framebuffer_delete)
+        p_drm_client_framebuffer_delete(g_drm.fb);
     if (g_drm.client && p_drm_client_release)
         p_drm_client_release(g_drm.client);
     g_drm.client = NULL;
@@ -252,6 +280,7 @@ static void memd_drm_close(void)
     p_drm_client_buffer_vmap = NULL;
     p_drm_client_buffer_vunmap = NULL;
     p_drm_client_modeset_commit = NULL;
+    p_drm_client_framebuffer_delete = NULL;
 }
 
 static int memd_drm_present(const __u32 *fb, __u32 w, __u32 h,

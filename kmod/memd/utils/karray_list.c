@@ -245,6 +245,8 @@ struct karray_iterator* arraylist_iterator_create(struct karray_list* list) {
     unsigned long flags;
     bool has_data;
 
+    /* Borrow only (see header contract): no ref taken, so the caller
+     * must keep the list (and its backing store) alive until release. */
     if (!list)
         return NULL;
     if (list->thread_safe) {

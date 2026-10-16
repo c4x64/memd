@@ -7,7 +7,6 @@ import json
 import re
 import sys
 import subprocess
-from pathlib import Path
 
 # Known GKI releases with devices and AVDs (as of 2025).
 # Source: Android Common Kernels + GKI release tracking + AVD configs + Cuttlefish
@@ -152,10 +151,16 @@ def fetch_latest_ddk_tags():
         ], capture_output=True, text=True, timeout=30)
         if result.returncode == 0:
             data = json.loads(result.stdout)
-            tags = data.get("tags", [])
+            if not isinstance(data, dict) or not isinstance(
+                data.get("tags"), list
+            ):
+                raise ValueError("DDK tag listing has no tags list")
+            tags = data["tags"]
             # Extract latest per KMI
             latest = {}
             for tag in tags:
+                if not isinstance(tag, str):
+                    continue
                 match = re.match(r"(android\d+-\d+\.\d+)-(\d+)", tag)
                 if match:
                     kmi = match.group(1)

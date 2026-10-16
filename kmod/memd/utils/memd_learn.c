@@ -843,7 +843,10 @@ unsigned long memd_valid_pgd(struct mm_struct *mm)
 }
 
 /* struct cred layout (stable for years, CI-asserted per generation):
- * usage@0 (atomic_t), uid@4 (kuid_t val), cap_effective low word@56. */
+ * usage@0 (atomic_t), uid@4 (kuid_t val), cap_effective low word@56.
+ * kernel_cap_struct is definitionally two u32 words, so the high word
+ * (caps 32..63) sits at base+4 (60 compiled): no extra learning or
+ * per-generation proof needed for the second word. */
 #define MEMD_CRED_CAP_EFF 56
 
 static unsigned long memd_task_cred(struct task_struct *t)
@@ -864,27 +867,41 @@ int memd_capable(int cap)
     unsigned long off = MEMD_CRED_CAP_EFF;
     u32 eff = 0;
     unsigned int v = 0;
-    if (!c || cap < 0 || cap >= 32)
+    if (!c || cap < 0 || cap >= 64)
         return 0;
     /* Prefer the learned offset when the (currently dead-code) cred
-     * learner ever fills it; 56 is the CI-asserted compiled fallback. */
+     * learner ever fills it; 56 is the CI-asserted compiled fallback.
+     * Second word (caps 32..63) is base+4 by kernel_cap_struct
+     * definition (two u32s). cap>=64 denied (fail closed). */
     if (memd_learned_ext.t_cred_cap_eff >= 0)
         off = (unsigned long)memd_learned_ext.t_cred_cap_eff;
+    if (cap >= 32)
+        off += 4;
     if (memd_safe_read32((void *)(c + off), &v))
         return 0;
     eff = v;
-    return (eff >> cap) & 1;
+    return (eff >> (cap & 31)) & 1;
+}
+
+/* Cred uid offset: learned when a value-based learner fills it, else
+ * the CI-asserted compiled fallback (4). Centralizes the constant so
+ * all uid readers share one treatment; su_stage (memd_inject.c) and
+ * the ioctl uid fill still hard-code +4 (read-only from this unit) —
+ * rewiring them to this helper is for their owning rounds. */
+unsigned long memd_cred_uid_off(void)
+ {
+    if (memd_learned_ext.t_cred_uid >= 0)
+        return (unsigned long)memd_learned_ext.t_cred_uid;
+    return 4;
 }
 
 unsigned int memd_uid(void)
  {
     unsigned long c = memd_task_cred(current);
-    unsigned long off = 4;
+    unsigned long off = memd_cred_uid_off();
     unsigned int v = 0;
     if (!c)
         return 999999;
-    if (memd_learned_ext.t_cred_uid >= 0)
-        off = (unsigned long)memd_learned_ext.t_cred_uid;
     if (memd_safe_read32((void *)(c + off), &v))
         return 999999;
     return v;
@@ -1281,33 +1298,43 @@ static int memd_verify_all_offsets(void)
      * field offsets). The old code compared learned reads against
      * t->pid/t->tgid/t->mm/t->cred, which is garbage on any kernel whose
      * layout differs from the build headers — it nuked correct learning
-     * exactly on the foreign kernels the universal image targets. */
+     * exactly on the foreign kernels the universal image targets.
+     * All re-check reads are extable-guarded (memd_safe_*): a torn or
+     * stale slot fails closed to -1 instead of oopsing. Fields whose
+     * learners are permanently parked (-1) never reach a deref: every
+     * check below is gated on >= 0, so no permanently-unknown offset is
+     * trusted here. */
     struct task_struct *t = current;
     int errors = 0;
 
     if (memd_learned.t_pid >= 0) {
-        pid_t *pid_ptr = (void *)((char *)t + memd_learned.t_pid);
-        if (*pid_ptr != task_pid_vnr(t)) {
-            memd_err("verify: t_pid offset wrong (%d != %d)\n", *pid_ptr, task_pid_vnr(t));
+        unsigned int cur = 0;
+        if (memd_safe_read32((char *)t + memd_learned.t_pid, &cur) ||
+            (pid_t)cur != task_pid_vnr(t)) {
+            memd_err("verify: t_pid offset wrong (%d != %d)\n", (pid_t)cur,
+                     task_pid_vnr(t));
             memd_learned.t_pid = -1;
             errors++;
         }
     }
 
     if (memd_learned.t_tgid >= 0) {
-        pid_t *tgid_ptr = (void *)((char *)t + memd_learned.t_tgid);
-        if (*tgid_ptr != task_tgid_vnr(t)) {
-            memd_err("verify: t_tgid offset wrong (%d != %d)\n", *tgid_ptr, task_tgid_vnr(t));
+        unsigned int cur = 0;
+        if (memd_safe_read32((char *)t + memd_learned.t_tgid, &cur) ||
+            (pid_t)cur != task_tgid_vnr(t)) {
+            memd_err("verify: t_tgid offset wrong (%d != %d)\n", (pid_t)cur,
+                     task_tgid_vnr(t));
             memd_learned.t_tgid = -1;
             errors++;
         }
     }
 
     if (memd_learned.t_mm >= 0) {
-        struct mm_struct **mm_ptr = (void *)((char *)t + memd_learned.t_mm);
+        unsigned long got = 0;
         struct mm_struct *anchor = get_task_mm(t);
         if (anchor) {
-            if (*mm_ptr != anchor) {
+            if (memd_safe_read64((char *)t + memd_learned.t_mm, &got) ||
+                (struct mm_struct *)(uintptr_t)got != anchor) {
                 memd_err("verify: t_mm offset wrong\n");
                 memd_learned.t_mm = -1;
                 errors++;

@@ -3,6 +3,7 @@
 #include "memd_common.h"
 #include "memd_utils.h"
 
+#include <linux/errno.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
@@ -329,6 +330,8 @@ bool check_target_can_hijack(void *target)
 int memd_install_inline_hook(void *target, void *handler, void **orig)
   {
      struct memd_trampoline *tramp;
+     struct memd_trampoline *t;
+     struct memd_trampoline *tmp;
      size_t hook_size = HIJACK_SIZE;
      long delta;
      u32 branch_insn;
@@ -340,6 +343,20 @@ int memd_install_inline_hook(void *target, void *handler, void **orig)
          return -EINVAL;
 
      mutex_lock(&g_install_lock);
+
+     /* Double install fails closed with -EBUSY: the list is the
+      * ground truth (the patched-B refusal below is only a
+      * backstop). Serialized by g_install_lock; nested spinlock
+      * order matches memd_remove_inline_hook. */
+     spin_lock(&g_trampoline_lock);
+     list_for_each_entry_safe(t, tmp, &g_trampoline_list, list) {
+         if (t->target == target) {
+             spin_unlock(&g_trampoline_lock);
+             mutex_unlock(&g_install_lock);
+             return -EBUSY;
+         }
+     }
+     spin_unlock(&g_trampoline_lock);
 
      if (!check_target_can_hijack(target)) {
          mutex_unlock(&g_install_lock);

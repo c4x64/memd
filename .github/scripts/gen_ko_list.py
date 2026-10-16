@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, os, sys
+import json, os
 
 matrix = json.loads(os.environ['MATRIX'])
 kos = []

@@ -17,19 +17,27 @@ struct memd_trampoline;
 
 /* Caller contract (enforced where possible, documented where not):
  *
- * - Double install on the same target fails closed with -EINVAL: the
- *   first install leaves a B/B-cond-class word at target, which
- *   check_target_can_hijack() refuses. Concurrent installs for one
- *   target are serialized inside (g_install_lock); callers must still
- *   not interleave install/remove across threads expecting ordering.
+ * - Double install on the same target fails closed with -EBUSY via
+ *   the trampoline-list check inside memd_install_inline_hook (a
+ *   second layer, the patched B/B-cond-class word check in
+ *   check_target_can_hijack(), would independently refuse with
+ *   -EINVAL). Concurrent installs for one target are serialized
+ *   inside (g_install_lock); callers must still not interleave
+ *   install/remove across threads expecting ordering.
  * - B range: the branch is PC-relative with PC = the patched word
  *   (target, offset 0), never a page base. Handlers outside
  *   [-128MB, +128MB-4] are refused with -ERANGE.
- * - Huge (block-mapped) text is not split: target reads are
- *   extable-guarded per word (XO/unmapped edges fail closed) and the
- *   write stays owned by aarch64_insn_write. Splitting a block would
- *   need version-unstable table layouts, so refusal-or-corrupt is
- *   replaced by delegate-and-fail-closed.
+ * - Huge (block-mapped) text is not split, by final determination
+ *   (no guard, none needed): the install path performs no pmd/pud
+ *   walk at all — only extable-guarded per-word loads
+ *   (memd_target_read32) plus the delegated write in
+ *   aarch64_insn_write — so it can never reach a leaf pmd/pud entry
+ *   and there is nothing to refuse on. Word loads work on RX block
+ *   mappings; splitting a block would need version-unstable table
+ *   layouts, so delegate-and-fail-closed replaces refusal-or-corrupt.
+ *   No pmd_leaf/pud_leaf import (kept out deliberately: their
+ *   generic-macro status across the 5.10+ matrix is not certain
+ *   enough to spend a dependency on a check with no reachable site).
  * - *orig receives the trampoline entry (call target for the saved
  *   prologue + jump-back). Pass orig to memd_remove_inline_hook for
  *   the same target; after remove returns, orig dangles and must not

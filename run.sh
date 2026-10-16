@@ -89,11 +89,24 @@ fi
 [ -n "$KO" ] || die "rwbridge-universal.ko not found (pass path as \$1 or place next to run.sh)"
 KVER=$(uname -r 2>/dev/null)
 log "kernel: $KVER"
+# android11-5.4 is documented NO-GO: no DDK image was ever published
+# (matrix excludes it — see generate_matrix.py DDK_IMAGES; SPX selects
+# nothing for it; in-kernel layout tables leave 5.4 unmapped in
+# memd_netlayout.c). Refuse before touching the kernel: the universal
+# image is a 5.10 baseline. Applies to explicit $1 too.
+case "$KVER" in
+5.4.*)
+    die "refusing $KVER: android11-5.4 is NO-GO (no DDK image; see README)"
+    ;;
+esac
 # NOTE: per-KMI auto-selection used to live here (exact kver+generation,
 # then kver-only fallback). Removed: KO is always set above (universal
 # image preferred) or we already died; the stale block referenced KMI
 # names with no published artifacts and could never run. Explicit $1
-# still wins via the selection above.
+# still wins via the selection above. Order contract (mirrors spx.c):
+# universal first on every supported kernel; SPX additionally falls back
+# to exact kver+gen matrix matches automatically, run.sh does not
+# (explicit $1 only) — same first pick, different fallback.
 [ -n "$KO" ] || die "no artifact matches $KVER (need per-KMI build; see README)"
 log "artifact selected: $KO"
 # finit-force helper (version-magic override via raw finit_module: device
@@ -127,14 +140,31 @@ else
     KPTR="absent"
 fi
 log "kptr_restrict: $KPTR"
-# Refusal (mirrors SPX): 5.x builds carry no kallsyms path, so on an
-# enforcing kernel the bypass could never run and first use would trap.
-# NO-GO here is strictly better than a panic. Applies to explicit $1 too.
+# Refusal (mirrors SPX kernel_is_cfi + per-flavor skip, universal
+# included): 5.10/5.15 + CFI is refused outright (NO-GO, never a panic).
+# The bypass writes kernel text, which is unverified on 5.x and panics
+# under text-protection (RKP/KDP); kallsyms availability does not change
+# that (the universal image self-parses /proc/kallsyms, but the write
+# itself is the hazard). 6.x CFI loads normally (bypass runs when
+# kallsyms is readable, fails soft per-op otherwise). Unknown config
+# (no config.gz) means proceed: absence of proof is not proof of
+# enforcement. Applies to explicit $1 too. The KO-name arm covers
+# explicit matrix artifacts; the KVER arm covers the universal image
+# (whose filename encodes no kver).
 case "$KO" in
 *-5.10.ko|*-5.15.ko)
     if [ "$CFI" = "yes" ]; then
-        die "refusing $KO: CFI-enforcing kernel + no kallsyms path in 5.x builds"
+        die "refusing $KO: CFI-enforcing 5.x kernel (bypass writes kernel text: unverified there, panics under RKP/KDP)"
     fi
+    ;;
+*universal*)
+    case "$KVER" in
+    5.10.*|5.15.*)
+        if [ "$CFI" = "yes" ]; then
+            die "refusing $KO: CFI-enforcing 5.x kernel (bypass writes kernel text: unverified there, panics under RKP/KDP)"
+        fi
+        ;;
+    esac
     ;;
 esac
 

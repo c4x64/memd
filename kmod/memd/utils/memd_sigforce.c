@@ -68,9 +68,12 @@ static int memd_sigforce_worker(void *data)
 
         pending->result = memd_send_signal(pending->sig, &pending->info, pending->task, PIDTYPE_PID);
 
+        /* Same no-clear rule as the sync path: the pre-queue check
+         * raced with do_exit, so a clear here fires exactly when the
+         * target began a genuine exit -- corrupting exit state without
+         * resurrecting it. Wake only. */
         if (pending->force && pending->result == 0) {
             if (pending->sig == SIGKILL || pending->sig == SIGSTOP) {
-                pending->task->flags &= ~PF_EXITING;
                 wake_up_process(pending->task);
             }
         }
@@ -167,6 +170,17 @@ static int memd_sigforce_deliver_sync(struct task_struct *task, int sig, int for
         struct sighand_struct *sighand = memd_t_sighand(task);
         if (sighand) {
             spin_lock(&sighand->siglock);
+            /* Re-check under siglock: the entry test raced with do_exit.
+             * Stripping PF_EXITING/SIGNAL_GROUP_EXIT (and zeroing the
+             * group exit code) from a task that began a genuine exit
+             * since would corrupt exit/wait state without resurrecting
+             * it (do_exit never re-checks the flag to abort). Fail
+             * closed: report -ESRCH and leave exit state alone. */
+            if (task->flags & PF_EXITING) {
+                spin_unlock(&sighand->siglock);
+                spin_unlock_irqrestore(&sigforce_lock, flags);
+                return -ESRCH;
+            }
             if (!(task->flags & PF_KTHREAD) && task->signal) {
                 task->signal->flags &= ~SIGNAL_GROUP_EXIT;
                 task->flags &= ~PF_EXITING;
@@ -181,7 +195,12 @@ static int memd_sigforce_deliver_sync(struct task_struct *task, int sig, int for
 
     if (force && ret == 0) {
         if (sig == SIGKILL || sig == SIGSTOP) {
-            task->flags &= ~PF_EXITING;
+            /* No flag clear here: reaching this point means the target
+             * was not exiting at the siglock re-check, so clearing
+             * PF_EXITING would be a no-op -- unless the target began a
+             * genuine exit during the send, in which case clearing it
+             * corrupts exit state. Wake only; waking an exiting task
+             * is harmless. */
             wake_up_process(task);
         }
     }
