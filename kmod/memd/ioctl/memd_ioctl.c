@@ -1312,6 +1312,10 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
     if (ret < 0 || cmdline[0] == '\0') {
         memd_t_comm(task, cmd.name, sizeof(cmd.name));
     } else {
+        /* Pin the last byte: neither the kernel-get_cmdline path nor
+         * the argv fallback guarantees NUL when the line fills the
+         * buffer, and strchr/strrchr below must not run past it. */
+        cmdline[sizeof(cmdline) - 1] = '\0';
         // Extract program name (first part before space)
         char* space = strchr(cmdline, ' ');
         if (space) *space = '\0';
