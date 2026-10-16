@@ -344,18 +344,38 @@ int do_pte_mapping(struct socket* sock, void* arg) {
             goto rollback;
         }
 
+        /* A pud block (1GB HugeTLB) has no child pmd table: pmd_offset
+         * below would decode the block descriptor as a table base and
+         * the pte walk would touch wild memory. Fail closed before
+         * descending (same guard as the rollback walk). None must
+         * allocate first: a none entry also reads as bad. */
         if (unlikely(pud_none(*pud))) {
             if (my__pmd_alloc(mm, pud, addr)) {
                 memd_err("failed to allocate pmd\n");
                 ret = -ENOMEM;
                 goto rollback;
             }
+        } else if (pud_bad(*pud) || pud_huge(*pud)) {
+            ret = -EINVAL;
+            memd_err("pud huge/bad for 0x%lx\n", addr);
+            goto rollback;
         }
 
         pmd = pmd_offset(pud, addr);
         if (!pmd) {
             memd_err("failed to get pmd\n");
             ret = -ENOMEM;
+            goto rollback;
+        }
+
+        /* A pmd block (2MB THP/HugeTLB) or a bad entry is not a pte
+         * table: pte_offset_map below would decode leaf data as a
+         * table base. Fail closed before the pte walk. None is the
+         * need-a-table case (handled by my_pte_alloc_map below) and
+         * also reads as bad, so only test present entries. */
+        if (!pmd_none(*pmd) && (pmd_bad(*pmd) || pmd_huge(*pmd))) {
+            ret = -EINVAL;
+            memd_err("pmd huge/bad for 0x%lx\n", addr);
             goto rollback;
         }
 
@@ -425,7 +445,17 @@ int do_pte_mapping(struct socket* sock, void* arg) {
 rollback:
     /* Still holding the write lock: zap every PTE installed above so
      * no live entry points at a page we are about to free, then
-     * unlock, flush the stale entries, and only then free. */
+     * unlock, flush the stale entries, and only then free.
+     * Non-allocating walk (p4d/pud/pmd_offset + pte_offset_map) lands
+     * on the same pte the install wrote for every 4K page: indices
+     * are pure functions of the address and the tables cannot change
+     * under the held write lock. Divergence condition: an address
+     * covered by a pud/pmd block mapping (1GB/2MB huge) or a bad
+     * entry has no pte table at all, so pte_offset_map would decode
+     * leaf data as a table base on EITHER walk. The install path now
+     * rejects huge/bad before descending, so only pre-install 4K
+     * entries are ever visited here; the huge/bad skips below are
+     * defense-in-depth for the same condition. */
     {
         size_t j;
         unsigned long a;
@@ -435,13 +465,13 @@ rollback:
             if (pgd_none(*pgd) || pgd_bad(*pgd))
                 continue;
             p4d = p4d_offset(pgd, a);
-            if (!p4d)
+            if (!p4d || p4d_none(*p4d))
                 continue;
             pud = pud_offset(p4d, a);
-            if (!pud || pud_none(*pud))
+            if (!pud || pud_none(*pud) || pud_bad(*pud) || pud_huge(*pud))
                 continue;
             pmd = pmd_offset(pud, a);
-            if (!pmd || pmd_none(*pmd))
+            if (!pmd || pmd_none(*pmd) || pmd_bad(*pmd) || pmd_huge(*pmd))
                 continue;
             pte = pte_offset_map(pmd, a);
             if (!pte)

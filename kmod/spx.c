@@ -211,8 +211,8 @@ static int target_vermagic(char *out, int cap)
  {
     /* Mirror of run.sh section 3 (same first pick): on-device reference
      * .ko first, uname fallback with GKI-standard extras. Dir list is
-     * kept in lockstep with run.sh; run.sh additionally globs
-     * /vendor/lib/modules/*/extra (one-level vendor subdir), which this
+     * kept in lockstep with run.sh; run.sh additionally globs one level
+     * of vendor subdir (VENDOR_LIB_MODULES_STAR_EXTRA), which this
      * flat scan does not walk — a reference visible only there resolves
      * via run.sh but falls back to uname here. */
     static const char *dirs[] = {
