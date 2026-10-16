@@ -52,5 +52,26 @@ int memd_walk_page_range(struct mm_struct *mm, unsigned long start, unsigned lon
 
 void traverse_page_tables(struct mm_struct *mm, struct page_walk_stats *stats);
 
+
+#if defined(pmd_large)
+#define memd_pmd_huge(pmd) pmd_large(pmd)
+#elif defined(pmd_leaf)
+#define memd_pmd_huge(pmd) pmd_leaf(pmd)
+#elif defined(pmd_huge)
+#define memd_pmd_huge(pmd) pmd_huge(pmd)
+#else
+#define memd_pmd_huge(pmd) (0)
+#endif
+
+#if defined(pud_large)
+#define memd_pud_huge(pud) pud_large(pud)
+#elif defined(pud_leaf)
+#define memd_pud_huge(pud) pud_leaf(pud)
+#elif defined(pud_huge)
+#define memd_pud_huge(pud) pud_huge(pud)
+#else
+#define memd_pud_huge(pud) (0)
+#endif
+
 #endif // MEMD_PAGE_WALK_H
 /* kmod/memd/mm/memd_page_walk.h[∂] */

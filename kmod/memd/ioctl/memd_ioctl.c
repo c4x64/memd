@@ -378,7 +378,7 @@ int do_pte_mapping(struct socket* sock, void* arg) {
                 ret = -ENOMEM;
                 goto rollback;
             }
-        } else if (pud_bad(*pud) || pud_huge(*pud)) {
+        } else if (pud_bad(*pud) || memd_pud_huge(*pud)) {
             ret = -EINVAL;
             memd_err("pud huge/bad for 0x%lx\n", addr);
             goto rollback;
@@ -396,7 +396,7 @@ int do_pte_mapping(struct socket* sock, void* arg) {
          * table base. Fail closed before the pte walk. None is the
          * need-a-table case (handled by my_pte_alloc_map below) and
          * also reads as bad, so only test present entries. */
-        if (!pmd_none(*pmd) && (pmd_bad(*pmd) || pmd_huge(*pmd))) {
+        if (!pmd_none(*pmd) && (pmd_bad(*pmd) || memd_pmd_huge(*pmd))) {
             ret = -EINVAL;
             memd_err("pmd huge/bad for 0x%lx\n", addr);
             goto rollback;
@@ -491,10 +491,10 @@ rollback:
             if (!p4d || p4d_none(*p4d))
                 continue;
             pud = pud_offset(p4d, a);
-            if (!pud || pud_none(*pud) || pud_bad(*pud) || pud_huge(*pud))
+            if (!pud || pud_none(*pud) || pud_bad(*pud) || memd_pud_huge(*pud))
                 continue;
             pmd = pmd_offset(pud, a);
-            if (!pmd || pmd_none(*pmd) || pmd_bad(*pmd) || pmd_huge(*pmd))
+            if (!pmd || pmd_none(*pmd) || pmd_bad(*pmd) || memd_pmd_huge(*pmd))
                 continue;
             pte = pte_offset_map(pmd, a);
             if (!pte)

@@ -141,7 +141,7 @@ static void walk_pmd_level(pud_t* pud, unsigned long addr, unsigned long end, un
     do {
         next = pmd_addr_end(addr, end);
         if (pmd_present(*pmd) && !pmd_none(*pmd)) {
-            if (pmd_huge(*pmd)) {
+            if (memd_pmd_huge(*pmd)) {
                 if (stats) {
                     stats->pmd_huge_count++;
                 }
@@ -174,7 +174,7 @@ static void walk_pud_level(p4d_t* p4d, unsigned long addr, unsigned long end, un
     do {
         next = pud_addr_end(addr, end);
         if (pud_present(*pud) && !pud_none(*pud)) {
-            if (pud_huge(*pud)) {
+            if (memd_pud_huge(*pud)) {
                 if (stats) {
                     stats->pud_huge_count++;
                 }
@@ -368,7 +368,7 @@ static int walk_pmd_level_ctx(pud_t *pud, unsigned long addr, unsigned long end,
     do {
         next = pmd_addr_end(addr, end);
         if (pmd_present(*pmd) && !pmd_none(*pmd)) {
-            if (pmd_huge(*pmd)) {
+            if (memd_pmd_huge(*pmd)) {
                 if (ctx->stats) {
                     ctx->stats->pmd_huge_count++;
                 }
@@ -417,7 +417,7 @@ static int walk_pud_level_ctx(p4d_t *p4d, unsigned long addr, unsigned long end,
     do {
         next = pud_addr_end(addr, end);
         if (pud_present(*pud) && !pud_none(*pud)) {
-            if (pud_huge(*pud)) {
+            if (memd_pud_huge(*pud)) {
                 if (ctx->stats) {
                     ctx->stats->pud_huge_count++;
                 }
@@ -603,7 +603,7 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
         goto out;
     }
 
-     if (pud_huge(*pud)) {
+     if (memd_pud_huge(*pud)) {
          info->page_size = PUD_SIZE;
          info->pfn = pud_pfn(*pud);
          info->present = true;
@@ -618,7 +618,7 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
         goto out;
     }
 
-    if (pmd_huge(*pmd)) {
+    if (memd_pmd_huge(*pmd)) {
         info->page_size = PMD_SIZE;
         info->pfn = pmd_pfn(*pmd);
         info->present = true;
