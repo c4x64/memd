@@ -52,6 +52,74 @@ def _write_tus(tmp):
         stream.write(two_tu_src.MemdHppTwoTuTests.TU_B)
 
 
+def _selftest():
+    """Pure-Python contract test: prove the SKIP/FAIL/PASS exit codes
+    without needing Linux or a C++ compiler.
+
+    Mocks the compiler probe (two_tu_gate._compiler) and the subprocess
+    runner (subprocess.run); sys.platform is patched per case. Seven
+    cases cover the contract in the module docstring:
+      no-compiler non-Linux -> SKIP, no-compiler Linux -> FAIL,
+      syntax-fail -> FAIL, syntax-ok non-Linux -> SKIP,
+      Linux link-fail -> FAIL, Linux run-miss -> FAIL, Linux full -> PASS.
+    Returns 0 when every case hits its contract code, 1 otherwise. Run:
+        python3 tools/two_tu_gate.py --self-test
+    """
+    import unittest.mock as mock
+
+    failures = []
+
+    def fake_completed(rc=0, out="", err=""):
+        return subprocess.CompletedProcess(args=["fake"], returncode=rc,
+                                           stdout=out, stderr=err)
+
+    def run_case(name, *, plat, compiler, syntax_rc=0, link_rc=0,
+                 run_rc=0, run_out="2TU-PASS\n", want):
+        def fake_run(cmd, **kwargs):
+            joined = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if "-fsyntax-only" in joined:
+                return fake_completed(syntax_rc, "", ""
+                                      if syntax_rc == 0 else "syntax boom")
+            if "-o" in (cmd if isinstance(cmd, list) else []):
+                return fake_completed(link_rc, "", ""
+                                      if link_rc == 0 else "link boom")
+            return fake_completed(run_rc, run_out, "")
+
+        with mock.patch.object(sys, "platform", plat), \
+             mock.patch.object(sys.modules[__name__], "_compiler",
+                              return_value=compiler), \
+             mock.patch.object(subprocess, "run", side_effect=fake_run):
+            got = main()
+        if got != want:
+            failures.append("%s: got %d want %d" % (name, got, want))
+        else:
+            print("self-test %s: exit %d OK" % (name, got))
+
+    run_case("no-compiler-darwin-SKIP", plat="darwin", compiler=None,
+             want=SKIP)
+    run_case("no-compiler-linux-FAIL", plat="linux", compiler=None,
+             want=FAIL)
+    run_case("syntax-fail-FAIL", plat="darwin", compiler="g++",
+             syntax_rc=1, want=FAIL)
+    run_case("syntax-ok-darwin-SKIP", plat="darwin", compiler="g++",
+             want=SKIP)
+    run_case("linux-link-fail-FAIL", plat="linux", compiler="g++",
+             link_rc=1, want=FAIL)
+    run_case("linux-run-miss-FAIL", plat="linux", compiler="g++",
+             run_out="nope\n", want=FAIL)
+    run_case("linux-run-rc-FAIL", plat="linux", compiler="g++",
+             run_rc=3, run_out="2TU-PASS\n", want=FAIL)
+    run_case("linux-full-PASS", plat="linux", compiler="g++", want=PASS)
+
+    if failures:
+        print("self-test FAIL (two_tu_gate contract):")
+        for failure in failures:
+            print("  - " + failure)
+        return 1
+    print("self-test PASS: SKIP/FAIL/PASS contract holds (8 cases, mocked)")
+    return 0
+
+
 def main():
     compiler = _compiler()
     if compiler is None:
@@ -108,4 +176,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(_selftest())
     sys.exit(main())

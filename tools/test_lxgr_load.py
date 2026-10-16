@@ -864,5 +864,77 @@ class HotswapCrashConsistencyTests(unittest.TestCase):
             0x999)
 
 
+class TwoTuGateContractTests(unittest.TestCase):
+    """two_tu_gate.py contract, mocked so it runs anywhere (no g++/Linux).
+
+    The gate itself ships a standalone self-test (python3
+    tools/two_tu_gate.py --self-test, 8 mocked cases); this pins it into
+    the unittest suite so CI covers the gate even on macOS hosts where
+    the real link+run SKIPs. Import is deferred to dodge the
+    test<->gate import cycle (the gate reads this module's TU sources
+    only at runtime).
+    """
+
+    def test_gate_selftest_passes(self):
+        import two_tu_gate
+
+        self.assertEqual(two_tu_gate._selftest(), 0)
+
+
+class HotswapCapTests(unittest.TestCase):
+    """MAX_PREV_HANDLES interplay: hotswap inherits install's fail-closed
+    refusal (no stranded handle), and success paths never approach 64."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.join(self.tmp.name, "stage")
+        self.zip_path = os.path.join(self.tmp.name, "demo.zip")
+        make_module_zip(self.zip_path)
+
+    def _args(self, **over):
+        import argparse
+
+        base = dict(zip=self.zip_path, root=self.root, pid=99,
+                    abi="arm64-v8a", entry="lxgr_main", su=False,
+                    ephemeral=False, unlink=False)
+        base.update(over)
+        return argparse.Namespace(**base)
+
+    def _seed(self, record):
+        os.makedirs(os.path.join(self.root, "lxgr.demo"), exist_ok=True)
+        lxgr_load.write_state(self.root, "lxgr.demo", 99, record)
+
+    def test_hotswap_refuses_full_chain_before_loading(self):
+        import unittest.mock as mock
+
+        full = list(range(0x200, 0x200 + lxgr_load.MAX_PREV_HANDLES))
+        self._seed({"id": "lxgr.demo", "version": "2", "handle": 0x111,
+                    "prev_handles": full})
+        with mock.patch.object(lxgr_load, "ioctl_load") as load, \
+             mock.patch.object(lxgr_load, "find_driver_family"):
+            with self.assertRaisesRegex(ValueError, "uninstall"):
+                lxgr_load.cmd_hotswap(self._args())
+            load.assert_not_called()  # via cmd_install: nothing stranded
+        state = lxgr_load.read_state(self.root, "lxgr.demo", 99)
+        self.assertEqual(state["handle"], 0x111)
+        self.assertEqual(state["prev_handles"], full)
+
+    def test_success_clears_chain_never_near_cap(self):
+        import unittest.mock as mock
+
+        self._seed({"id": "lxgr.demo", "version": "2", "handle": 0x111,
+                    "prev_handles": [0x222, 0x333]})
+        with mock.patch.object(lxgr_load, "ioctl_load",
+                               return_value=(0, 0xAAA, 0)), \
+             mock.patch.object(lxgr_load, "ioctl_unload", return_value=0), \
+             mock.patch.object(lxgr_load, "find_driver_family"):
+            self.assertEqual(lxgr_load.cmd_hotswap(self._args()), 0)
+        state = lxgr_load.read_state(self.root, "lxgr.demo", 99)
+        self.assertNotIn("prev_handles", state)
+        self.assertLessEqual(len(lxgr_load.pending_handles(state)),
+                             lxgr_load.MAX_PREV_HANDLES)
+
+
 if __name__ == "__main__":
     unittest.main()

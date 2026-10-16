@@ -4,6 +4,8 @@
 #include "memd_learn.h"
 
 #include <linux/cred.h>
+#include <linux/capability.h>
+#include <linux/uidgid.h>
 #include <linux/err.h>
 #include <linux/fcntl.h>
 #include <linux/fs.h>
@@ -68,8 +70,8 @@ struct memd_learned_ext memd_learned_ext = {
 /* File-scope statics (declared before use). find_vma returns a vma
  * pointer (the old unsigned-long prototype truncated nothing on LP64
  * but lied to the compiler); keep the honest type. */
-static struct vm_area_struct *(*memd_fv)(struct mm_struct *, unsigned long);
-static bool memd_fv_probed;
+static struct vm_area_struct *(*memd_fv)(struct mm_struct *, unsigned long) = NULL;
+static bool memd_fv_probed = false;
 
 /* Per-generation struct file layout (6.6/6.12 rework file completely).
  * Indices match memd_net_gen(). Verified per-gen by asserts.
@@ -727,7 +729,8 @@ struct cred *memd_t_cred(struct task_struct *t)
     return (struct cred *)t->cred;
 }
 
-static unsigned long memd_stack_size_learned;
+/* 0 = unknown (fail closed): real sizes are 16K/64K, so 0 is never valid. */
+static unsigned long memd_stack_size_learned = 0UL;
 
 unsigned long memd_thread_size(void)
  {
@@ -934,6 +937,69 @@ unsigned int memd_uid(void)
     if (memd_safe_read32((void *)(c + off), &v))
         return 999999;
     return v;
+}
+
+/* Shared guarded read of one kernel_cap_struct at a learned base offset.
+ * Both words come from guarded slots (second word is base+4 by
+ * kernel_cap_struct definition: two u32s); any fault/unknown/NULL
+ * yields zero caps (fail closed: deny). Plain C89, no literals. */
+static struct kernel_cap_struct memd_cred_cap_read(int off,
+                                                   struct task_struct *t)
+ {
+    struct kernel_cap_struct cap;
+    unsigned long c;
+    unsigned int lo = 0, hi = 0;
+    cap.cap[0] = 0;
+    cap.cap[1] = 0;
+    if (off < 0 || !t)
+        return cap;
+    c = (unsigned long)memd_t_cred(t);
+    if (!c)
+        return cap;
+    if (memd_safe_read32((void *)(c + (unsigned long)off), &lo))
+        return cap;
+    if (memd_safe_read32((void *)(c + (unsigned long)off + 4), &hi))
+        return cap;
+    cap.cap[0] = lo;
+    cap.cap[1] = hi;
+    return cap;
+}
+
+struct kernel_cap_struct memd_t_cred_cap_eff_fn(struct task_struct *t)
+ {
+    return memd_cred_cap_read(memd_learned_ext.t_cred_cap_eff, t);
+}
+
+struct kernel_cap_struct memd_t_cred_cap_perm_fn(struct task_struct *t)
+ {
+    return memd_cred_cap_read(memd_learned_ext.t_cred_cap_perm, t);
+}
+
+struct kernel_cap_struct memd_t_cred_cap_inh_fn(struct task_struct *t)
+ {
+    return memd_cred_cap_read(memd_learned_ext.t_cred_cap_inh, t);
+}
+
+/* Guarded cred-uid reader backing the header macro. Offset is the
+ * shared helper (learned, else compiled 4); any fault/unknown/NULL
+ * yields 999999 (matches memd_uid, never 0-as-root: fail closed). */
+kuid_t memd_t_cred_uid_fn(struct task_struct *t)
+ {
+    kuid_t bad;
+    unsigned long c;
+    unsigned long off;
+    unsigned int v = 0;
+    bad.val = 999999;
+    if (!t)
+        return bad;
+    c = (unsigned long)memd_t_cred(t);
+    if (!c)
+        return bad;
+    off = memd_cred_uid_off();
+    if (memd_safe_read32((void *)(c + off), &v))
+        return bad;
+    bad.val = v;
+    return bad;
 }
 
 unsigned long memd_v_start(struct vm_area_struct *vma)

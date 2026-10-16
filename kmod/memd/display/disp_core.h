@@ -89,13 +89,12 @@ struct memd_disp_backend {
  * submit stays immediate; this only repaints persistence. */
 #define MEMD_DISP_REFRESH_MS 100
 
-/* TODO(display): facility parked — complete but unwired. Backends
+/* Facility gate (ex-TODO(display): parked while unwired). Backends
  * (exynos/DECON probe, simplefb, DRM client, RAM), the refresh thread,
  * the VNC tap and the readback opcode are all implemented and stay
- * compile-checked, but install refuses until this is flipped. The rest
- * of the core needs no changes: with install refusing, no backend ever
- * activates, no thread ever spawns, and status/frame/readback report
- * inactive. Set to 0 to activate. */
+ * compile-checked. When 1, install refuses closed (-EOPNOTSUPP): no
+ * backend activates, no thread spawns, and status/frame/readback
+ * report inactive. Currently 0 (active). */
 #define MEMD_DISP_TODO 0
 
 int memd_core_install(__u32 backend, __u32 width, __u32 height);

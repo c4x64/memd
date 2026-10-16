@@ -229,7 +229,12 @@ int memd_printk(const char *fmt, ...)
         tmp = (void *)kallsyms_lookup_name_ex("vprintk");
         if (!tmp) {
             d = READ_ONCE(dropped);
-            WRITE_ONCE(dropped, d + 1);
+            /* Saturating: a pre-bootstrap reader storm must never wrap
+             * the counter (signed overflow); the loss report stays
+             * exact until the cap, then pins. A racing increment that
+             * lands after the reset below is a benign undercount. */
+            if (d < 2147483647L)
+                WRITE_ONCE(dropped, d + 1);
             return 0;
         }
         WRITE_ONCE(fn, tmp);
@@ -1320,6 +1325,13 @@ static int get_cmdline_ex(struct task_struct* task, char* buffer, int buflen) {
     env_end = mm->env_end;
     spin_unlock(&mm->arg_lock);
 
+    /* Torn/empty range under a racing exec: arg_end <= arg_start
+     * wraps the subtraction below into a huge len and fabricates a
+     * read (mirrors the ioctl argv-fallback guard). Return 0 with the
+     * buffer untouched instead of scanning user memory. */
+    if (arg_end <= arg_start)
+        goto out_mm;
+
     len = arg_end - arg_start;
 
     if (len > buflen)
@@ -1336,10 +1348,14 @@ static int get_cmdline_ex(struct task_struct* task, char* buffer, int buflen) {
         if (len < res) {
             res = len;
         } else {
-            len = env_end - env_start;
-            if (len > buflen - res)
-                len = buflen - res;
-            res += access_process_vm(task, env_start, buffer + res, len, FOLL_FORCE);
+            /* Torn env range under a racing exec: same wrap hazard
+             * as argv above; skip the env leg and keep argv bytes. */
+            if (env_end > env_start) {
+                len = env_end - env_start;
+                if (len > buflen - res)
+                    len = buflen - res;
+                res += access_process_vm(task, env_start, buffer + res, len, FOLL_FORCE);
+            }
             res = strnlen(buffer, res);
         }
     }

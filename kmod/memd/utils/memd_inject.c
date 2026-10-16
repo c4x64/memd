@@ -68,7 +68,8 @@
  * recapture-kills. The hog is bounded, fail-closed (timeout always
  * recaptures or kills, never leaks a hijacked thread), and the wait is
  * interruptible (mutex_lock_interruptible), so a second admin ioctl can
- * abort with -ERESTARTSYS instead of hanging unkillably. Do not shorten
+ * abort with -ERESTARTSYS as the ioctl return (mirrored in result)
+ * instead of hanging unkillably. Do not shorten
  * without measuring slow-device init. */
 #define MEMD_INJ_SEIZE_TRIES 250   /* 250 x 20ms = 5s to reach STOPPED */
 #define MEMD_INJ_CALL_TRIES  500   /* 500 x 20ms = 10s for dlopen return */
@@ -442,7 +443,8 @@ static int resolve_lib_sym(struct task_struct *t, uintptr_t base,
  * below-SP scratch and clobber each other's stub/regs. Serialization is
  * global (not per-target) by design — see the timing-budget note above.
  * The mutex wait is interruptible so concurrent DIFFERENT-target injects
- * queue instead of corrupting, and a waiter can abort with -ERESTARTSYS.
+ * queue instead of corrupting, and a waiter can abort with -ERESTARTSYS
+ * (ioctl return, mirrored in result).
  * A serialized inject-then-unload pair is therefore sequential: the
  * unload observes the inject's completed state (handle installed or
  * zero on failure/ephemeral), never a half-hijacked thread. Sleepable
@@ -725,6 +727,18 @@ static int remote_call(struct task_struct *task, struct mm_struct *mm,
     if (sp < MEMD_INJ_SCRATCH_BELOW + 512)
         return -EFAULT;
     base = (sp - MEMD_INJ_SCRATCH_BELOW) & ~15UL;
+    /* Scratch map (all offsets from the 16-aligned base; base + 1024
+     * <= sp, so the window sits wholly below the live stack, and SP is
+     * dropped to base during the call so pushes/frames land below it):
+     *  stub [base, base + 44): 11 words x 4 = 44 bytes; 44 < 64 so the
+     *   stub never reaches the flag (20 bytes of padding).
+     *  flag [base + 64, base + 80): 2 x u64 (done + retval), 16 bytes,
+     *   u64-aligned, ending exactly where the path begins.
+     *  path [base + 80, base + 336): at most 256 bytes (extralen <= 256
+     *   enforced above, NUL included); 80 + 256 = 336 <= 1024, so even
+     *   the longest path ends 688 bytes inside the window.
+     * In short: 0 < 44 <= 64 < 80 < 336 <= 1024; regions disjoint, base
+     * stays 16-aligned and flag/path offsets stay 16-aligned. */
     stub_va = base;
     flag_va = base + 64;
     path_va = base + 80;
@@ -958,6 +972,11 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
             goto out_release;
         }
         addrs = fresh_addrs;
+        /* addrs is now wholly stopped-time: the dlopen call below uses
+         * addrs.dlopen_va and the ephemeral dlclose uses
+         * addrs.dlclose_va, both from this fresh decode; the entry call
+         * uses entry_va resolved separately after dlopen, never this
+         * struct. No later remote_call observes pre-seize bytes. */
     }
     if (su && su_stage(task, &su_state)) {
         ret = -EACCES;
@@ -1075,6 +1094,12 @@ int do_load_sotoapp(struct socket* sock, void __user* arg)
     cmd.entry_result = entry_result;
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
+    /* Mutex-interrupt abort: surface -ERESTARTSYS as the ioctl return
+     * (restart/EINTR semantics) as well as in result, so a queued admin
+     * ioctl does not look like success-zero with a 512 hidden in the
+     * payload. Nothing changed on this path, so this is fail-closed. */
+    if (ret == -ERESTARTSYS)
+        return -ERESTARTSYS;
     return 0;
 }
 
@@ -1097,6 +1122,10 @@ int do_load_sosutoapp(struct socket* sock, void __user* arg)
     cmd.entry_result = entry_result;
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
+    /* Same -ERESTARTSYS propagation as above: ioctl return carries
+     * restart semantics, result mirrors it; nothing changed. */
+    if (ret == -ERESTARTSYS)
+        return -ERESTARTSYS;
     return 0;
 }
 
@@ -1178,6 +1207,9 @@ static int unload_so(pid_t pid, uintptr_t handle)
             goto out_mm;
         }
         addrs = fresh_addrs;
+        /* addrs is now wholly stopped-time; the single dlclose below
+         * uses addrs.dlclose_va from this fresh decode. No later
+         * remote_call observes pre-seize bytes. */
     }
     retval = 0;
     ret = remote_call(task, mm, addrs.dlclose_va, handle, NULL, 0,
@@ -1212,6 +1244,10 @@ int do_loadso_unload(struct socket* sock, void __user* arg)
         cmd.handle = 0;
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
+    /* Same -ERESTARTSYS propagation as the load paths: ioctl return
+     * carries restart semantics, result mirrors it; nothing changed. */
+    if (ret == -ERESTARTSYS)
+        return -ERESTARTSYS;
     return 0;
 }
 /* kmod/memd/utils/memd_inject.c[∂] */

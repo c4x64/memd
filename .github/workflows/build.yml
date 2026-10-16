@@ -319,6 +319,9 @@ jobs:
           python3 .github/scripts/generate_matrix.py --fetch-latest --output matrix.json
           echo "matrix=$(cat matrix.json | jq -c .)" >> $GITHUB_OUTPUT
 
+      - name: Verify SPX flavors match matrix
+        run: python3 .github/scripts/check_spx_matrix.py
+
   build:
     name: Build ${{ matrix.kmi }}
     needs: generate-matrix

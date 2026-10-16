@@ -28,6 +28,16 @@
  * entry, while adopting the modified value would republish a pointer
  * we did not author (and cannot vouch for). Same rule at install:
  * the slot must still hold the snapshotted orig, else -EBUSY.
+ *
+ * Owner-divergence recovery: when the owner permanently repoints a
+ * slot (live never returns to our replacement or the saved orig),
+ * uninstall keeps refusing with -EBUSY and filtering for that table
+ * stays silently lost (never a crash). Install-while-active stays a
+ * no-op on purpose, so no repair attempt can cut a stacked
+ * third-party hook out of the chain. Recovery is rmmod + insmod +
+ * install, which re-snapshots the owner's new entry as orig; rmmod
+ * itself logs the -EBUSY and unloads (safe while nothing chains back
+ * into us, which no callee can fence).
  */
 int memd_hide_install(void);
 int memd_hide_uninstall(void);

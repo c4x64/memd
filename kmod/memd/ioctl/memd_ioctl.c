@@ -832,7 +832,10 @@ int do_page_perms(struct socket* sock, void* arg) {
         return -EFAULT;
     }
     /* Descriptor metadata only: safe on execute-only mappings (no
-     * content reads anywhere on this path). */
+     * content reads anywhere on this path). desc[] is filled sparsely:
+     * the walker writes only the levels it descends, so pre-zero it —
+     * unwalked levels report 0 instead of echoing caller input back. */
+    memset(cmd.desc, 0, sizeof(cmd.desc));
     ret = memd_page_perms(cmd.va, &cmd.phy_addr, &cmd.present,
                           &cmd.leaf_level, &cmd.ap, &cmd.xn, cmd.desc);
     cmd.idx0 = pgd_index(cmd.va);
@@ -1474,6 +1477,10 @@ int do_gyro_calibrate(struct socket* sock, void __user* arg)
         return -ESRCH;
     ret = memd_gyro_calibrate(task, &cmd);
     put_task_struct(task);
+    /* No result field in this struct: a bad action / bad span must fail
+     * closed via the return value, never report success with stale data. */
+    if (ret)
+        return ret;
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
     return 0;
@@ -1494,6 +1501,10 @@ int do_touch_calibrate(struct socket* sock, void __user* arg)
         return -ESRCH;
     ret = memd_touch_calibrate(task, &cmd);
     put_task_struct(task);
+    /* Same contract as gyro_calibrate above: no result field, so the
+     * return value is the only status channel — propagate failures. */
+    if (ret)
+        return ret;
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
     return 0;
@@ -1512,6 +1523,11 @@ int do_virtual_input_create(struct socket* sock, void __user* arg)
     task = get_target_task(cmd.pid);
     if (!task)
         return -ESRCH;
+    /* Result-field contract (shared with sigforce/bootstrap/disp rc):
+     * the callee records status in cmd.result on every reachable path
+     * and this handler always returns 0 after copying back — userspace
+     * must check cmd.result, not the ioctl return. Do not convert these
+     * handlers to return-ret style. */
     ret = memd_virtual_input_create(task, &cmd);
     put_task_struct(task);
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))

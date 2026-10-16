@@ -331,7 +331,18 @@ int memd_proto_init(void)
     INIT_LIST_HEAD(&g_sock_list);
     spin_lock_init(&g_sock_list_lock);
 
-    /* Use template for additional fields not in runtime buffer */
+    /* destroy is written at the BUILD headers' offset: unlike
+     * name/owner/obj_size it has no runtime-table entry, and no
+     * per-gen assert pins it the way release/mmap are pinned for
+     * proto_ops. The tree's own tables prove struct proto's tail moves
+     * across gens, so a build-offset write is trusted only when the
+     * build gen matches the running gen — plausible (leading callback
+     * block, ancient) but NOT proven here. Do NOT invent a table
+     * value. The safe follow-up (needs per-gen DDK headers): add a
+     * destroy offset to struct memd_proto_off, fill it from each
+     * gen's DDK struct proto, extend the matrix asserts to lock it,
+     * and write it via memcpy into the runtime buffer exactly like
+     * name/owner/obj_size, failing closed on unknown gens. */
     proto = memd_proto_ptr();
     proto->destroy = memd_sock_destruct;
 

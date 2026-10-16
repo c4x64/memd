@@ -159,8 +159,10 @@ int memd_add_unsafe_region(pid_t session, uid_t uid, uintptr_t start, size_t num
         return -EINVAL;
 
     /* Shift must not discard bits, and the span must not wrap: either
-     * would admit an overlapping region or break region_find. */
-    span = num_page << PAGE_SHIFT;
+     * would admit an overlapping region or break region_find. Cast to
+     * unsigned long first so the shift width never depends on the
+     * size_t/u32 width of the build. */
+    span = (unsigned long)num_page << PAGE_SHIFT;
     if ((span >> PAGE_SHIFT) != num_page)
         return -EINVAL;
     if (start + span < start)
@@ -176,7 +178,8 @@ int memd_add_unsafe_region(pid_t session, uid_t uid, uintptr_t start, size_t num
     }
 
     area->addr = start;
-    area->nums_page = num_page;
+    /* Range-checked above (1..1M pages): fits u32, cast is exact. */
+    area->nums_page = (u32)num_page;
     area->uid = uid;
     area->session_pid = session;
     area->prot = 0;

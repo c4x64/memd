@@ -149,7 +149,10 @@ static int memd_drm_open(__u32 w, __u32 h)
         return -EINVAL;
     /* Belt-and-braces like simplefb/RAM: a re-open without close must
      * not strand the client/fb (core always closes first; the auto
-     * loop depends on each failed open owning its own cleanup). */
+     * loop depends on each failed open owning its own cleanup).
+     * No double-close or close-while-presenting: open/close/present
+     * all run under the core lock, and the close below NULLs every
+     * handle (idempotent). */
     if (g_drm.client || g_drm.fb)
         memd_drm_close();
 

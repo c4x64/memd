@@ -16,8 +16,9 @@
  * - One overlay window only, and only when firmware left it disabled.
  *   A window already owned by the OS compositor is never touched.
  *
- * Frame pacing: programmed on FRAME submit (tearing possible). A vsync
- * source per SoC is a tracked TODO; no vsync is ever guessed.
+ * Frame pacing: software vsync in the core (monotonic ktime targets,
+ * tear-free flip queue). A per-SoC HARDWARE vsync source stays unwired
+ * on purpose; no vsync is ever guessed.
  */
 
 #include <linux/types.h>

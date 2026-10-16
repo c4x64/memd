@@ -80,6 +80,11 @@ static struct {
     int64_t frame_interval_ns;
     int64_t last_flip_ns;
     atomic_t frame_count;
+    /* Vsync session epoch, bumped under g_core_mu on every install
+     * and uninstall. A waiter that slept through a teardown/reinstall
+     * sees a mismatch and fails closed instead of mutating the new
+     * session's last_flip/next/frame_count. */
+    unsigned long vsync_gen;
 } g_core = {
     .front = NULL,
     .back = NULL,
@@ -105,6 +110,7 @@ static struct {
     .frame_interval_ns = 16666666,
     .last_flip_ns = 0,
     .frame_count = ATOMIC_INIT(0),
+    .vsync_gen = 0,
 };
 
 /* Refresh thread: re-presents the stable front at MEMD_DISP_REFRESH_MS
@@ -204,6 +210,7 @@ static int memd_vsync_wait_internal(int64_t timeout_ns)
     int64_t remaining;
     int ret;
     int64_t now;
+    unsigned long gen0, gen1;
     if (timeout_ns < 0)
         timeout_ns = 0;
 
@@ -212,6 +219,7 @@ static int memd_vsync_wait_internal(int64_t timeout_ns)
     present = g_core.be ? 1 : 0;
     target = g_core.vsync.next_vsync_ns;
     interval = g_core.vsync.frame_interval_ns;
+    gen0 = g_core.vsync_gen;
     mutex_unlock(&g_core_mu);
     if (!present)
         return -ENODEV;
@@ -242,10 +250,14 @@ static int memd_vsync_wait_internal(int64_t timeout_ns)
 
     now = memd_get_time_ns();
     mutex_lock(&g_core_mu);
-    /* Teardown during the sleep must not poison the next session:
+    gen1 = g_core.vsync_gen;
+    /* Teardown/reinstall during the sleep must not poison sessions:
      * a waiter woken by uninstall (or racing a reinstall) leaves
-     * last_flip/next/frame_count untouched and fails closed. */
-    if (!g_core.be) {
+     * last_flip/next/frame_count untouched and fails closed. The
+     * be-NULL test covers teardown; the generation test covers a stale
+     * waiter from an older session landing in a newer one. Check and
+     * mutate share this one critical section (no TOCTOU). */
+    if (!g_core.be || gen1 != gen0) {
         mutex_unlock(&g_core_mu);
         return -ENODEV;
     }
@@ -377,6 +389,10 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
     g_core.w = 0;
     g_core.h = 0;
     g_core.be = NULL;
+    /* New session epoch: stale vsync waiters from the old session fail
+     * closed on generation mismatch instead of mutating the new
+     * session's last_flip/next/frame_count. */
+    g_core.vsync_gen++;
     g_core.dirty.valid = false;
     /* Drop queued flips before reusing buffers (worker needs the
      * mutex, so flush without holding it). */
@@ -549,6 +565,10 @@ int memd_core_uninstall(void)
      * (worker short-circuits on NULL be without touching buffers). */
     dead = g_core.be;
     g_core.be = NULL;
+    /* Epoch bump before the unlock: waiters woken below (or already
+     * awake) see the mismatch and fail closed without touching the
+     * next session's vsync state. */
+    g_core.vsync_gen++;
     mutex_unlock(&g_core_mu);
     if (t)
         kthread_stop(t);
@@ -856,7 +876,8 @@ int memd_core_get_modes(struct memd_disp_mode *modes, __u32 max_modes)
         __u32 count = max_modes < g_core.mode_count ? max_modes : g_core.mode_count;
         /* mode_count is core-owned (backends report via get_modes, so
          * this stays 0 today): clamp the read bound to the array so a
-         * stale/corrupt count can never over-read available_modes. */
+         * stale/corrupt count can never over-read available_modes.
+         * count <= 16, element 12B: count * sizeof <= 192, never wraps. */
         if (count > sizeof(g_core.available_modes) /
                      sizeof(g_core.available_modes[0]))
             count = sizeof(g_core.available_modes) /

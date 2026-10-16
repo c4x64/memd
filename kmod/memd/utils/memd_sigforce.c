@@ -147,7 +147,7 @@ void memd_sigforce_cleanup(void)
 
     mutex_lock(&sigforce_pending_lock);
     list_for_each_entry_safe(pending, tmp, &sigforce_pending_list, list) {
-        list_del(&pending->list);
+        list_del_init(&pending->list);
         pending->result = -ENODEV;
         complete(&pending->done);
     }
@@ -233,7 +233,6 @@ static int memd_sigforce_deliver_async(struct task_struct *task, int sig, int fo
     struct siginfo info;
     unsigned long tmo;
     int ret;
-    int dead;
 
     if (!task || task->flags & PF_EXITING)
         return -ESRCH;
@@ -260,6 +259,7 @@ static int memd_sigforce_deliver_async(struct task_struct *task, int sig, int fo
     pending->info = info;
     init_completion(&pending->done);
     pending->result = 0;
+    INIT_LIST_HEAD(&pending->list);
 
     /* Pin the target across the queue: without a ref the worker could
      * dereference a reaped task_struct. The waiter drops it after the
@@ -308,27 +308,18 @@ static int memd_sigforce_deliver_async(struct task_struct *task, int sig, int fo
             return -ETIMEDOUT;
         }
         mutex_unlock(&sigforce_pending_lock);
-        /* Dequeued but uncompleted: the worker owns it and touches it
-         * only before complete, so one short grace wait is safe. If
-         * that also expires and the worker is observably dead, it can
-         * never complete: reclaim (dead stays dead, no future touch).
-         * A live worker will complete; keep waiting (freeing under a
-         * live owner would UAF its complete). */
+        /* Dequeued but uncompleted: dequeue (list_del_init under the
+         * lock) passed ownership to the worker, which touches the entry
+         * only before complete. The entry is off every list, so neither
+         * this path nor the cleanup drain may free it -- wait it out.
+         * A dead-worker sighting never transfers ownership back: a
+         * stopping worker may still be inside send/complete, and the
+         * cleanup drain (list_del_init + complete, no free) already
+         * covers entries still queued. Freeing here would UAF. */
         tmo = wait_for_completion_timeout(&pending->done,
                                           msecs_to_jiffies(5000));
-        if (!tmo) {
-            mutex_lock(&sigforce_pending_lock);
-            dead = !sigforce_worker_task ||
-                   (sigforce_worker_task->flags & PF_EXITING) ||
-                   sigforce_worker_task->exit_state;
-            mutex_unlock(&sigforce_pending_lock);
-            if (dead) {
-                put_task_struct(task);
-                kfree(pending);
-                return -ETIMEDOUT;
-            }
+        if (!tmo)
             wait_for_completion(&pending->done);
-        }
     }
     ret = pending->result;
     put_task_struct(task);

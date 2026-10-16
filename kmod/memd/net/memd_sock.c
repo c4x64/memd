@@ -13,7 +13,7 @@
 static int memd_release(struct socket* sock) {
     struct sock* sk;
     struct memd_sock* ws;
-    int i;
+    size_t i;
     sk = sock->sk;
     if (!sk) {
         return 0;

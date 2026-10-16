@@ -34,7 +34,8 @@
  * Concurrency: inject/unload serialize on one global mutex (interruptible
  * wait). Same-target inject-vs-unload is sequential (unload sees the
  * inject's completed state); different-target injects queue for up to the
- * ~35s worst-case hold — bounded, admin-only, abortable with -ERESTARTSYS.
+ * ~35s worst-case hold — bounded, admin-only, abortable with -ERESTARTSYS
+ * (ioctl return, mirrored in result).
  * Only one thread per target is hijacked; siblings group-stop and resume
  * untouched, so single-thread selection is sound for multithreaded apps.
  *

@@ -351,26 +351,25 @@ void memd_learn_file_private(struct file *f, void *known_private);
 
 #define memd_t_nsproxy_pid_ns(t) (NULL)
 
-/* Cred struct readers */
-#define memd_t_cred_cap_eff(t) \
-    (memd_learned_ext.t_cred_cap_eff >= 0 ? \
-     *(struct kernel_cap_struct *)((char *)memd_t_cred(t) + memd_learned_ext.t_cred_cap_eff) : \
-     (struct kernel_cap_struct) {0})
+/* Cred struct readers: guarded functions (defined in memd_learn.c),
+ * not raw derefs. Fault/unknown/NULL yields zero caps (fail closed:
+ * deny) or an invalid uid (999999, never 0-as-root). The uid offset is
+ * the shared memd_cred_uid_off() helper (learned, else compiled 4);
+ * the cap second word (caps 32..63) is base+4 by kernel_cap_struct
+ * definition (two u32s). Plain functions (not inlines) so this header
+ * needs no include reordering. */
+struct kernel_cap_struct memd_t_cred_cap_eff_fn(struct task_struct *t);
+struct kernel_cap_struct memd_t_cred_cap_perm_fn(struct task_struct *t);
+struct kernel_cap_struct memd_t_cred_cap_inh_fn(struct task_struct *t);
+kuid_t memd_t_cred_uid_fn(struct task_struct *t);
 
-#define memd_t_cred_cap_perm(t) \
-    (memd_learned_ext.t_cred_cap_perm >= 0 ? \
-     *(struct kernel_cap_struct *)((char *)memd_t_cred(t) + memd_learned_ext.t_cred_cap_perm) : \
-     (struct kernel_cap_struct) {0})
+#define memd_t_cred_cap_eff(t) (memd_t_cred_cap_eff_fn(t))
 
-#define memd_t_cred_cap_inh(t) \
-    (memd_learned_ext.t_cred_cap_inh >= 0 ? \
-     *(struct kernel_cap_struct *)((char *)memd_t_cred(t) + memd_learned_ext.t_cred_cap_inh) : \
-     (struct kernel_cap_struct) {0})
+#define memd_t_cred_cap_perm(t) (memd_t_cred_cap_perm_fn(t))
 
-#define memd_t_cred_uid(t) \
-    (memd_learned_ext.t_cred_uid >= 0 ? \
-     *(kuid_t *)((char *)memd_t_cred(t) + memd_learned_ext.t_cred_uid) : \
-     (kuid_t) {0})
+#define memd_t_cred_cap_inh(t) (memd_t_cred_cap_inh_fn(t))
+
+#define memd_t_cred_uid(t) (memd_t_cred_uid_fn(t))
 
 /* Comprehensive learning */
 int memd_learn_comprehensive(void);

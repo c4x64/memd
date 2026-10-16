@@ -309,9 +309,28 @@ def _layout_body(body, resolved, depth=0):
         # Function pointer, optionally __user-annotated: int (*__user fn)(void *)
         # -- always a pointer. (__user is an address-space annotation, not
         # part of the name; the canon gate strips it the same way.)
-        m = re.search(r"\(\*\s*(?:__user\s+)?(\w+)\s*\)", decl)
+        # Arrays of function pointers (int (*fn[4])(void *)) are N
+        # pointers; a "[N]" AFTER the prototype (int (*fn)(void *)[4])
+        # is not a data field at all, so refuse loudly instead of
+        # silently dropping the extent (the old code fell through to
+        # the generic "*" branch and filed it as an 8-byte ")" field).
+        m = re.search(r"\(\*\s*(?:__user\s+)?(\w+)((?:\s*\[[^\]]*\])*)\s*\)",
+                      decl)
         if m:
-            members.append((8, 8, m.group(1)))
+            inner_extents = re.findall(r"\[\s*(\d*)\s*\]", m.group(2))
+            if not inner_extents and re.search(r"\[\s*\d*\s*\]\s*$",
+                                              decl.strip()):
+                raise ValueError(
+                    "layout: function-pointer array suffix not modelled "
+                    "(got %r)" % decl[:60])
+            n = 1
+            for ext in inner_extents:
+                if not ext:
+                    raise ValueError(
+                        "layout: unsized function-pointer array not modelled "
+                        "(got %r)" % decl[:60])
+                n *= int(ext)
+            members.append((8 * n, 8, m.group(1)))
             continue
         parts = _split_top(decl, ",")
         base = None
@@ -614,11 +633,113 @@ def layout_robustness_selftest():
     return 0
 
 
+def adversarial_layout_selftest():
+    """Fuzz the layout engine with 5 adversarial shapes (Round-7).
+
+    Each shape must either lay out EXACTLY (offsets/sizes pinned against
+    clang-measured LP64) or RAISE loudly. Silent-wrong (a size/offset
+    the engine invents) is the failure mode: e.g. the old function-
+    pointer branch filed "int (*fn[4])(void *)" as an 8-byte ")" field
+    instead of 32 bytes or an error.
+    Returns 0 on success, 1 otherwise. Run with:
+        python3 .github/scripts/check_client_h.py --self-test
+    """
+    failures = []
+
+    def check_layout(name, raw, wanted, want_fields, want_size):
+        try:
+            got = compute_layouts(raw, {wanted})[wanted]
+        except ValueError as error:
+            failures.append("%s raised unexpectedly: %s" % (name, error))
+            return
+        fields, size, _ = got
+        if size != want_size or fields != want_fields:
+            failures.append(
+                "%s mislaid: got %r size %d, want %r size %d"
+                % (name, fields, size, want_fields, want_size))
+
+    def check_raises(name, body, raw_extra=None):
+        raw = dict(raw_extra or {})
+        raw["s"] = body
+        try:
+            compute_layouts(raw, {"s"})
+            failures.append("%s laid out silently (must raise)" % name)
+        except ValueError:
+            pass
+
+    # 1. Nested anonymous union: tag@0, union@8+8, tail@16 (size 24).
+    # clang: sizeof 24, tail offsetof 16.
+    check_layout(
+        "nested-anon-union",
+        {"s": "uint32_t tag; union { uint32_t a; uint64_t b; }; "
+              "uint32_t tail;"},
+        "s", [("tag", 0, 4), ("anon-union", 8, 8), ("tail", 16, 4)], 24)
+    # Doubly-nested anonymous union: same footprint, one deeper.
+    check_layout(
+        "nested-anon-union-x2",
+        {"s": "union { union { uint32_t a; uint64_t b; }; uint32_t c; }; "
+              "uint32_t tail;"},
+        "s", [("anon-union", 0, 8), ("tail", 8, 4)], 16)
+    # 2. Arrays of structs, named and anonymous (clang: both size 36).
+    check_layout(
+        "array-of-struct-named",
+        {"inner": "uint32_t x; uint16_t y;",
+         "s": "struct inner items[4]; uint32_t tail;"},
+        "s", [("items", 0, 32), ("tail", 32, 4)], 36)
+    check_layout(
+        "array-of-struct-anon",
+        {"s": "struct { uint32_t a; uint16_t b; } entries[4]; "
+              "uint32_t tail;"},
+        "s", [("entries", 0, 32), ("tail", 32, 4)], 36)
+    # 3. Function pointers: scalar (16B with trailing u32), array (32B),
+    # __user-annotated (8B). Trailing "[N]" after the prototype and
+    # unsized arrays must RAISE, never silently drop the extent.
+    check_layout(
+        "fn-pointer",
+        {"s": "int (*fn)(void *); uint32_t x;"},
+        "s", [("fn", 0, 8), ("x", 8, 4)], 16)
+    check_layout(
+        "fn-pointer-array",
+        {"s": "int (*fn[4])(void *);"},
+        "s", [("fn", 0, 32)], 32)
+    check_layout(
+        "fn-pointer-user",
+        {"s": "int (*__user fn)(void *);"},
+        "s", [("fn", 0, 8)], 8)
+    check_raises("fn-pointer-suffix", "int (*fn)(void *)[4];")
+    check_raises("fn-pointer-unsized", "int (*fn[])(void *);")
+    # 4. __user pointers: address-space annotation, still 8-byte pointers.
+    check_layout(
+        "user-pointer",
+        {"s": "uint8_t __user *bitmap; uint32_t n;"},
+        "s", [("bitmap", 0, 8), ("n", 8, 4)], 16)
+    check_layout(
+        "user-pointer-scalar",
+        {"s": "uint32_t __user *buf;"},
+        "s", [("buf", 0, 8)], 8)
+    # 5. Oversized bitfields: any ":N" width is unmodelled -- RAISE even
+    # when the width exceeds its carrier (the old code laid "a:4; b:28"
+    # out as two 4-byte fields instead of one word).
+    check_raises("bitfield-oversized", "uint32_t a:300;")
+    check_raises("bitfield-pair", "uint32_t a:4; uint32_t b:28;")
+    check_raises("bitfield-anon", "uint32_t :0;")
+
+    if failures:
+        print("self-test FAIL (adversarial layouts):")
+        for failure in failures:
+            print("  - " + failure)
+        return 1
+    print("self-test PASS: 5 adversarial shapes exact-or-loud "
+          "(anon-union, struct-array, fn-ptr, __user, bitfield)")
+    return 0
+
+
 def main():
     if "--self-test" in sys.argv:
         first = synthetic_size_collision_selftest()
         second = layout_robustness_selftest()
-        return first or second
+        third = adversarial_layout_selftest()
+        return first or second or third
     errors = []
     ksrc = "\n".join(read(p) for p in KERN_FILES)
     csrc = read(CLIENT)

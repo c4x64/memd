@@ -438,7 +438,10 @@ void memd_remove_inline_hook(void *target, void *orig)
       * caller input). An unloaded owner fails the guarded read; pages
       * recycled to a new owner fail the compare. Either way refuse and
       * retain the entry: writing stale prologue bytes there would fault
-      * or corrupt the new owner. A later remove retries. */
+      * or corrupt the new owner. A later remove retries.
+      * Word 0 alone is complete attestation: install overwrites only
+      * this one word (a single B; the rest of the hook_size range
+      * still holds the original prologue install never touched). */
      {
          long delta;
          u32 expect;

@@ -55,6 +55,19 @@ MAX_ZIP_ENTRIES = 4096
 # Survivor-chain cap: every failed unload appends one entry, so an
 # install that would push past this refuses instead of growing the
 # state file (and the resident set) without bound.
+# Interplay (Round-7 audit): a HEALTHY flow never approaches 64 --
+# success clears the chain (hotswap drops it, uninstall unlinks the
+# record), so the count only grows across CONSECUTIVE unload failures
+# (driver/target wedged, 64 hotswaps in a row without one drain). The
+# refusal happens in cmd_install BEFORE any load (no stranded
+# live-but-unrecorded handle), and hotswap inherits it because it
+# funnels through cmd_install; write_state re-checks as a backstop for
+# externally-grown records. Drain-oldest was rejected: evicting the
+# oldest survivor would orphan a still-resident library the next
+# uninstall could never find (a silent leak), while refusing keeps
+# every resident handle on record for the operator to drain with
+# uninstall. 64 is ample for flaky targets and small enough to keep
+# the state file (and one retry loop) bounded.
 MAX_PREV_HANDLES = 64
 MAX_PID = (1 << 31) - 1  # struct "<i" range; real pids are far smaller
 MAX_HANDLE = (1 << 64) - 1  # struct "<Q" range

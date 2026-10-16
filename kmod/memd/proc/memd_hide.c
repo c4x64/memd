@@ -69,6 +69,7 @@ int memd_hide_add(pid_t pid)
     struct memd_hide_ns_entry *found;
     struct pid_namespace *ns;
     struct task_struct *task;
+    struct pid *pin;
     unsigned long flags;
     unsigned int hash;
     unsigned int ns_hash;
@@ -126,7 +127,18 @@ int memd_hide_add(pid_t pid)
 
     entry->pid = pid;
     entry->ns = get_pid_ns(ns);
-    entry->pid_struct = find_get_pid(pid);
+    /* Pin the struct pid for (pid, ns), not the caller's view: the
+     * same stale-yet-pinned hazard documented in memd_hide_add_ns
+     * applied here (find_get_pid resolves in the caller's namespace,
+     * which may differ from the entry's ns). find_pid_ns is RCU +
+     * atomic get only, so it is safe under this spinlock; a NULL pin
+     * (nr absent in ns) stays reap-eligible, never permanently lost. */
+    rcu_read_lock();
+    pin = find_pid_ns(pid, ns);
+    if (pin)
+        get_pid(pin);
+    rcu_read_unlock();
+    entry->pid_struct = pin;
     entry->flags = 0;
 
     hash = hide_hash_fn(pid, ns);
