@@ -10,7 +10,9 @@ root-only dir -> lock down (chown 0:0, chmod 0700) -> remote dlopen via
 the MEMD driver (optional entry + su window) -> record {handle} in a
 per-pid state file -> optionally unlink the staged file (mapping
 survives on the inode, path disappears). Hotswap = install new, then
-unload old handle. Uninstall = unload recorded handle.
+unload old handle. Uninstall = unload recorded handle. `status` probes
+driver identity (VERSION), learned offsets (LEARN_STATUS) and the hide
+filter (HIDE_STATUS). `hide`/`unhide` manage one visible hide entry.
 
 Only stdlib is used (zipfile/struct/fcntl), so this runs on-device
 under python3 with no extra packages. Pure helpers are unit-tested in
@@ -37,6 +39,11 @@ _IOC_TYPE = ord("W")
 NR_LOAD_SOTOAPP = 38
 NR_LOAD_SOSUTOAPP = 39
 NR_LOADSO_UNLOAD = 41
+NR_HIDE_PROCESS = 14
+NR_HIDE_STATUS = 21
+NR_HIDE_INSTALL = 22
+NR_VERSION = 42
+NR_LEARN_STATUS = 43
 
 # struct memd_loadso_cmd: pid@0 path@4 entry@260 flags@324 result@328
 # handle@336 entry_result@344 (352 bytes, LP64).
@@ -45,8 +52,27 @@ LOADSO_SIZE = struct.calcsize(LOADSO_FMT)
 # struct memd_loadso_unload_cmd: pid@0 handle@8 result@16 (24 bytes).
 UNLOAD_FMT = "<i4xQi4x"
 UNLOAD_SIZE = struct.calcsize(UNLOAD_FMT)
+# struct memd_version_cmd: abi/major/minor/patch/flags@0..16,
+# gen@20 result@24 (28 bytes, LP64).
+VERSION_FMT = "<IIIIIii"
+VERSION_SIZE = struct.calcsize(VERSION_FMT)
+# struct memd_learn_status_cmd: gen + 8 offsets + mask + result
+# (44 bytes, LP64).
+LEARN_STATUS_FMT = "<iiiiiiiiiIi"
+LEARN_STATUS_SIZE = struct.calcsize(LEARN_STATUS_FMT)
+# struct memd_hide_proc_cmd: pid@0 hide@4 (8 bytes).
+HIDE_PROC_FMT = "<ii"
+HIDE_PROC_SIZE = struct.calcsize(HIDE_PROC_FMT)
+# struct memd_hide_status_cmd: active@0 hidden_count@4 (8 bytes).
+HIDE_STATUS_FMT = "<ii"
+HIDE_STATUS_SIZE = struct.calcsize(HIDE_STATUS_FMT)
 
 LOADSO_EPHEMERAL = 1
+
+# Must match memd_ioctl.h MEMD_ABI_VERSION; the driver rejects mismatches.
+MEMD_ABI_VERSION = 1
+MEMD_F_BOOTSTRAP_DONE = 1
+MEMD_F_LEARNED_OFFSETS = 2
 
 # Zip/CLI input caps: fail closed instead of staging unbounded bytes.
 MAX_PROP_BYTES = 65536
@@ -223,6 +249,77 @@ def ioctl_unload(sock, pid, handle):
     fcntl.ioctl(sock.fileno(), cmd, buf)
     _pid, _handle, result = struct.unpack(UNLOAD_FMT, bytes(buf))
     return result
+
+
+def ioctl_version(sock):
+    """Query driver identity. Returns a dict with abi/version/flags/gen/result."""
+    import fcntl
+
+    cmd = iowr(NR_VERSION, VERSION_SIZE)
+    buf = bytearray(struct.pack(VERSION_FMT, MEMD_ABI_VERSION, 0, 0, 0, 0, 0, 0))
+    fcntl.ioctl(sock.fileno(), cmd, buf)
+    abi, major, minor, patch, flags, gen, result = struct.unpack(
+        VERSION_FMT, bytes(buf)
+    )
+    return {
+        "abi": abi,
+        "major": major,
+        "minor": minor,
+        "patch": patch,
+        "flags": flags,
+        "gen": gen,
+        "result": result,
+    }
+
+
+def ioctl_learn_status(sock):
+    """Query runtime offset learning. Returns a dict; offsets are -1 when unknown."""
+    import fcntl
+
+    names = (
+        "t_pid",
+        "t_tgid",
+        "t_mm",
+        "t_cred",
+        "v_start",
+        "v_end",
+        "v_flags",
+        "m_pgd",
+    )
+    cmd = iowr(NR_LEARN_STATUS, LEARN_STATUS_SIZE)
+    buf = bytearray(struct.pack(LEARN_STATUS_FMT, *((0,) * 11)))
+    fcntl.ioctl(sock.fileno(), cmd, buf)
+    values = struct.unpack(LEARN_STATUS_FMT, bytes(buf))
+    record = {"gen": values[0]}
+    record.update({name: values[1 + i] for i, name in enumerate(names)})
+    record["mask"] = values[9]
+    record["result"] = values[10]
+    return record
+
+
+def ioctl_hide(sock, pid, hide):
+    """Hide (hide=True) or unhide a pid. Returns the driver return code
+    (0 ok); the ioctl has no result field, so errno surfaces via OSError."""
+    import fcntl
+
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid > MAX_PID:
+        raise ValueError("pid must be a positive 32-bit integer")
+    cmd = iowr(NR_HIDE_PROCESS, HIDE_PROC_SIZE)
+    buf = bytearray(struct.pack(HIDE_PROC_FMT, pid, 1 if hide else 0))
+    fcntl.ioctl(sock.fileno(), cmd, buf)
+    _pid, _hide = struct.unpack(HIDE_PROC_FMT, bytes(buf))
+    return 0
+
+
+def ioctl_hide_status(sock):
+    """Returns (active, hidden_count). No result field; errors via OSError."""
+    import fcntl
+
+    cmd = iowr(NR_HIDE_STATUS, HIDE_STATUS_SIZE)
+    buf = bytearray(struct.pack(HIDE_STATUS_FMT, 0, 0))
+    fcntl.ioctl(sock.fileno(), cmd, buf)
+    active, hidden_count = struct.unpack(HIDE_STATUS_FMT, bytes(buf))
+    return active, hidden_count
 
 
 def stage_module(zip_path, root, abi):
@@ -487,6 +584,114 @@ def cmd_hotswap(args):
     return failed
 
 
+def cmd_status(args):
+    """Report driver identity, learned offsets, and hide state.
+
+    Fails closed: version mismatch or unreachable driver aborts with a
+    nonzero exit; learn-status/hide-status failures warn but do not mask
+    a good version probe.
+    """
+    sock = find_driver_family()
+    try:
+        info = ioctl_version(sock)
+    finally:
+        sock.close()
+    if info["result"] != 0:
+        print("driver version query failed: result=%d" % info["result"])
+        return errno.EIO
+    if info["abi"] != MEMD_ABI_VERSION:
+        print(
+            "driver ABI mismatch: driver=%d tool=%d"
+            % (info["abi"], MEMD_ABI_VERSION)
+        )
+        return errno.EPROTONOSUPPORT
+    print(
+        "memd %d.%d.%d abi=%d flags=0x%x gen=%d"
+        % (
+            info["major"],
+            info["minor"],
+            info["patch"],
+            info["abi"],
+            info["flags"],
+            info["gen"],
+        )
+    )
+    print(
+        "bootstrap: %s learned-offsets: %s"
+        % (
+            "done" if info["flags"] & MEMD_F_BOOTSTRAP_DONE else "PENDING",
+            "done" if info["flags"] & MEMD_F_LEARNED_OFFSETS else "PENDING",
+        )
+    )
+    sock = find_driver_family()
+    try:
+        try:
+            learned = ioctl_learn_status(sock)
+        except OSError as error:
+            print("learn-status unavailable: %s" % error)
+            learned = None
+        try:
+            active, hidden = ioctl_hide_status(sock)
+        except OSError as error:
+            print("hide-status unavailable: %s" % error)
+            active, hidden = None, None
+    finally:
+        sock.close()
+    if learned is not None:
+        if learned["result"] != 0:
+            print("learn-status failed: result=%d" % learned["result"])
+            return errno.EIO
+        print("learn gen=%d" % learned["gen"])
+        for name in (
+            "t_pid",
+            "t_tgid",
+            "t_mm",
+            "t_cred",
+            "v_start",
+            "v_end",
+            "v_flags",
+            "m_pgd",
+        ):
+            value = learned[name]
+            print(
+                "  %-8s %s"
+                % (name, ("+%d" % value) if value >= 0 else "unknown")
+            )
+    if active is not None:
+        print(
+            "hide filter: %s hidden=%d"
+            % ("active" if active else "inactive", hidden)
+        )
+    return 0
+
+
+def cmd_hide(args):
+    """Hide (or unhide) one pid via the hide API. Visible, explicit,
+    single-pid operation: no concealment beyond the requested entry."""
+    return do_hide_pid(args.pid, hide=True)
+
+
+def cmd_unhide(args):
+    """Remove one pid from the hide set (absent pid is success)."""
+    return do_hide_pid(args.pid, hide=False)
+
+
+def do_hide_pid(pid, hide):
+    sock = find_driver_family()
+    try:
+        ioctl_hide(sock, pid, hide)
+    except OSError as error:
+        print(
+            "hide %s pid %d failed: %s"
+            % ("hide" if hide else "unhide", pid, error)
+        )
+        return error.errno or errno.EIO
+    finally:
+        sock.close()
+    print("%s pid %d ok" % ("hidden" if hide else "unhidden", pid))
+    return 0
+
+
 def cmd_uninstall(args):
     try:
         check_module_id(args.id)
@@ -579,6 +784,17 @@ def main(argv=None):
     uninstall.add_argument("--id", required=True)
     uninstall.add_argument("--pid", type=int, required=True)
     uninstall.set_defaults(func=cmd_uninstall)
+
+    status = sub.add_parser("status")
+    status.set_defaults(func=cmd_status)
+
+    hide = sub.add_parser("hide")
+    hide.add_argument("--pid", type=int, required=True)
+    hide.set_defaults(func=cmd_hide)
+
+    unhide = sub.add_parser("unhide")
+    unhide.add_argument("--pid", type=int, required=True)
+    unhide.set_defaults(func=cmd_unhide)
 
     args = parser.parse_args(argv)
     try:

@@ -936,5 +936,118 @@ class HotswapCapTests(unittest.TestCase):
                              lxgr_load.MAX_PREV_HANDLES)
 
 
+class StatusHideTests(unittest.TestCase):
+    def test_version_struct_layout(self):
+        self.assertEqual(lxgr_load.VERSION_SIZE, 28)
+        buf = struct.pack(lxgr_load.VERSION_FMT, 1, 1, 0, 0, 3, 6, 0)
+        self.assertEqual(len(buf), 28)
+        abi, major, minor, patch, flags, gen, result = struct.unpack(
+            lxgr_load.VERSION_FMT, buf
+        )
+        self.assertEqual((abi, major, minor, patch, flags, gen, result),
+                         (1, 1, 0, 0, 3, 6, 0))
+
+    def test_learn_status_struct_layout(self):
+        self.assertEqual(lxgr_load.LEARN_STATUS_SIZE, 44)
+        buf = struct.pack(lxgr_load.LEARN_STATUS_FMT, *([6] + [100] * 8 + [0xFF, 0]))
+        self.assertEqual(len(buf), 44)
+        values = struct.unpack(lxgr_load.LEARN_STATUS_FMT, buf)
+        self.assertEqual(values[0], 6)
+        self.assertEqual(values[9], 0xFF)
+        self.assertEqual(values[10], 0)
+
+    def test_hide_struct_layouts(self):
+        self.assertEqual(lxgr_load.HIDE_PROC_SIZE, 8)
+        self.assertEqual(lxgr_load.HIDE_STATUS_SIZE, 8)
+        self.assertEqual(
+            struct.unpack(lxgr_load.HIDE_PROC_FMT,
+                          struct.pack(lxgr_load.HIDE_PROC_FMT, 4242, 1)),
+            (4242, 1),
+        )
+        self.assertEqual(
+            struct.unpack(lxgr_load.HIDE_STATUS_FMT,
+                          struct.pack(lxgr_load.HIDE_STATUS_FMT, 1, 3)),
+            (1, 3),
+        )
+
+    def test_status_ioctl_numbers(self):
+        self.assertEqual(lxgr_load.iowr(42, 28), 0xC01C572A)
+        self.assertEqual(lxgr_load.iowr(43, 44), 0xC02C572B)
+        self.assertEqual(lxgr_load.iowr(14, 8), 0xC008570E)
+        self.assertEqual(lxgr_load.iowr(21, 8), 0xC0085715)
+        self.assertEqual(lxgr_load.iowr(22, 8), 0xC0085716)
+
+    def test_abi_constants(self):
+        self.assertEqual(lxgr_load.MEMD_ABI_VERSION, 1)
+        self.assertEqual(lxgr_load.MEMD_F_BOOTSTRAP_DONE, 1)
+        self.assertEqual(lxgr_load.MEMD_F_LEARNED_OFFSETS, 2)
+
+    def test_hide_rejects_bad_pid(self):
+        for bad in (0, -1, True, "7", 1 << 31):
+            with self.assertRaisesRegex(ValueError, "pid", msg=repr(bad)):
+                lxgr_load.ioctl_hide(None, bad, True)
+
+    def test_cmd_status_version_failure(self):
+        import argparse
+        import unittest.mock as mock
+
+        args = argparse.Namespace()
+        bad = {"abi": 1, "major": 1, "minor": 0, "patch": 0,
+               "flags": 0, "gen": -1, "result": -19}
+        with mock.patch.object(lxgr_load, "ioctl_version", return_value=bad), \
+             mock.patch.object(lxgr_load, "find_driver_family"):
+            self.assertEqual(lxgr_load.cmd_status(args), errno.EIO)
+
+    def test_cmd_status_abi_mismatch(self):
+        import argparse
+        import unittest.mock as mock
+
+        args = argparse.Namespace()
+        info = {"abi": 2, "major": 1, "minor": 0, "patch": 0,
+                "flags": 0, "gen": 6, "result": 0}
+        with mock.patch.object(lxgr_load, "ioctl_version", return_value=info), \
+             mock.patch.object(lxgr_load, "find_driver_family"):
+            self.assertEqual(lxgr_load.cmd_status(args), errno.EPROTONOSUPPORT)
+
+    def test_cmd_status_ok_with_unavailable_extras(self):
+        import argparse
+        import unittest.mock as mock
+
+        args = argparse.Namespace()
+        info = {"abi": 1, "major": 1, "minor": 0, "patch": 0,
+                "flags": 3, "gen": 6, "result": 0}
+        with mock.patch.object(lxgr_load, "ioctl_version", return_value=info), \
+             mock.patch.object(lxgr_load, "ioctl_learn_status",
+                               side_effect=OSError(errno.ENODEV, "no driver")), \
+             mock.patch.object(lxgr_load, "ioctl_hide_status",
+                               side_effect=OSError(errno.ENODEV, "no driver")), \
+             mock.patch.object(lxgr_load, "find_driver_family"):
+            self.assertEqual(lxgr_load.cmd_status(args), 0)
+
+    def test_cmd_hide_ok(self):
+        import argparse
+        import unittest.mock as mock
+
+        for hide, expect in ((True, "hidden"), (False, "unhidden")):
+            args = argparse.Namespace(pid=4242)
+            with mock.patch.object(lxgr_load, "ioctl_hide",
+                                   return_value=0) as mock_hide, \
+                 mock.patch.object(lxgr_load, "find_driver_family"):
+                self.assertEqual(lxgr_load.cmd_hide(args) if hide
+                                 else lxgr_load.cmd_unhide(args), 0)
+                mock_hide.assert_called_once_with(mock.ANY, 4242, hide)
+
+    def test_cmd_hide_driver_error(self):
+        import argparse
+        import unittest.mock as mock
+
+        args = argparse.Namespace(pid=4242)
+        with mock.patch.object(
+                lxgr_load, "ioctl_hide",
+                side_effect=OSError(errno.ENOENT, "gone")), \
+             mock.patch.object(lxgr_load, "find_driver_family"):
+            self.assertEqual(lxgr_load.cmd_hide(args), errno.ENOENT)
+
+
 if __name__ == "__main__":
     unittest.main()
