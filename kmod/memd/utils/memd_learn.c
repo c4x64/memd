@@ -249,7 +249,7 @@ static void memd_learn_pgd(void)
     {
         int i, found = -1, n = 0;
         for (i = 0; i + 8 <= 512; i += 8) {
-            u64 va = 0, pa = 0;
+            unsigned long va = 0, pa = 0;
             if (memd_safe_read64((char *)mm + i, &va))
                 continue;
             if ((va & 0xffff000000000000UL) != 0xffff000000000000UL)
@@ -945,10 +945,10 @@ unsigned int memd_uid(void)
  * Both words come from guarded slots (second word is base+4 by
  * kernel_cap_struct definition: two u32s); any fault/unknown/NULL
  * yields zero caps (fail closed: deny). Plain C89, no literals. */
-static struct kernel_cap_struct memd_cred_cap_read(int off,
+static struct memd_learn_cap memd_cred_cap_read(int off,
                                                    struct task_struct *t)
  {
-    struct kernel_cap_struct cap;
+    struct memd_learn_cap cap;
     unsigned long c;
     unsigned int lo = 0, hi = 0;
     cap.cap[0] = 0;
@@ -967,17 +967,17 @@ static struct kernel_cap_struct memd_cred_cap_read(int off,
     return cap;
 }
 
-struct kernel_cap_struct memd_t_cred_cap_eff_fn(struct task_struct *t)
+struct memd_learn_cap memd_t_cred_cap_eff_fn(struct task_struct *t)
  {
     return memd_cred_cap_read(memd_learned_ext.t_cred_cap_eff, t);
 }
 
-struct kernel_cap_struct memd_t_cred_cap_perm_fn(struct task_struct *t)
+struct memd_learn_cap memd_t_cred_cap_perm_fn(struct task_struct *t)
  {
     return memd_cred_cap_read(memd_learned_ext.t_cred_cap_perm, t);
 }
 
-struct kernel_cap_struct memd_t_cred_cap_inh_fn(struct task_struct *t)
+struct memd_learn_cap memd_t_cred_cap_inh_fn(struct task_struct *t)
  {
     return memd_cred_cap_read(memd_learned_ext.t_cred_cap_inh, t);
 }

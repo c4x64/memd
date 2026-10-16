@@ -2,6 +2,7 @@
 #define MEMD_LEARN_H
 
 #include <linux/types.h>
+#include <linux/uidgid.h>
 
 struct task_struct;
 struct mm_struct;
@@ -11,6 +12,9 @@ struct file_operations;
 struct dentry;
 struct cred;
 struct files_struct;
+
+/* Local cap container independent of kernel capability representation. */
+struct memd_learn_cap { unsigned int cap[2]; };
 struct signal_struct;
 struct sighand_struct;
 struct path;
@@ -358,9 +362,9 @@ void memd_learn_file_private(struct file *f, void *known_private);
  * the cap second word (caps 32..63) is base+4 by kernel_cap_struct
  * definition (two u32s). Plain functions (not inlines) so this header
  * needs no include reordering. */
-struct kernel_cap_struct memd_t_cred_cap_eff_fn(struct task_struct *t);
-struct kernel_cap_struct memd_t_cred_cap_perm_fn(struct task_struct *t);
-struct kernel_cap_struct memd_t_cred_cap_inh_fn(struct task_struct *t);
+struct memd_learn_cap memd_t_cred_cap_eff_fn(struct task_struct *t);
+struct memd_learn_cap memd_t_cred_cap_perm_fn(struct task_struct *t);
+struct memd_learn_cap memd_t_cred_cap_inh_fn(struct task_struct *t);
 kuid_t memd_t_cred_uid_fn(struct task_struct *t);
 
 #define memd_t_cred_cap_eff(t) (memd_t_cred_cap_eff_fn(t))
