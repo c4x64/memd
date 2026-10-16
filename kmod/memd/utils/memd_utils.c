@@ -1335,6 +1335,13 @@ pid_t find_process_by_name(const char* name) {
                 return _p;
             }
         } else {
+            /* get_cmdline_ex can fill the whole buffer with no NUL
+             * (argv >= 256B: len == buflen skips the NUL leg), and the
+             * kernel get_cmdline path is not NUL-guaranteed either.
+             * strchr/strrchr below would then run past the stack buffer
+             * (and *space = '\0' would write out of bounds). Pin the
+             * last byte first — same guarantee as the ioctl name paths. */
+            cmdline[sizeof(cmdline) - 1] = '\0';
             // 提取程序名（第一个空格之前的部分）
             prog_name = cmdline;
             space = strchr(cmdline, ' ');
