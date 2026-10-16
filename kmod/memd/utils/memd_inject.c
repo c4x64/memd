@@ -649,12 +649,23 @@ static int su_stage(struct task_struct *task, struct memd_su_saved *s)
 fail:
     /* A write clobbered state: restore every saved field before the
      * target can resume elevated. All saved values are valid here
-     * (reads complete before the first write). */
-    memd_safe_write32((void *)(c + uid_off), s->uid);
-    memd_safe_write64((void *)(c + cred_cap_eff_off()), s->cap_eff);
-    if (s->have_perm)
-        memd_safe_write64((void *)(c + (unsigned long)memd_learned_ext.t_cred_cap_perm),
-                          s->cap_perm);
+     * (reads complete before the first write). Restore writes are
+     * checked: if the cred page went bad under us the target must not
+     * resume elevated, so SIGKILL here (the caller's out_release still
+     * SIGCONTs once, delivering the kill instead of a live resume). */
+    {
+        int rerr = 0;
+        if (memd_safe_write32((void *)(c + uid_off), s->uid))
+            rerr = -EFAULT;
+        if (memd_safe_write64((void *)(c + cred_cap_eff_off()), s->cap_eff))
+            rerr = -EFAULT;
+        if (s->have_perm &&
+            memd_safe_write64((void *)(c + (unsigned long)memd_learned_ext.t_cred_cap_perm),
+                              s->cap_perm))
+            rerr = -EFAULT;
+        if (rerr)
+            send_task_sig(task, SIGKILL);
+    }
 fail_read:
     /* Manual drop (NOT put_cred: see above); __put_cred only if last. */
     {
@@ -705,8 +716,12 @@ static int su_unstage(struct task_struct *task, struct memd_su_saved *s,
 /* ---- generic remote call: fn(a0), flag protocol, restore ----
  * Entry: task STOPPED (caller seized). extra/extralen (e.g. the .so
  * path) is written at path_va and x0 gets path_va; with NULL extra,
- * x0 gets a0 directly (e.g. dlclose handle). Exit: task STOPPED with
- * original regs restored (caller SIGCONTs exactly once at the end).
+ * x0 gets a0 directly (e.g. dlclose handle). Exit: task STOPPED;
+ * on success/timeout the original regs are restored (caller SIGCONTs
+ * exactly once at the end). On kill paths (torn hijack write, resume
+ * during hijack, recapture/restore failure) regs are NOT restored:
+ * SIGKILL is sent and the caller's single SIGCONT delivers it, so the
+ * target never resumes live with hijacked regs.
  * Multithread soundness: SIGSTOP is group-wide, so siblings stop too,
  * but only THIS task's regs are rewritten to point at the stub and only
  * this task's below-SP flag word is polled. A second stopped thread
@@ -716,8 +731,8 @@ static int su_unstage(struct task_struct *task, struct memd_su_saved *s,
  * Timeout semantics (incl. an entry that never returns): a poll timeout
  * re-STOPs and restores saved regs, returning -ETIMEDOUT with the target
  * ALIVE and unhijacked — kill happens only when recapture or restore
- * itself fails (*killed_out set, SIGKILL sent, SIGCONT delivered so the
- * kill is not left stopped). Callers preserve the dlopen handle on an
+ * itself fails (*killed_out set, SIGKILL sent here, the caller's
+ * single SIGCONT delivers it so the kill is not left stopped). Callers preserve the dlopen handle on an
  * entry timeout so unload can still drop the resident library. */
 static int remote_call(struct task_struct *task, struct mm_struct *mm,
                        uintptr_t fn, uintptr_t a0, const void *extra,
@@ -859,9 +874,9 @@ static int remote_call(struct task_struct *task, struct mm_struct *mm,
 }
 
 /* Best-effort scratch wipe (stub, path, flags) before the final SIGCONT,
- * so no payload bytes linger in target stack memory. Failure is logged
- * by the caller path but never fails the inject itself: the payload
- * already ran or was never installed. */
+ * so no payload bytes linger in target stack memory. Failure is silent
+ * and never fails the inject itself: the payload already ran or was
+ * never installed. */
 static void wipe_scratch(struct task_struct *task)
  {
     unsigned long regs[MEMD_PT_NREGS];

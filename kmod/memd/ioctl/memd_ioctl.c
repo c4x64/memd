@@ -1264,7 +1264,12 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
     }
 
     // Attempt to obtain the complete command line.
-    cmdline[0] = '\0';
+    /* Zero the whole buffer, not just byte 0: access_process_vm and
+     * get_cmdline can both short-fill without NUL-terminating the tail,
+     * and the strchr/strrchr/strncpy below would then copy uninitialized
+     * stack bytes into cmd.name (leaked to userspace via copy_to_user).
+     * Zeroed tail fails closed to a cleanly truncated name. */
+    memset(cmdline, 0, sizeof(cmdline));
 
     /* get_cmdline via runtime kallsyms (6.1+), argv fallback below it:
      * one image either way, comm fallback after that. */

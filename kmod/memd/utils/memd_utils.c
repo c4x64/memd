@@ -7,6 +7,7 @@
 #include <linux/capability.h>
 #include <linux/compiler.h>
 #include <linux/errno.h>
+#include <linux/err.h>
 #include <linux/input.h>
 #include <linux/preempt.h>
 #include <linux/sched/signal.h>
@@ -36,6 +37,7 @@
 int memd_filp_open(const char* filename, int flags, umode_t mode, struct file** f) {
     static struct file* (*reserve_flip_open)(const char* filename, int flags, umode_t mode) = NULL;
     struct file* (*tmp)(const char* filename, int flags, umode_t mode);
+    int err;
 
     if (!f || !filename) {
         return -EINVAL;
@@ -45,13 +47,22 @@ int memd_filp_open(const char* filename, int flags, umode_t mode, struct file** 
         tmp =
             (struct file * (*)(const char* filename, int flags, umode_t mode)) kallsyms_lookup_name_ex("filp_open");
         if (tmp == NULL) {
-            return -1;
+            *f = NULL;
+            return -ENODEV;
         }
         WRITE_ONCE(reserve_flip_open, tmp);
     }
 
     *f = tmp(filename, flags, mode);
-    return *f == NULL ? -2 : 0;
+    /* filp_open returns ERR_PTR, never NULL, on failure: a bare NULL
+     * check would report success (0) with an error handle, so propagate
+     * the encoded errno and clear the handle (fail closed). */
+    if (IS_ERR_OR_NULL(*f)) {
+        err = !*f ? -EFAULT : (int)PTR_ERR(*f);
+        *f = NULL;
+        return err;
+    }
+    return 0;
 }
 
 int memd_filp_close(struct file** f, fl_owner_t id) {
@@ -65,7 +76,7 @@ int memd_filp_close(struct file** f, fl_owner_t id) {
     if (tmp == NULL) {
         tmp = (void (*)(struct file *f, fl_owner_t id)) kallsyms_lookup_name_ex("filp_close");
         if (tmp == NULL) {
-            return -1;
+            return -ENODEV; /* resolver missing: same fail-closed code as memd_kernel_read */
         }
         WRITE_ONCE(reserve_flip_close, tmp);
     }
@@ -223,6 +234,7 @@ int memd_printk(const char *fmt, ...)
     va_list ap;
     int r;
     long d;
+    /* NULL format is a no-op success: logging must never fail its caller. */
     if (!fmt)
         return 0;
     tmp = READ_ONCE(fn);
@@ -441,6 +453,7 @@ static int (*memd_pfn_valid_fn)(unsigned long) = NULL;
 static unsigned long *memd_max_pfn_ptr;
 static bool memd_pfn_probed;
 
+/* Boolean, not errno: 1 usable, 0 not (over-approximates holes, never grants bad access). */
 int memd_pfn_ok(unsigned long pfn) {
     int (*valid_fn)(unsigned long);
     unsigned long *max_ptr;
@@ -1255,14 +1268,15 @@ pid_t find_process_by_name(const char* name) {
     int (*get_cmd)(struct task_struct*, char*, int);
     static int (*my_get_cmdline)(struct task_struct* task, char* buffer, int buflen) = NULL;
 
+    /* Fail closed as "not found": the caller treats only 0 as miss, so a negative pid would escape as a bogus success. */
     if (!name) {
         memd_err("process name is empty\n");
-        return -2;
+        return 0;
     }
     name_len = strlen(name);
     if (name_len == 0) {
         memd_err("process name is empty\n");
-        return -2;
+        return 0;
     }
 
     get_cmd = READ_ONCE(my_get_cmdline);
@@ -1504,7 +1518,7 @@ int give_root(void) {
         ovr = (void*)kallsyms_lookup_name_ex("override_creds");
         rev = (void*)kallsyms_lookup_name_ex("revert_creds");
         if (prep == NULL || commit == NULL) {
-            return -1;
+            return -ENODEV; /* resolver missing: same fail-closed code as memd_kernel_read */
         }
         WRITE_ONCE(my_prepare_creds, prep);
         WRITE_ONCE(my_commit_creds, commit);
@@ -1517,7 +1531,7 @@ int give_root(void) {
 
     newcreds = prep();
     if (newcreds == NULL)
-        return -2;
+        return -ENOMEM; /* cred alloc failed, nothing committed */
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0) && defined(CONFIG_UIDGID_STRICT_TYPE_CHECKS) || \
     LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
@@ -1637,6 +1651,7 @@ void __iomem* memd_ioremap_prot(uintptr_t phys_addr, size_t size, pgprot_t prot)
     return (void __iomem*)(vaddr + offset);
 }
 
+/* 0 = absent or already patched (nothing to do), 1 = patched, -EFAULT = guarded fault. */
 static int cfi_patch_function(const char *name, unsigned int *patch, int patch_instrs)
  {
     unsigned long addr = kallsyms_lookup_name_ex(name);
@@ -1701,6 +1716,7 @@ static int cfi_bypass_kpti(void);
 static int cfi_bypass_mte(void);
 static int cfi_bypass_bti(void);
 
+/* Best-effort count of patched sites; unpatchable entries are skipped, never fatal (symbols legitimately differ per generation). */
 int cfi_bypass(void)
  {
     int ret = 0;

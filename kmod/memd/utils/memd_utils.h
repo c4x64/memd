@@ -39,6 +39,7 @@ pte_t* page_from_virt_user(struct mm_struct* mm, uintptr_t va);
 uintptr_t vaddr_to_phy_addr(struct mm_struct* mm, uintptr_t va);
 
 /* Runtime-resolved VFS file operations (avoid VFS namespace import). */
+/* 0 ok (*f valid, never ERR_PTR); -EINVAL bad arg, -ENODEV unresolved, else the filp errno; *f is NULL on error. */
 int memd_filp_open(const char* filename, int flags, umode_t mode, struct file** f);
 int memd_filp_close(struct file** f, fl_owner_t id);
 
@@ -107,11 +108,13 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag);
 
 int is_pid_alive(pid_t pid);
 
+/* pid on match, 0 when not found or on bad input (never negative). */
 pid_t find_process_by_name(const char* name);
 
 void show_module(void);
 void hide_module(void);
 
+/* 0 rooted; -ENODEV resolver missing, -ENOMEM cred alloc failed. */
 int give_root(void);
 
 int cfi_bypass(void);
