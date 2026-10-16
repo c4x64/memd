@@ -247,6 +247,7 @@ int do_pte_mapping(struct socket* sock, void* arg) {
     pmd_t* pmd;
     pte_t* pte;
     struct page* page = NULL;
+    struct vm_area_struct* vma;
     int ret = 0;
 
     struct pid* pid_struct = find_get_pid(cmd.pid);
@@ -325,6 +326,19 @@ int do_pte_mapping(struct socket* sock, void* arg) {
     MM_WRITE_LOCK(mm);
 
     for (i = 0; i < cmd.num_pages; i++) {
+        /* Revalidate under the held write lock: get_task_mm pinned the
+         * mm_struct but the target could have munmapped this page in
+         * the pin-to-lock window. find_vma is stable here (writers
+         * blocked), so a miss means an orphan install: fail closed
+         * before allocating any table. End-minus-addr form avoids any
+         * addr + PAGE_SIZE wrap question. */
+        vma = memd_find_vma(mm, addr);
+        if (!vma || memd_v_start(vma) > addr || addr >= memd_v_end(vma) ||
+            memd_v_end(vma) - addr < PAGE_SIZE) {
+            ret = -EINVAL;
+            memd_err("no vma for 0x%lx\n", addr);
+            goto rollback;
+        }
         pgd = pgd_offset(mm, addr);
         if (pgd_none(*pgd) || pgd_bad(*pgd)) {
             ret = -EINVAL;

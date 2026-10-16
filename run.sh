@@ -296,6 +296,7 @@ EOF_TBL
 # bytes -> octal escapes -> one builtin printf realizes them. No
 # $()-forks per byte; NUL terminates by construction, never captured.)
 read_cstr() {
+    case "$2" in ''|*[!0-9]*) return 1;; esac
     _esc=$(dd if="$1" bs=1 skip="$2" count=160 2>/dev/null | od -A n -t u1 -v 2>/dev/null | awk '
         { for (i=1; i<=NF; i++) {
               if ($i == 0) exit
@@ -396,17 +397,24 @@ import sys
 ko, want = sys.argv[1], sys.argv[2].encode()
 b = bytearray(open(ko, 'rb').read())
 i = b.find(b'vermagic=')
-assert i >= 0, "no vermagic in ko"
+if i < 0:
+    sys.exit(1)
 j = b.find(b'\x00', i)
+if j < 0:
+    sys.exit(1)
 have_len = j - i
 want_b = want.encode() if isinstance(want, str) else want
-assert len(want_b) <= have_len, "target vermagic longer than baked (%d > %d)" % (len(want_b), have_len)
+if len(want_b) > have_len:
+    sys.exit(2)
 b[i:i+len(want_b)] = want_b
 for k in range(i+len(want_b), j): b[k] = 0
 open(ko, 'wb').write(b)
 print("patched %d bytes (field %d)" % (len(want_b), have_len))
 PYEOF
-        return $?
+        _prc=$?
+        if [ "$_prc" -eq 0 ]; then return 0; fi
+        if [ "$_prc" -ne 2 ]; then return "$_prc"; fi
+        # rc=2: want longer than baked -> fall through to ELF-extend below
     fi
     # dd fallback (busybox/toybox-safe): locate offset + NUL terminator
     # with od (grep -abo is unreliable on binary files in toybox; tr

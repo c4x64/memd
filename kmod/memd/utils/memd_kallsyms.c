@@ -136,6 +136,15 @@ static unsigned long memd_addrs[sizeof(memd_wanted) / sizeof(memd_wanted[0])];
 static bool memd_parsed;
 static bool memd_unavailable;
 
+/* Bootstrap epoch: incremented under memd_klock on every bootstrap.
+ * Parses snapshot it with the helper triple and publish only when it
+ * still matches, so a pre-bootstrap (stale) parse can never clobber a
+ * post-bootstrap table, and the unavailable retry below runs once per
+ * epoch instead of once per lookup. memd_parsed_gen is the epoch of
+ * the currently published table. Both live under memd_klock. */
+static unsigned long memd_gen;
+static unsigned long memd_parsed_gen;
+
 /* Publish lock: lookups may run on any CPU/context while the
  * bootstrap ioctl re-arms on another. Parsing itself uses only a
  * stack-local table plus file IO (may sleep), so the lock is held
@@ -154,29 +163,27 @@ static void (*my_filp_close)(struct file *, fl_owner_t);
 
 int memd_kallsyms_bootstrap(unsigned long fo, unsigned long kr, unsigned long fc)
  {
+    unsigned long flags;
     if ((fo & 0xffff000000000000UL) != 0xffff000000000000UL ||
         (kr & 0xffff000000000000UL) != 0xffff000000000000UL ||
         (fc & 0xffff000000000000UL) != 0xffff000000000000UL)
         return -EINVAL;
-    /* Plain stores would also be atomic here, but every other cache in
-     * the tree publishes via WRITE_ONCE: one discipline, no guessing
-     * about compiler reordering against the re-arm below. */
+    spin_lock_irqsave(&memd_klock, flags);
+    /* Triple + epoch under one lock hold: a concurrent parse snapshots
+     * an atomic triple and an epoch, never a mix of two bootstraps. */
     WRITE_ONCE(my_filp_open, (void *)fo);
     WRITE_ONCE(my_kernel_read, (void *)kr);
     WRITE_ONCE(my_filp_close, (void *)fc);
+    memd_gen++;
     /* Re-arm: an earlier attempt may have parsed (and failed) already.
      * WRITE_ONCE: memd_parsed also has a lock-free READ_ONCE fast path
      * in memd_kallsyms(), so the publishing stores must not be plain
      * (plain-under-lock + lock-free-READ_ONCE is a mixed discipline —
      * torn/stale reads on weak memory). */
-    {
-        unsigned long flags;
-        spin_lock_irqsave(&memd_klock, flags);
-        WRITE_ONCE(memd_parsed, false);
-        WRITE_ONCE(memd_unavailable, false);
-        memset(memd_addrs, 0, sizeof(memd_addrs));
-        spin_unlock_irqrestore(&memd_klock, flags);
-    }
+    WRITE_ONCE(memd_parsed, false);
+    WRITE_ONCE(memd_unavailable, false);
+    memset(memd_addrs, 0, sizeof(memd_addrs));
+    spin_unlock_irqrestore(&memd_klock, flags);
     return 0;
 }
 
@@ -241,10 +248,13 @@ static int memd_parse_line(const char *line, size_t len, unsigned long *addrs)
     return 1;
 }
 
-/* Publish a fully parsed table: single locked flip so concurrent
- * lookups never observe a half-zeroed (bootstrap) or half-filled
- * (double parse) table. */
-static void memd_publish(unsigned long *tmp)
+/* Publish a fully parsed table only when it belongs to the current
+ * epoch: single locked flip so concurrent lookups never observe a
+ * half-zeroed (bootstrap) or half-filled (double parse) table, and a
+ * stale pre-bootstrap parse can never clobber a post-bootstrap table.
+ * Returns 1 on publish, 0 when stale (caller discards; the next
+ * lookup re-parses at the new epoch). Fail closed either way. */
+static int memd_publish_if_current(unsigned long *tmp, unsigned long gen)
  {
     unsigned long flags;
     unsigned long i;
@@ -252,6 +262,10 @@ static void memd_publish(unsigned long *tmp)
     for (i = 0; i < MEMD_NWANT; i++)
         nonzero += tmp[i] ? 1 : 0;
     spin_lock_irqsave(&memd_klock, flags);
+    if (gen != memd_gen) {
+        spin_unlock_irqrestore(&memd_klock, flags);
+        return 0;
+    }
     memcpy(memd_addrs, tmp, sizeof(memd_addrs));
     /* WRITE_ONCE (see bootstrap re-arm): lock-free READ_ONCE fast path
      * outside this lock must pair with a marked store. */
@@ -260,7 +274,9 @@ static void memd_publish(unsigned long *tmp)
      * fail soft once instead of per-call. A zero table with successful
      * reads means hidden, not absent. */
     WRITE_ONCE(memd_unavailable, (nonzero == 0));
+    memd_parsed_gen = gen;
     spin_unlock_irqrestore(&memd_klock, flags);
+    return 1;
 }
 
 static void memd_do_parse(void)
@@ -276,27 +292,34 @@ static void memd_do_parse(void)
     struct file *(*open_fn)(const char *, int, umode_t);
     ssize_t (*read_fn)(struct file *, void *, size_t, loff_t *);
     void (*close_fn)(struct file *, fl_owner_t);
+    unsigned long gen;
+    unsigned long flags;
 
     memset(tmp, 0, sizeof(tmp));
-    buf = kmalloc(4096, GFP_KERNEL);
-    if (!buf) {
-        memd_publish(tmp);
-        return;
-    }
-    /* Snapshot once: the bootstrap may re-arm (and clear) these under
-     * us; tearing or reordering mid-parse must not corrupt the walk. */
+    /* Snapshot triple + epoch under the lock: the bootstrap may re-arm
+     * under us; a torn triple or a stale publish must not corrupt the
+     * walk or clobber a newer table. File IO itself stays outside the
+     * lock (it may sleep). */
+    spin_lock_irqsave(&memd_klock, flags);
     open_fn = READ_ONCE(my_filp_open);
     read_fn = READ_ONCE(my_kernel_read);
     close_fn = READ_ONCE(my_filp_close);
+    gen = memd_gen;
+    spin_unlock_irqrestore(&memd_klock, flags);
+    buf = kmalloc(4096, GFP_KERNEL);
+    if (!buf) {
+        (void)memd_publish_if_current(tmp, gen);
+        return;
+    }
     if (!open_fn || !read_fn || !close_fn) {
         /* No bootstrap table yet (see MEMD_IOCTL_BOOTSTRAP). */
         kfree(buf);
-        memd_publish(tmp);
+        (void)memd_publish_if_current(tmp, gen);
         return;
     }
     f = open_fn("/proc/kallsyms", O_RDONLY, 0);
     if (IS_ERR(f)) {
-        memd_publish(tmp);
+        (void)memd_publish_if_current(tmp, gen);
         kfree(buf);
         return;
     }
@@ -343,7 +366,7 @@ static void memd_do_parse(void)
     }
     close_fn(f, NULL);
     kfree(buf);
-    memd_publish(tmp);
+    (void)memd_publish_if_current(tmp, gen);
 }
 
 unsigned long memd_kallsyms(const char *name)
@@ -360,16 +383,21 @@ unsigned long memd_kallsyms(const char *name)
     if (memd_unavailable) {
         helpers = READ_ONCE(my_filp_open) && READ_ONCE(my_kernel_read) &&
                   READ_ONCE(my_filp_close);
-        spin_unlock_irqrestore(&memd_klock, flags);
-        if (!helpers)
-            return 0;
-        /* Bootstrap armed mid-parse: our all-zero snapshot published
-         * unavailable=true and every future lookup would fail without
-         * another bootstrap. Helpers are real now, so re-parse once
-         * (outside the lock: file IO may sleep) instead of wedging. */
-        memd_do_parse();
-        spin_lock_irqsave(&memd_klock, flags);
-        if (memd_unavailable) {
+        if (helpers && memd_parsed_gen != memd_gen) {
+            spin_unlock_irqrestore(&memd_klock, flags);
+            /* Bootstrap armed mid-parse, or re-armed after a hidden
+             * (all-zero) parse: our snapshot predates the helpers, so
+             * re-parse once at the new epoch (outside the lock: file
+             * IO may sleep) instead of wedging. Latched per epoch
+             * below, so a persistently hidden kallsyms costs one
+             * parse per bootstrap, not one per lookup. */
+            memd_do_parse();
+            spin_lock_irqsave(&memd_klock, flags);
+            if (memd_unavailable) {
+                spin_unlock_irqrestore(&memd_klock, flags);
+                return 0;
+            }
+        } else {
             spin_unlock_irqrestore(&memd_klock, flags);
             return 0;
         }

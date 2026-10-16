@@ -235,6 +235,11 @@ static int memd_elf_lookup(struct task_struct *t, uintptr_t symtab,
         if (nbuckets == 0 || nbuckets > 100000 || bloom_size == 0 ||
             bloom_size > 1024)
             return -ENOENT;
+        /* symoff is a symtab index: anything past SYM_WALK_MAX can
+         * never resolve (memd_elf_sym rejects it), so reject a
+         * hostile table early instead of walking it. */
+        if (symoff > (unsigned long)MEMD_INJ_SYM_WALK_MAX)
+            return -ENOENT;
         h = memd_gnu_hash(want);
         if (memd_task_copy_ok(t, 0, gnuhash + 16 + (h / 64 % bloom_size) * 8, &w, 8))
             return -EFAULT;
@@ -245,6 +250,11 @@ static int memd_elf_lookup(struct task_struct *t, uintptr_t symtab,
                               &w32, 4))
             return -EFAULT;
         bkt = w32;
+        /* Bucket is a symtab index with the same ceiling: past
+         * SYM_WALK_MAX no chain element can resolve, so fail fast
+         * on a hostile bucket instead of walking to the cap. */
+        if (bkt > (unsigned long)MEMD_INJ_SYM_WALK_MAX)
+            return -ENOENT;
         if (bkt < symoff)
             return -ENOENT;
         for (i = bkt, n = 0; n < (unsigned long)MEMD_INJ_SYM_WALK_MAX; i++, n++) {
