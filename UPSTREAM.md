@@ -20,13 +20,10 @@ Rules per `Userspace App/AGENTS.md` ("CI and upstream dependencies"):
 
 ## Licenses and attribution (binding)
 
-- **diabl0w/KernelSU: GPL-3.0** (`LICENSE` file at repo root).
-  Consequence: do NOT vendor KernelSU code (app, kernel, userspace,
-  scripts) into this repository. Derivative-work and distribution terms
-  apply. Interoperability stays at arm's length: documented intents,
-  out-of-process shell calls, and user-installed manager APKs. No static
-  or source linkage. Preserve attribution in user-visible About text if
-  the integration ever names the upstream.
+- **diabl0w/KernelSU: GPL-3.0** (`LICENSE` file at repo root; `kernel/` files GPL-2.0-only per `kernel/LICENSE`).
+  Operator decision 2026-10-16: VENDORED at pinned `b38f4096` under `ksu/` (exact copy, both LICENSE files intact).
+  Consequence (binding): this branch is now a GPL-3.0 derivative — keep `ksu/LICENSE` + `ksu/kernel/LICENSE` and attribution intact, ship source with any binary, no proprietary relicensing of the combined work. `ksu/kernel/` stays GPL-2.0-only.
+  Our UI work builds on `ksu/manager/` in later units; MEMD pieces (`core/`, `native/`, MEMD tabs) merge against it there.
   Upstream lineage (per their docs): KernelSU project; manager app under
   `manager/`, kernel under `kernel/`, `userspace/ksud` + `userspace/ksuinit`,
   `uapi/`, multilingual `docs/`, `website/`, `repack_apk.py`.
@@ -44,11 +41,12 @@ Rules per `Userspace App/AGENTS.md` ("CI and upstream dependencies"):
   exploit chain from `diabl0w/DFRoot`, PoC/code from `lsposed/lspromise`,
   `polygraphene/DFReroot`, unprivileged XFRM method from
   `combeng6th/DirtyInit`. If we ever reference these, attribute them.
-- **Rule of thumb for this repo:** nothing under `Userspace App/` may be
-  copied from either upstream. UX *patterns* (a manager picker, an
-  opt-in boot toggle with a failed-run interlock, a modules on/off
-  switch, a savable log) are ideas, freely re-implementable; code,
-  strings, layouts, and binaries are not.
+- **Rule of thumb for this repo:** nothing from DirtyFrag may be copied
+  (unlicensed). KernelSU is vendored under `ksu/` at the pinned SHA with
+  its licenses intact (see above). UX *patterns* from either upstream
+  (a manager picker, an opt-in boot toggle with a failed-run interlock,
+  a modules on/off switch, a savable log) are ideas, freely
+  re-implementable; DirtyFrag code, strings, layouts, and binaries are not.
 
 ## What each upstream is (for scoping our work)
 

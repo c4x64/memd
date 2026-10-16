@@ -8,8 +8,9 @@ Hard boundaries (binding, per `UPSTREAM.md`):
 - Nothing here is compiled into the app. `build.sh` never reads it.
 - DirtyFrag files are unlicensed (all rights reserved): read and learn,
   never copy into this repo — not `lkm/dfroot.c`, not app sources.
-- KernelSU is GPL-3.0: arm's-length interop only (intents, out-of-process
-  calls, user-installed manager). No vendoring, no linkage.
+- KernelSU (GPL-3.0) is vendored at the pinned SHA under `ksu/` with
+  `ksu/LICENSE` + `ksu/kernel/LICENSE` intact — terms in `UPSTREAM.md`
+  (derivative stays GPL-3.0). DirtyFrag stays never-copy.
 - Core reference paths reviewers care about:
   - DirtyFrag: `lkm/dfroot.c`, `lkm/Makefile`,
     `app/src/main/java/df/root/ExploitRunner.java`,
