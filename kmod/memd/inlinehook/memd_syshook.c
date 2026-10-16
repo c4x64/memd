@@ -368,7 +368,7 @@ int memd_hide_install(void)
      unsigned long flags;
      int ret = 0;
      int i;
-     int installed;
+     int installed = 0;
 
      /* Serialize against concurrent install/uninstall: the array,
       * count, and table writes must not interleave (spinlock alone
