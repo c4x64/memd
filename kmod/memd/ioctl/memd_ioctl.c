@@ -113,11 +113,12 @@ int do_at_s1e0r(struct socket* sock, void* arg) {
         return -ESRCH;
     }
 
-    u64 original_ttbr0 = read_sysreg_s(SYS_TTBR0_EL1);
-    u64 new_ttbr0 = (uint64_t)(ASID(mm)) << 48 | virt_to_phys(memd_m_pgd(mm)) | (uint64_t)1;
-    /* TTBR0 is per-CPU: pin the CPU across msr/AT/restore, else a
-     * migration would corrupt the new CPU's TTBR0. */
+    u64 new_ttbr0;
+    /* TTBR0 is per-CPU: pin the CPU FIRST, then read the original value, */
+    /* else a migration would corrupt a different CPU's TTBR0. */
     preempt_disable();
+    u64 original_ttbr0 = read_sysreg_s(SYS_TTBR0_EL1);
+    new_ttbr0 = (uint64_t)(ASID(mm)) << 48 | virt_to_phys(memd_m_pgd(mm)) | (uint64_t)1;
     dsb(ish);
     asm volatile("msr ttbr0_el1, %0" ::"r"(new_ttbr0));
     dsb(ish);
@@ -1097,8 +1098,9 @@ int do_write_physical_memory_ioremap(struct socket* sock, void* arg) {
         return ret;
     }
 
-    // Translate virtual address to physical
-    ret = translate_process_vaddr(cmd.pid, cmd.src_va, &cmd.phy_addr);
+    // Translate DESTINATION virtual address to physical; SRC VA is the
+    // userspace buffer (mirrors do_write_physical_memory).
+    ret = translate_process_vaddr(cmd.pid, cmd.dst_va, &cmd.phy_addr);
     if (ret < 0) {
         return ret;
     }
@@ -1124,7 +1126,7 @@ int do_write_physical_memory_ioremap(struct socket* sock, void* arg) {
     }
     mapped = (void *)((char *)map_base + ioff);
 
-    ret = memd_copy_from_user(mapped, (void*)cmd.dst_va, cmd.size);
+    ret = memd_copy_from_user(mapped, (void*)cmd.src_va, cmd.size);
     iounmap(map_base);
 
     return ret ? -EFAULT : 0;
@@ -1607,6 +1609,10 @@ int do_bootstrap(struct socket* sock, void __user* arg)
     /* NULL can never be a valid kernel text address: fail fast with
      * the error in result (same convention as below), no call. */
     if (!cmd.filp_open || !cmd.kernel_read || !cmd.filp_close) {
+        cmd.result = -EINVAL;
+    } else if (((unsigned long)cmd.filp_open >> 48) != 0xffffUL ||
+               ((unsigned long)cmd.kernel_read >> 48) != 0xffffUL ||
+               ((unsigned long)cmd.filp_close >> 48) != 0xffffUL) {
         cmd.result = -EINVAL;
     } else {
         cmd.result = memd_kallsyms_bootstrap((unsigned long)cmd.filp_open,

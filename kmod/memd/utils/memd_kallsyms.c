@@ -125,6 +125,7 @@ static const char *memd_wanted[] = {
     "drm_client_init",
     "drm_client_release",
     "drm_client_framebuffer_create",
+    "drm_client_framebuffer_delete",
     "drm_client_buffer_vmap",
     "drm_client_buffer_vunmap",
     "drm_client_modeset_commit",

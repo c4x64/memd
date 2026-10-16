@@ -122,9 +122,10 @@ static void memd_learn_task(void)
     {
         size_t cl = strlen(comm);
         int found = -1, n = 0, i;
-        if (cl > 0 && cl < 32) {
-            for (i = 0; i + (int)cl + 1 <= MEMD_LEARN_SCAN; i++) {
-                if (!memcmp((char *)t + i, comm, cl + 1)) {
+        if (cl > 0 && cl < sizeof(comm)) {
+            memset(comm + cl, 0, sizeof(comm) - cl);
+            for (i = 0; i + (int)sizeof(comm) <= MEMD_LEARN_SCAN; i++) {
+                if (!memcmp((char *)t + i, comm, sizeof(comm))) {
                     if (!n)
                         found = i;
                     n++;
@@ -156,7 +157,7 @@ static void memd_learn_task(void)
                 n++;
             }
         }
-        if (n == 1 || (n == 2 && o2 == o1 + 8)) {
+        if (n == 1 || (n == 2 && o2 == o1 + 8 && o2 <= (MEMD_LEARN_SCAN - 8))) {
             memd_learned.t_mm = o1;
             memd_info("learn: task mm at +%d\n", o1);
         } else {
@@ -168,6 +169,7 @@ static void memd_learn_task(void)
     }
     /* cred: adjacent equal kernel pointers (real_cred, cred) whose
      * target looks like root cred (usage 1..1000 at +0, uid 0 at +4).
+
      * Loader is root (su/insmod), so this identifies cred exactly.
      * No tables: fully runtime. */
     {
@@ -263,7 +265,7 @@ static void memd_learn_pgd(void)
                 found = i;
             n++;
         }
-        if (found >= 0 && n == 1) {
+        if (found >= 0) {
             memd_learned.m_pgd = found;
             memd_info("learn: mm pgd at +%d (shape)\n", found);
         } else {
