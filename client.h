@@ -462,6 +462,44 @@ struct memd_loadso_unload_cmd {
 #define MEMD_IOCTL_LOAD_SOTOAPP _IOWR('W', 38, struct memd_loadso_cmd)
 #define MEMD_IOCTL_LOAD_SOSUTOAPP _IOWR('W', 39, struct memd_loadso_cmd)
 #define MEMD_IOCTL_LOADSO_UNLOAD _IOWR('W', 41, struct memd_loadso_unload_cmd)
+#define MEMD_IOCTL_VERSION _IOWR('W', 42, struct memd_version_cmd)
+#define MEMD_IOCTL_LEARN_STATUS _IOWR('W', 43, struct memd_learn_status_cmd)
+
+/* Driver identity + capability query: probe this first to verify the
+ * install and adapt to driver capabilities. ABI-gated: bump MEMD_ABI_*
+ * on any wire change. */
+#define MEMD_ABI_VERSION 1
+#define MEMD_VERSION_MAJOR 1
+#define MEMD_VERSION_MINOR 0
+#define MEMD_VERSION_PATCH 0
+#define MEMD_F_BOOTSTRAP_DONE 1
+#define MEMD_F_LEARNED_OFFSETS 2
+struct memd_version_cmd {
+    uint32_t abi;       /* Input: must equal MEMD_ABI_VERSION */
+    uint32_t major;     /* Output: driver version */
+    uint32_t minor;     /* Output */
+    uint32_t patch;     /* Output */
+    uint32_t flags;     /* Output: MEMD_F_* capability/boot-state bits */
+    int32_t gen;        /* Output: learned generation index, or -1 */
+    int32_t result;     /* Output: 0 ok, else -errno */
+};
+
+/* Runtime offset-learning snapshot: observability for the universality
+ * story. Mask bit i covers the i-th offset field in order
+ * (t_pid=bit0 ... m_pgd=bit7). */
+struct memd_learn_status_cmd {
+    int32_t gen;        /* Output: learned generation index, or -1 */
+    int32_t t_pid;      /* Output: task_struct.pid offset, or -1 */
+    int32_t t_tgid;     /* Output: task_struct.tgid offset, or -1 */
+    int32_t t_mm;       /* Output: task_struct.mm offset, or -1 */
+    int32_t t_cred;     /* Output: task_struct.cred offset, or -1 */
+    int32_t v_start;    /* Output: vm_area_struct.vm_start offset, or -1 */
+    int32_t v_end;      /* Output: vm_area_struct.vm_end offset, or -1 */
+    int32_t v_flags;    /* Output: vm_area_struct.vm_flags offset, or -1 */
+    int32_t m_pgd;      /* Output: mm_struct.pgd offset, or -1 */
+    uint32_t mask;      /* Output: learned-bits, t_pid=bit0 */
+    int32_t result;     /* Output: 0 ok, else -errno */
+};
 
 /* Symbol bootstrap: kernel addresses for file helpers GKI protects
  * from unsigned modules. Userspace reads them from /proc/kallsyms
@@ -853,6 +891,49 @@ static inline int memd_bootstrap(int fd, uint64_t filp_open,
     if (memd_call(fd, MEMD_IOCTL_BOOTSTRAP, &cmd) < 0)
         return -errno;
     return cmd.result;
+}
+
+/* Query driver identity + capabilities. Fills out on success (returns
+ * 0); result holds the driver errno otherwise. The abi field must be
+ * MEMD_ABI_VERSION — a mismatch fails closed so old userspace never
+ * misreads a newer wire format. */
+static inline int memd_get_version(int fd, struct memd_version_cmd *out) {
+    struct memd_version_cmd cmd;
+    if (fd < 0 || !out) {
+        errno = EINVAL;
+        return -EINVAL;
+    }
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.abi = MEMD_ABI_VERSION;
+    if (memd_call(fd, MEMD_IOCTL_VERSION, &cmd) < 0)
+        return -errno;
+    if (cmd.result < 0) {
+        errno = -cmd.result;
+        return cmd.result;
+    }
+    *out = cmd;
+    return 0;
+}
+
+/* Snapshot runtime offset learning (gen + per-field offsets, -1 for
+ * unknown; mask bit i set when the i-th offset field was learned).
+ * Fills out on success (returns 0). */
+static inline int memd_get_learn_status(int fd,
+                                        struct memd_learn_status_cmd *out) {
+    struct memd_learn_status_cmd cmd;
+    if (fd < 0 || !out) {
+        errno = EINVAL;
+        return -EINVAL;
+    }
+    memset(&cmd, 0, sizeof(cmd));
+    if (memd_call(fd, MEMD_IOCTL_LEARN_STATUS, &cmd) < 0)
+        return -errno;
+    if (cmd.result < 0) {
+        errno = -cmd.result;
+        return cmd.result;
+    }
+    *out = cmd;
+    return 0;
 }
 
 #ifdef __cplusplus

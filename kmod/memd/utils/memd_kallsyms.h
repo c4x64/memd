@@ -20,6 +20,9 @@
  */
 unsigned long memd_kallsyms(const char *name);
 
+/* Nonzero once the bootstrap table has arrived (helpers resolved). */
+int memd_kallsyms_ready(void);
+
 /* Install bootstrap file-helper addresses (kernel-canonical, else
  * -EINVAL). Re-arms the parser so a later lookup re-parses. */
 int memd_kallsyms_bootstrap(unsigned long filp_open_addr,

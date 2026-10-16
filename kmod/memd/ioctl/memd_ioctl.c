@@ -8,6 +8,7 @@
 #include "memd_hide.h"
 #include "memd_kallsyms.h"
 #include "memd_learn.h"
+#include "memd_netlayout.h"
 #include "memd_hwbp.h"
 #include "memd_gyro.h"
 #include "memd_sigforce.h"
@@ -1612,6 +1613,76 @@ int do_bootstrap(struct socket* sock, void __user* arg)
                                              (unsigned long)cmd.kernel_read,
                                              (unsigned long)cmd.filp_close);
     }
+    if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+
+int do_memd_version(struct socket* sock, void* arg)
+ {
+    struct memd_version_cmd cmd;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    if (cmd.abi != MEMD_ABI_VERSION) {
+        cmd.result = -EINVAL;
+    } else {
+        cmd.major = MEMD_VERSION_MAJOR;
+        cmd.minor = MEMD_VERSION_MINOR;
+        cmd.patch = MEMD_VERSION_PATCH;
+        cmd.flags = 0;
+        if (memd_kallsyms_ready())
+            cmd.flags |= MEMD_F_BOOTSTRAP_DONE;
+        if (memd_learned.t_mm >= 0 && memd_learned.t_pid >= 0)
+            cmd.flags |= MEMD_F_LEARNED_OFFSETS;
+        cmd.gen = memd_net_gen();
+        cmd.result = 0;
+    }
+    if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+
+int do_learn_status(struct socket* sock, void* arg)
+ {
+    struct memd_learn_status_cmd cmd;
+    unsigned int bit;
+    int *slots[8];
+    int i;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    cmd.gen = memd_net_gen();
+    cmd.t_pid = memd_learned.t_pid;
+    cmd.t_tgid = memd_learned.t_tgid;
+    cmd.t_mm = memd_learned.t_mm;
+    cmd.t_cred = memd_learned.t_cred;
+    cmd.v_start = memd_learned.v_start;
+    cmd.v_end = memd_learned.v_end;
+    cmd.v_flags = memd_learned.v_flags;
+    cmd.m_pgd = memd_learned.m_pgd;
+    /* Mask bit i covers the i-th offset field above in order
+     * (t_pid=bit0 ... m_pgd=bit7). Learned snapshot: offsets only
+     * change at init, so a torn read here degrades to a stale-but-
+     * valid generation at worst; the app treats -1 as unknown. */
+    slots[0] = &cmd.t_pid;
+    slots[1] = &cmd.t_tgid;
+    slots[2] = &cmd.t_mm;
+    slots[3] = &cmd.t_cred;
+    slots[4] = &cmd.v_start;
+    slots[5] = &cmd.v_end;
+    slots[6] = &cmd.v_flags;
+    slots[7] = &cmd.m_pgd;
+    cmd.mask = 0;
+    for (bit = 0; bit < 8; bit++) {
+        if (*slots[bit] >= 0)
+            cmd.mask |= (1u << bit);
+    }
+    cmd.result = 0;
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
     return 0;

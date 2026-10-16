@@ -279,6 +279,44 @@ struct memd_page_perms_cmd {
  * the target. Lowest free number after 40. */
 #define MEMD_IOCTL_LOADSO_UNLOAD _IOWR('W', 41, struct memd_loadso_unload_cmd)
 
+/* Driver identity + capability query (below): the userspace app probes
+ * this first to verify the install and adapt to driver capabilities. */
+#define MEMD_ABI_VERSION 1
+#define MEMD_VERSION_MAJOR 1
+#define MEMD_VERSION_MINOR 0
+#define MEMD_VERSION_PATCH 0
+#define MEMD_F_BOOTSTRAP_DONE 1
+#define MEMD_F_LEARNED_OFFSETS 2
+struct memd_version_cmd {
+    __u32 abi;      /* Input: must equal MEMD_ABI_VERSION */
+    __u32 major;    /* Output: driver version */
+    __u32 minor;    /* Output */
+    __u32 patch;    /* Output */
+    __u32 flags;    /* Output: MEMD_F_* capability/boot-state bits */
+    int gen;      /* Output: learned generation index, or -1 */
+    int result;   /* Output: 0 ok, else -errno */
+};
+#define MEMD_IOCTL_VERSION _IOWR('W', 42, struct memd_version_cmd)
+
+/* Runtime offset-learning snapshot (below): observability for the
+ * universality story — field teams dump this on new kernels to see
+ * exactly what adapted and what stayed unknown (-1). Mask bit i covers
+ * the i-th offset field in order (t_pid=bit0 ... m_pgd=bit7). */
+struct memd_learn_status_cmd {
+    int gen;      /* Output: learned generation index, or -1 */
+    int t_pid;    /* Output: task_struct.pid offset, or -1 */
+    int t_tgid;   /* Output: task_struct.tgid offset, or -1 */
+    int t_mm;     /* Output: task_struct.mm offset, or -1 */
+    int t_cred;   /* Output: task_struct.cred offset, or -1 */
+    int v_start;  /* Output: vm_area_struct.vm_start offset, or -1 */
+    int v_end;    /* Output: vm_area_struct.vm_end offset, or -1 */
+    int v_flags;  /* Output: vm_area_struct.vm_flags offset, or -1 */
+    int m_pgd;    /* Output: mm_struct.pgd offset, or -1 */
+    __u32 mask;     /* Output: learned-bits, t_pid=bit0 */
+    int result;   /* Output: 0 ok, else -errno */
+};
+#define MEMD_IOCTL_LEARN_STATUS _IOWR('W', 43, struct memd_learn_status_cmd)
+
 /* Symbol bootstrap (struct below): userspace delivers kernel addresses
  * for file helpers GKI protects from unsigned modules, so the kallsyms
  * parser needs no direct imports. Lowest free number after 39. */
@@ -361,6 +399,8 @@ int do_virtual_input_create(struct socket* sock, void __user* arg);
 int do_load_sotoapp(struct socket* sock, void __user* arg);
 int do_load_sosutoapp(struct socket* sock, void __user* arg);
 int do_loadso_unload(struct socket* sock, void __user* arg);
+int do_memd_version(struct socket* sock, void __user* arg);
+int do_learn_status(struct socket* sock, void __user* arg);
 int do_bootstrap(struct socket* sock, void __user* arg);
 
 typedef int (*ioctl_handler_t)(struct socket* sock, void __user* arg);
@@ -415,6 +455,8 @@ static const struct ioctl_cmd_map {
     {.cmd = MEMD_IOCTL_LOAD_SOTOAPP, .handler = do_load_sotoapp},
     {.cmd = MEMD_IOCTL_LOAD_SOSUTOAPP, .handler = do_load_sosutoapp},
     {.cmd = MEMD_IOCTL_LOADSO_UNLOAD, .handler = do_loadso_unload},
+    {.cmd = MEMD_IOCTL_VERSION, .handler = do_memd_version},
+    {.cmd = MEMD_IOCTL_LEARN_STATUS, .handler = do_learn_status},
     {.cmd = MEMD_IOCTL_BOOTSTRAP, .handler = do_bootstrap},
     {.cmd = 0, .handler = NULL} /* Sentinel to mark end of array */
 };

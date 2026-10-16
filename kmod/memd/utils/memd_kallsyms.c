@@ -369,6 +369,16 @@ static void memd_do_parse(void)
     (void)memd_publish_if_current(tmp, gen);
 }
 
+/* Bootstrap readiness for status queries: nonzero once userspace has
+ * delivered all three file helpers (stable thereafter; never cleared). */
+int memd_kallsyms_ready(void)
+ {
+    if (READ_ONCE(my_filp_open) && READ_ONCE(my_kernel_read) &&
+        READ_ONCE(my_filp_close))
+        return 1;
+    return 0;
+}
+
 unsigned long memd_kallsyms(const char *name)
  {
     int idx;
