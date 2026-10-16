@@ -536,7 +536,7 @@ jobs:
           
           cd kmod
           export PATH="$(echo /opt/ddk/clang/*/bin | cut -d' ' -f1):$PATH"
-          make V=1 KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.dbg == true && 'DBG=1' || '' }} ${{ matrix.test == true && 'DISP_TEST=1' || '' }}
+          make V=1 O="$KDIR_RESOLVED" KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.dbg == true && 'DBG=1' || '' }} ${{ matrix.test == true && 'DISP_TEST=1' || '' }}
           OBJCOPY_BIN=$(cat "$GITHUB_WORKSPACE/.objcopy")
           [ -n "$OBJCOPY_BIN" ] || { echo "FATAL: no objcopy"; exit 1; }
           if [ "${{ matrix.dbg }}" != "true" ]; then
@@ -569,7 +569,7 @@ jobs:
           echo "== modpost usage =="
           "$KDIR_RESOLVED/scripts/mod/modpost" -h 2>&1 | head -40 || true
           set -o pipefail
-          make V=1 KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.dbg == true && 'DBG=1' || '' }} ${{ matrix.test == true && 'DISP_TEST=1' || '' }} NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal 2>&1 | tee build.log
+          make V=1 O="$KDIR_RESOLVED" KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.dbg == true && 'DBG=1' || '' }} ${{ matrix.test == true && 'DISP_TEST=1' || '' }} NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal 2>&1 | tee build.log
           if grep -qiE "does not import it|namespace.*mismatch" build.log; then
             echo "FAIL: namespaced symbol used without MODULE_IMPORT_NS (loader would reject)"
             exit 1
