@@ -9,7 +9,7 @@
 #include <linux/input.h>
 #include <linux/preempt.h>
 #include <linux/sched/signal.h>
-#include <stdarg.h>
+#include <linux/stdarg.h>
 #include <linux/hugetlb.h>
 #include <linux/interrupt.h>
 #include <linux/mm.h>
