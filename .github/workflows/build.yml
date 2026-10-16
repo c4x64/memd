@@ -89,6 +89,10 @@ jobs:
     name: Prepare verified KernelCI batch
     needs: kcidb-readiness
     runs-on: ubuntu-latest
+    # secrets.* is illegal in step-level if: — expose presence via env
+    # (env.* IS allowed there) for the BigQuery fallback steps below.
+    env:
+      HAS_KCIDB: ${{ secrets.KCIDB_GCP_CREDENTIALS }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -108,13 +112,13 @@ jobs:
           fi
 
       - name: Authenticate to KernelCI BigQuery
-        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' && secrets.KCIDB_GCP_CREDENTIALS != '' }}
+        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' && env.HAS_KCIDB != '' }}
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.KCIDB_GCP_CREDENTIALS }}
 
       - name: Set up BigQuery CLI
-        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' && secrets.KCIDB_GCP_CREDENTIALS != '' }}
+        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' && env.HAS_KCIDB != '' }}
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ fromJSON(secrets.KCIDB_GCP_CREDENTIALS).project_id }}
@@ -130,7 +134,7 @@ jobs:
 
       - name: Query verified KernelCI builds
         id: query
-        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' && secrets.KCIDB_GCP_CREDENTIALS != '' }}
+        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' && env.HAS_KCIDB != '' }}
         env:
           KCIDB_GCP_PROJECT_ID: ${{ fromJSON(secrets.KCIDB_GCP_CREDENTIALS).project_id }}
         run: |
