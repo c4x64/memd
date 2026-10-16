@@ -556,6 +556,9 @@ jobs:
           
           echo "== ELF section dump (rwbridge.ko) =="
           for T in llvm-readelf readelf eu-readelf; do command -v $T >/dev/null 2>&1 && { $T -S rwbridge.ko | grep -iE "versions|crc|modinfo|this_module" || true; break; }; done
+          echo "== CRC symbols in rwbridge.ko =="
+          "$NM_BIN" rwbridge.ko 2>/dev/null | grep -i "__crc_" | head -5 || true
+          echo "crc_sym_count=$("$NM_BIN" rwbridge.ko 2>/dev/null | grep -c "__crc_" || true)"
           echo "== modpost usage =="
           "$KDIR_RESOLVED/scripts/mod/modpost" --help 2>&1 | head -40 || true
           set -o pipefail
