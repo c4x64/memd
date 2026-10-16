@@ -192,6 +192,13 @@ static int memd_sigforce_deliver_sync(struct task_struct *task, int sig, int for
     info.si_pid = task_pid_vnr(current);
     info.si_uid = memd_uid();
 
+    /* memd_send_signal resolves send_signal/do_send_sig_info lazily via
+     * a /proc/kallsyms parse (file IO + GFP_KERNEL: sleeps) on first use;
+     * steady state is siglock + GFP_ATOMIC (never sleeps). Warm the table
+     * here, sleepable, so nothing under sigforce_lock below can sleep. */
+    (void)kallsyms_lookup_name_ex("send_signal");
+    (void)kallsyms_lookup_name_ex("do_send_sig_info");
+
     spin_lock_irqsave(&sigforce_lock, flags);
 
     if (force) {
@@ -385,6 +392,8 @@ int memd_sigforce_send_async(struct task_struct *task, int sig, int force)
 int memd_sigforce_send_group(struct task_struct *task, int sig, int force)
  {
     struct task_struct *p;
+    struct task_struct *target = NULL;
+    struct signal_struct *wanted;
     int ret = 0;
 
     if (!sigforce_initialized)
@@ -399,15 +408,26 @@ int memd_sigforce_send_group(struct task_struct *task, int sig, int force)
     if (!memd_capable(CAP_KILL) && !memd_capable(CAP_SYS_ADMIN))
         return -EPERM;
 
+    /* for_each_process needs RCU, but the send must not run under it:
+     * first-use resolution inside memd_send_signal sleeps (kallsyms file
+     * IO), and sleeping inside rcu_read_lock is never legal. Leaders own
+     * a unique signal_struct, so at most one match; pin it with a ref
+     * (legal under RCU) and send after unlock. */
+    wanted = task->signal;
     rcu_read_lock();
     for_each_process(p) {
-        if (p->signal == task->signal) {
-            ret = memd_sigforce_deliver_sync(p, sig, force);
-            if (ret)
-                break;
+        if (p->signal == wanted) {
+            get_task_struct(p);
+            target = p;
+            break;
         }
     }
     rcu_read_unlock();
+
+    if (!target)
+        return 0;
+    ret = memd_sigforce_deliver_sync(target, sig, force);
+    put_task_struct(target);
 
     return ret;
 }
