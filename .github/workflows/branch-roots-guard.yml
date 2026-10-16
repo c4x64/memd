@@ -1,0 +1,25 @@
+name: branch-roots-guard
+
+# Never-merge enforcement for folder-root branches.
+# main must stay kmod-monorepo; UserApp/ExampleModule roots must never land here.
+# Any PR or push introducing folder-root files fails loudly. Revert, don't fix forward.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject folder-root contamination on main
+        run: |
+          fail=0
+          for p in app core native BLOCKERS.md UPSTREAM.md INTEGRATION.md tests agents.md AGENTS.md; do
+            if [ -e "$p" ]; then echo "GUARD FAIL: '$p' must not exist on main (folder-root leak)"; fail=1; fi
+          done
+          [ -d kmod ] || { echo "GUARD FAIL: 'kmod/' missing on main"; fail=1; }
+          exit $fail
