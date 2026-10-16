@@ -86,8 +86,8 @@ struct dentry *memd_file_dentry(struct file *f);
  * (deny) when unlearned. */
 int memd_capable(int cap);
 unsigned int memd_uid(void);
-/* Shared cred-uid offset (learned, else compiled fallback 4). Call
- * sites in other units that still hard-code +4 should migrate here. */
+/* Shared cred-uid offset (learned, else compiled fallback 4). All
+ * in-tree uid sites use this helper (verified round 18). */
 unsigned long memd_cred_uid_off(void);
 
 /* vma->vm_file learned the same way (known pathname match). */

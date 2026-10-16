@@ -917,9 +917,9 @@ int memd_capable(int cap)
 
 /* Cred uid offset: learned when a value-based learner fills it, else
  * the CI-asserted compiled fallback (4). Centralizes the constant so
- * all uid readers share one treatment; su_stage (memd_inject.c) and
- * the ioctl uid fill still hard-code +4 (read-only from this unit) —
- * rewiring them to this helper is for their owning rounds. */
+ * all uid readers share one treatment (adopted: su_stage/su_unstage in
+ * memd_inject.c and both uid fills in memd_ioctl.c use this helper
+ * with guarded reads, fail closed; verified end-to-end round 18). */
 unsigned long memd_cred_uid_off(void)
  {
     if (memd_learned_ext.t_cred_uid >= 0)

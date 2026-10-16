@@ -241,7 +241,12 @@ int memd_printk(const char *fmt, ...)
         d = READ_ONCE(dropped);
         if (d > 0) {
             WRITE_ONCE(dropped, 0);
-            tmp(KERN_WARNING MEMD_LOG_PREFIX
+            /* Report through memd_printk, not tmp directly: tmp is
+             * vprintk and takes a va_list, so handing it the count
+             * would feed a small integer as the varargs pointer and
+             * oops on first use. The recursive call is depth-1 (fn
+             * is already published, so it takes the fast path). */
+            memd_printk(KERN_WARNING MEMD_LOG_PREFIX
                 "early messages dropped before bootstrap: %ld\n", d);
         }
     }
