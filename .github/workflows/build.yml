@@ -1,6 +1,8 @@
 name: build-matrix-kmod
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       manifest_run_id:
@@ -62,6 +64,7 @@ jobs:
 
   kcidb-readiness:
     name: Check KernelCI credentials
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
@@ -86,6 +89,7 @@ jobs:
   prepare-kcidb-batch:
     name: Prepare verified KernelCI batch
     needs: kcidb-readiness
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     # secrets.* is illegal in step-level if: — expose presence via env
     # (env.* IS allowed there) for the BigQuery fallback steps below.
@@ -232,6 +236,7 @@ jobs:
     # plumbing, no giant outputs.
     name: Compile batch worker ${{ matrix.worker }}
     needs: prepare-kcidb-batch
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
@@ -304,6 +309,7 @@ jobs:
 
   generate-matrix:
     name: Generate Build Matrix
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.generate.outputs.matrix }}
@@ -323,6 +329,7 @@ jobs:
   build:
     name: Build ${{ matrix.kmi }}
     needs: generate-matrix
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/ylarod/ddk:${{ matrix.ddk_tag }}
@@ -563,6 +570,7 @@ jobs:
   pack:
     name: Pack SPX Binary
     needs: [generate-matrix, build]
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     # Releases need an explicit grant (repo default token is restricted).
     permissions:
