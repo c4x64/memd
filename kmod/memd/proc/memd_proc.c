@@ -19,6 +19,11 @@ int is_invisible(pid_t pid) {
 
 bool memd_hide_check_visibility(pid_t pid, struct pid_namespace *ns)
  {
+    /* NULL ns keeps the historical &init_pid_ns default: this helper
+     * stays init-scoped on purpose (backward compat). Non-init
+     * reader-plane callers must pass the reader's active ns
+     * explicitly; the readdir filter already does (see
+     * memd_syshook.h), so no change is needed here. */
     if (!ns)
         ns = &init_pid_ns;
     return memd_hide_contains_ns(pid, ns);

@@ -130,8 +130,11 @@ static void __exit memd_exit(void) {
      * reader. In-flight hook calls hold module refs, so rmmod already
      * waited for them. */
     r = memd_hide_uninstall();
-    if (r)
-        memd_err("hide uninstall at exit failed: %d\n", r);
+    if (r == -EBUSY) {
+        memd_warn("hide uninstall at exit: table owned by someone else; unloading without our hook (safe)\n");
+    } else if (r) {
+        memd_printk(KERN_EMERG MEMD_LOG_PREFIX "hide uninstall at exit failed: %d; /proc iterate still points at freed module text, next /proc readdir may panic — avoid /proc listings and reboot\n", r);
+    }
     r = memd_disp_uninstall();
     if (r && r != -ENODEV)
         memd_err("display uninstall at exit failed: %d\n", r);

@@ -490,6 +490,10 @@ bool memd_hide_contains(pid_t pid)
     bool found = false;
     unsigned long flags;
 
+    /* TARGET-scoped management query ("hidden where it lives"), not a
+     * reader check: left unchanged by the reader-scoped readdir fix.
+     * Reader-plane code must use memd_hide_contains_ns() with the
+     * reader's ns instead (see memd_hide.h scoping rule). */
     rcu_read_lock();
     task = find_task_by_vpid(pid);
     if (!task) {
