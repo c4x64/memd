@@ -107,8 +107,10 @@ static int __init memd_init(void) {
 
     return 0;
 
+#if defined(BUILD_HIDE_SIGNAL)
 clean_sigforce:
     memd_sigforce_cleanup();
+#endif
 clean_gyro:
     memd_gyro_cleanup();
 clean_hwbp:
