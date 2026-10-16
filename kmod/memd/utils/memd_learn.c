@@ -1043,20 +1043,30 @@ unsigned long memd_v_flags(struct vm_area_struct *vma)
 struct file_operations *memd_file_fop(struct file *f)
  {
     int g = memd_net_gen();
+    unsigned long v = 0;
     if (g < 0 || g >= MEMD_GEN_N || !f)
         return NULL;
-    return *(struct file_operations **)((char *)f + memd_fop_off[g]);
+    /* Guarded: f may be a torn/UAF or foreign-layout value (the vma walk
+     * holds no mmap_lock by design, and the compiled vm_file fallback is
+     * garbage on foreign layouts); a raw load here would oops. */
+    if (memd_safe_read64((char *)f + memd_fop_off[g], &v) ||
+        (v & 0xffff000000000000UL) != 0xffff000000000000UL)
+        return NULL;
+    return (struct file_operations *)(uintptr_t)v;
 }
 
 struct dentry *memd_file_dentry(struct file *f)
  {
     int g = memd_net_gen();
-    struct dentry *d;
+    unsigned long v = 0;
     if (g < 0 || g >= MEMD_GEN_N || !f)
         return NULL;
-    /* struct path = { mnt, dentry }: dentry second. */
-    d = *(struct dentry **)((char *)f + memd_fpath_off[g] + 8);
-    return d;
+    /* struct path = { mnt, dentry }: dentry second. Same guarded
+     * treatment as f_op above: raw load of a derived pointer oopses. */
+    if (memd_safe_read64((char *)f + memd_fpath_off[g] + 8, &v) ||
+        (v & 0xffff000000000000UL) != 0xffff000000000000UL)
+        return NULL;
+    return (struct dentry *)(uintptr_t)v;
 }
 
 unsigned long memd_v_file(struct vm_area_struct *vma)

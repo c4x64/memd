@@ -1134,10 +1134,44 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
                 continue;
             }
             dentry = memd_file_dentry((struct file *)_vf);
-            if (!dentry)
+            if (!dentry ||
+                ((unsigned long)dentry & 0xffff000000000000UL) !=
+                0xffff000000000000UL)
                 continue;
-            dname_len = dentry->d_name.len;
-            if (!memcmp(dentry->d_name.name, name, min(name_len, dname_len))) {
+            /* Guarded qstr: dentry derives from a possibly-torn vma (no
+             * mmap_lock by design); raw d_name reads would oops. qstr
+             * head is {hash,len}+name, len the high u32; same
+             * min-length prefix semantics as the old memcmp, compared
+             * through guarded 8-byte windows (in-range bytes only). */
+            {
+                unsigned long hl = 0, nm = 0, i;
+                size_t cmp;
+                int match = 1;
+                if (memd_safe_read64(&dentry->d_name, &hl) ||
+                    memd_safe_read64((const char *)&dentry->d_name + 8, &nm))
+                    continue;
+                dname_len = (size_t)((hl >> 32) & 0xffffffffUL);
+                if (!nm || (nm & 0xffff000000000000UL) != 0xffff000000000000UL)
+                    continue;
+                cmp = name_len < dname_len ? name_len : dname_len;
+                for (i = 0; i < cmp; i += 8) {
+                    unsigned long w = 0;
+                    int t;
+                    if (memd_safe_read64((const char *)nm + i, &w)) {
+                        match = 0;
+                        break;
+                    }
+                    for (t = 0; t < 8 && i + (size_t)t < cmp; t++) {
+                        if ((char)((w >> (8 * t)) & 0xff) != name[i + t]) {
+                            match = 0;
+                            break;
+                        }
+                    }
+                    if (!match)
+                        break;
+                }
+                if (!match)
+                    continue;
                 result = memd_v_start(vma);
                 goto ret;
             }
