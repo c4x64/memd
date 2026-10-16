@@ -139,6 +139,9 @@ int memd_strncpy_from_user(char *dst, const void *src, size_t max_len)
  {
     if (!dst || !src || max_len == 0)
         return -EINVAL;
+    /* Return type is int: clamp so (int)copied below cannot truncate. */
+    if (max_len > 2147483647UL)
+        max_len = 2147483647UL;
 
     size_t copied = 0;
     while (copied < max_len - 1) {
@@ -151,7 +154,7 @@ int memd_strncpy_from_user(char *dst, const void *src, size_t max_len)
             break;
     }
     dst[copied] = '\0';
-    return copied;
+    return (int)copied;
 }
 
 int memd_strncpy_to_user(void *dst, const char *src, size_t max_len)
@@ -161,6 +164,8 @@ int memd_strncpy_to_user(void *dst, const char *src, size_t max_len)
 
     if (!dst || !src || max_len == 0)
         return -EINVAL;
+    if (max_len > 2147483647UL)
+        max_len = 2147483647UL;
 
     while (copied < max_len - 1) {
         unsigned long remaining = memd_copy_to_user((char *)dst + copied, &src[copied], 1);
@@ -168,7 +173,7 @@ int memd_strncpy_to_user(void *dst, const char *src, size_t max_len)
             break;
         if (src[copied] == '\0') {
             copied++;
-            return copied;
+            return (int)copied;
         }
         copied++;
     }
@@ -176,7 +181,7 @@ int memd_strncpy_to_user(void *dst, const char *src, size_t max_len)
      * is room, matching memd_strncpy_from_user's guarantee. */
     if (copied < max_len && memd_copy_to_user((char *)dst + copied, &z, 1) == 0)
         copied++;
-    return copied;
+    return (int)copied;
 }
 
 /* Memory region validation */

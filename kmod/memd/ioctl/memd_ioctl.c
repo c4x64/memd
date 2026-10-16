@@ -192,10 +192,31 @@ int do_get_page_info(struct socket* sock, void* arg) {
 int do_pte_mapping(struct socket* sock, void* arg) {
 #if defined(BUILD_PTE_MAPPING)
     // 这里需要注意 android kenel 6.6.66找不到 pte_mkwrite
-    struct memd_sock* ws = (struct memd_sock*)sock->sk;
+    struct memd_sock* ws;
     struct memd_pte_mapping_cmd cmd;
+    if (!sock || !sock->sk) {
+        return -EINVAL;
+    }
+    ws = (struct memd_sock*)sock->sk;
     if (memd_copy_from_user(&cmd, arg, sizeof(cmd))) {
         return -EFAULT;
+    }
+
+    if (cmd.pid <= 0) {
+        memd_warn("invalid pid: %d\n", cmd.pid);
+        return -EINVAL;
+    }
+
+    /* Tracker/session must exist before any PTE is installed: the
+     * success path cannot fail after set_pte, so a missing tracker
+     * would leak untracked live pages. */
+    if (!ws->used_pages) {
+        memd_err("used_pages array not initialized\n");
+        return -EINVAL;
+    }
+    if (cmd.hide && !ws->session) {
+        memd_err("session not initialized\n");
+        return -EINVAL;
     }
 
     if (cmd.start_addr >= TASK_SIZE_64) {
@@ -229,10 +250,22 @@ int do_pte_mapping(struct socket* sock, void* arg) {
         return -ESRCH;
     }
 
-    struct mm_struct* mm = get_task_mm(task);
-    /* Snapshot anything needed from task before dropping the ref:
-     * task may be freed once put_task_struct runs. */
-    uid_t hide_uid = task->cred->uid.val;
+    struct mm_struct* mm;
+    uid_t hide_uid;
+    /* Foreign task layout skews across OEMs (proven, see
+     * do_get_process_info): never dereference task->cred directly.
+     * Learned offset + extable-guarded read; unknown -> 0. Snapshot
+     * before put_task_struct: task may be freed after the put. */
+    hide_uid = 0;
+    {
+        unsigned long cred_addr;
+        unsigned int uid_val;
+        if (memd_learned.t_cred >= 0 &&
+            !memd_safe_read64((char *)task + memd_learned.t_cred, &cred_addr) && cred_addr &&
+            !memd_safe_read32((const void *)(cred_addr + 4), &uid_val))
+            hide_uid = (uid_t)uid_val;
+    }
+    mm = get_task_mm(task);
     put_task_struct(task);
     task = NULL;
     if (!mm) {
@@ -262,6 +295,10 @@ int do_pte_mapping(struct socket* sock, void* arg) {
         ret = -ENOMEM;
         goto out_mm;
     }
+
+    /* Installing PTEs in a live foreign mm without the write lock
+     * races reclaim/fork/exit_mmap walks of the same tables. */
+    MM_WRITE_LOCK(mm);
 
     for (i = 0; i < cmd.num_pages; i++) {
         pgd = pgd_offset(mm, addr);
@@ -329,6 +366,11 @@ int do_pte_mapping(struct socket* sock, void* arg) {
         addr += PAGE_SIZE;
     }
 
+    /* Publish under the write lock, then flush: the PTEs are complete
+     * here, so a concurrent fault either blocks on the lock or sees
+     * present entries. */
+    MM_WRITE_UNLOCK(mm);
+
     flush_tlb_all();
 
     mmput(mm);
@@ -341,11 +383,10 @@ int do_pte_mapping(struct socket* sock, void* arg) {
             continue;
         }
 
-        if (!ws->used_pages) {
-            memd_err("used_pages array not initialized\n");
-            break;
-        }
-
+        /* One ref stays with the installed PTE, one with the tracker:
+         * freeing either side must not pull the page out from under
+         * the other. */
+        get_page(p);
         arraylist_add(ws->used_pages, p);
     }
     kfree(page_arr);
@@ -358,6 +399,36 @@ int do_pte_mapping(struct socket* sock, void* arg) {
     return 0;
 
 rollback:
+    /* Still holding the write lock: zap every PTE installed above so
+     * no live entry points at a page we are about to free, then
+     * unlock, flush the stale entries, and only then free. */
+    {
+        size_t j;
+        unsigned long a;
+        for (j = 0; j < i; j++) {
+            a = cmd.start_addr + j * PAGE_SIZE;
+            pgd = pgd_offset(mm, a);
+            if (pgd_none(*pgd) || pgd_bad(*pgd))
+                continue;
+            p4d = p4d_offset(pgd, a);
+            if (!p4d)
+                continue;
+            pud = pud_offset(p4d, a);
+            if (!pud || pud_none(*pud))
+                continue;
+            pmd = pmd_offset(pud, a);
+            if (!pmd || pmd_none(*pmd))
+                continue;
+            pte = pte_offset_map(pmd, a);
+            if (!pte)
+                continue;
+            if (!pte_none(*pte))
+                pte_clear(mm, a, pte);
+            pte_unmap(pte);
+        }
+    }
+    MM_WRITE_UNLOCK(mm);
+    flush_tlb_all();
     while (i--)
         __free_page(page_arr[i]);
     kfree(page_arr);
@@ -365,7 +436,9 @@ out_mm:
     mmput(mm);
     return ret;
 #else
-    return -EINVAL;
+    /* Feature compiled out: not a bad argument, the call itself is
+     * unsupported on this build. */
+    return -ENOSYS;
 #endif
 }
 
@@ -745,8 +818,12 @@ int do_disp_status(struct socket* sock, void* arg) {
     (void)sock;
     if (!memd_capable(CAP_SYS_ADMIN))
         return -EPERM;
-    if (memd_disp_status(&cmd))
-        return -EINVAL;
+    {
+        int rc;
+        rc = memd_disp_status(&cmd);
+        if (rc)
+            return rc;
+    }
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
     return 0;
@@ -780,15 +857,18 @@ int do_disp_frame(struct socket* sock, void* arg) {
     if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
         return -EFAULT;
     count = cmd.count;
+    /* Never silently truncate: the caller must know every op ran. */
     if (count > MEMD_DISP_MAX_OPS)
-        count = MEMD_DISP_MAX_OPS;
+        return -EINVAL;
     if (count == 0) {
         cmd.rc = 0;
         if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
             return -EFAULT;
         return 0;
     }
-    kops = kmalloc((size_t)count * sizeof(*kops), GFP_KERNEL);
+    if (!cmd.ops)
+        return -EINVAL;
+    kops = kmalloc_array(count, sizeof(*kops), GFP_KERNEL);
     if (!kops)
         return -ENOMEM;
     if (memd_copy_from_user(kops, (void __user *)(uintptr_t)cmd.ops,
@@ -899,9 +979,9 @@ int do_read_physical_memory_ioremap(struct socket* sock, void* arg) {
     }
 
     ret = memd_copy_to_user((void*)cmd.dst_va, mapped, cmd.size);
-    iounmap((void *)((uintptr_t)mapped & PAGE_MASK));
+    iounmap(map_base);
 
-    return ret ? -EACCES : 0;
+    return ret ? -EFAULT : 0;
 }
 
 int do_write_physical_memory_ioremap(struct socket* sock, void* arg) {
@@ -961,9 +1041,9 @@ int do_write_physical_memory_ioremap(struct socket* sock, void* arg) {
     }
 
     ret = memd_copy_from_user(mapped, (void*)cmd.dst_va, cmd.size);
-    iounmap((void *)((uintptr_t)mapped & PAGE_MASK));
+    iounmap(map_base);
 
-    return ret ? -EACCES : 0;
+    return ret ? -EFAULT : 0;
 }
 
 int do_list_processes(struct socket* sock, void __user* arg) {
@@ -1118,7 +1198,7 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
         struct mm_struct* mm = get_task_mm(task);
         if (mm) {
             unsigned long arg_start, arg_end;
-            unsigned int len;
+            unsigned long len;
 
             spin_lock(&mm->arg_lock);
             arg_start = mm->arg_start;
@@ -1135,7 +1215,7 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
                 if (len > sizeof(cmdline) - 1)
                     len = sizeof(cmdline) - 1;
 
-                ret = access_process_vm(task, arg_start, cmdline, len, FOLL_FORCE);
+                ret = access_process_vm(task, arg_start, cmdline, (int)len, FOLL_FORCE);
             }
             mmput(mm);
         } else {
@@ -1418,9 +1498,15 @@ int do_bootstrap(struct socket* sock, void __user* arg)
         return -EPERM;
     if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
         return -EFAULT;
-    cmd.result = memd_kallsyms_bootstrap((unsigned long)cmd.filp_open,
-                                         (unsigned long)cmd.kernel_read,
-                                         (unsigned long)cmd.filp_close);
+    /* NULL can never be a valid kernel text address: fail fast with
+     * the error in result (same convention as below), no call. */
+    if (!cmd.filp_open || !cmd.kernel_read || !cmd.filp_close) {
+        cmd.result = -EINVAL;
+    } else {
+        cmd.result = memd_kallsyms_bootstrap((unsigned long)cmd.filp_open,
+                                             (unsigned long)cmd.kernel_read,
+                                             (unsigned long)cmd.filp_close);
+    }
     if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
         return -EFAULT;
     return 0;

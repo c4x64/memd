@@ -65,7 +65,10 @@ def strip_comments(s):
 def canon_type(text):
     text = strip_comments(text)
     text = re.sub(r"__user\b", "", text)
-    toks = re.findall(r"[A-Za-z_]\w*|\*|\[|\]|\(|\)|,|;", text)
+    # \d+ keeps array extents in the canon: name[256] and name[128]
+    # must not compare equal (they size the ioctl code differently),
+    # and neither may alias a scalar field on a shared ioctl number.
+    toks = re.findall(r"[A-Za-z_]\w*|\d+|\*|\[|\]|\(|\)|,|;", text)
     out = []
     i = 0
     while i < len(toks):

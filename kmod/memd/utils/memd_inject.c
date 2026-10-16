@@ -57,7 +57,7 @@
 #define MEMD_INJ_CALL_TRIES  500   /* 500 x 20ms = 10s for dlopen return */
 #define MEMD_INJ_POLL_MS     20
 #define MEMD_INJ_SCRATCH_BELOW 1024 /* below-sp scratch window (bytes) */
-#define MEMD_INJ_STUB_WORDS  10
+#define MEMD_INJ_STUB_WORDS  11 /* movz/movk x4 + blr + str + dmb + movz + str + b. */
 #define MEMD_INJ_RTLD_NOW    2     /* RTLD_NOW, stable dlopen ABI */
 #define MEMD_INJ_ELF_MAX_PHDR 32
 #define MEMD_INJ_ELF_MAX_DYN  48
@@ -77,6 +77,7 @@
 #define MEMD_STR_X_X8(rt, rn) (0xF9000000u | (1u << 10) | ((unsigned int)(rn) << 5) | (unsigned int)(rt))
 #define MEMD_STR_X_X(rt, rn) (0xF9000000u | ((unsigned int)(rn) << 5) | (unsigned int)(rt))
 #define MEMD_B_DOT 0x14000000u
+#define MEMD_DMB_ISH 0xD5033BBFu /* DMB ISH: order retval before done flag */
 
 /* user_pt_regs layout (arm64 UAPI, immutable): x0..x30, sp, pc, pstate. */
 #define MEMD_PT_SP     31
@@ -690,10 +691,15 @@ static int remote_call(struct task_struct *task, struct mm_struct *mm,
     stub[3] = MEMD_MOVK(3, (unsigned int)((fn >> 32) & 0xffffUL), 2);
     stub[4] = MEMD_MOVK(3, (unsigned int)((fn >> 48) & 0xffffUL), 3);
     stub[5] = MEMD_BLR(3);
-    stub[6] = MEMD_STR_X_X8(0, 2);
-    stub[7] = MEMD_MOVZ(1, 1, 0);
-    stub[8] = MEMD_STR_X_X(1, 2);
-    stub[9] = MEMD_B_DOT;
+    /* Flag via x19 (callee-saved: dlopen may clobber x0-x7/x9-x18, but
+     * must preserve x19, so the post-call stores cannot miss). DMB
+     * orders retval before the done word for the polling reader
+     * (reader order done-then-out pairs with this store order). */
+    stub[6] = MEMD_STR_X_X8(0, 19);
+    stub[7] = MEMD_DMB_ISH;
+    stub[8] = MEMD_MOVZ(1, 1, 0);
+    stub[9] = MEMD_STR_X_X(1, 19);
+    stub[10] = MEMD_B_DOT;
     flag[0] = 0;
     flag[1] = 0;
     if (extralen && memd_task_copy_ok(task, 1, path_va, (void *)extra, extralen))
@@ -706,8 +712,9 @@ static int remote_call(struct task_struct *task, struct mm_struct *mm,
         return -EFAULT;
     regs[0] = extralen ? (uint64_t)path_va : (uint64_t)a0;
     regs[2] = (uint64_t)flag_va;
+    regs[19] = (uint64_t)flag_va;
     regs[MEMD_PT_PC] = (uint64_t)stub_va;
-    regs[30] = (uint64_t)(stub_va + 36);
+    regs[30] = (uint64_t)(stub_va + 40);
     /* Run with SP below the scratch: dlopen pushes frames and signal
      * frames land below SP, so leaving SP above the stub would let the
      * call clobber stub/path/flags. Restored verbatim afterwards. */
@@ -873,6 +880,17 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
     if (seize_task(task)) {
         ret = -ETIMEDOUT;
         goto out_mm;
+    }
+    /* Close the resolve-vs-seize TOCTOU: a pre-seize exec/remap would
+     * leave libc_base (and the decoded fn VAs) pointing at the old
+     * address space. Re-read while stopped; any drift aborts. */
+    {
+        uintptr_t fresh;
+        fresh = get_module_base(pid, "libc.so", 0);
+        if (!fresh || fresh != libc_base) {
+            ret = -ENOENT;
+            goto out_release;
+        }
     }
     if (su && su_stage(task, &su_state)) {
         ret = -EACCES;
@@ -1065,6 +1083,16 @@ static int unload_so(pid_t pid, uintptr_t handle)
     if (seize_task(task)) {
         ret = -ETIMEDOUT;
         goto out_mm;
+    }
+    /* Same resolve-vs-seize TOCTOU as inject_so: abort on drift. */
+    {
+        uintptr_t fresh;
+        fresh = get_module_base(pid, "libc.so", 0);
+        if (!fresh || fresh != libc_base) {
+            memd_inj_release(task);
+            ret = -ENOENT;
+            goto out_mm;
+        }
     }
     retval = 0;
     ret = remote_call(task, mm, addrs.dlclose_va, handle, NULL, 0,

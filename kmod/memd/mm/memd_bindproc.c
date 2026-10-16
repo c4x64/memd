@@ -320,6 +320,17 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
 
 static int bindproc_mmap(struct file* f, struct vm_area_struct* vma) { return -EINVAL; }
 
+#ifdef CONFIG_COMPAT
+static long bindproc_compat_ioctl(struct file* f, unsigned int cmd, unsigned long arg) {
+     (void)f;
+     (void)cmd;
+     (void)arg;
+     /* 32-bit bp_*_cmd layout differs (pointers/size_t); the native
+      * handler would misparse it. Fail closed. */
+     return -ENOTTY;
+}
+#endif
+
 static int bindproc_release(struct inode* inode, struct file* f) {
     struct memd_bindproc_private* private_data = memd_f_private(f);
     if (private_data) {
@@ -360,7 +371,7 @@ static const struct file_operations bindproc_fops = {
     .write = bindproc_write,
     .unlocked_ioctl = bindproc_ioctl,
 #ifdef CONFIG_COMPAT
-    .compat_ioctl = bindproc_ioctl,
+    .compat_ioctl = bindproc_compat_ioctl,
 #endif
     .mmap = bindproc_mmap,
 };

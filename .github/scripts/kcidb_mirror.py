@@ -15,6 +15,7 @@ validation treats an all-maestro manifest as its own coverage class.
 """
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -236,6 +237,6 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, KeyError) as error:
+    except (OSError, ValueError, KeyError, http.client.HTTPException) as error:
         print("KernelCI mirror fetch failed: %s" % error, file=sys.stderr)
         sys.exit(1)

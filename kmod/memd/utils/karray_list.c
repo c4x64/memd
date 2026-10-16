@@ -210,13 +210,28 @@ size_t arraylist_size_ts(struct karray_list* list) {
 /* Iterator support */
 
 static void* arraylist_iter_next(struct karray_iterator* iter) {
-    void* element;
+    void* element = NULL;
+    unsigned long flags;
+    struct karray_list* list;
 
-    if (!iter || !iter->list || !iter->list->data)
+    if (!iter || !iter->list)
         return NULL;
-    if (iter->index >= iter->list->size)
-        return NULL;
-    element = iter->list->data[iter->index++];
+    list = iter->list;
+    if (!list->thread_safe) {
+        if (!list->data)
+            return NULL;
+        if (iter->index >= list->size)
+            return NULL;
+        element = list->data[iter->index++];
+        return element;
+    }
+    /* Locked snapshot of one slot: concurrent _ts growth reallocates
+     * data, so an unlocked read is UAF/OOB. (A shared iterator's own
+     * index is still single-owner; elements must stay alive.) */
+    spin_lock_irqsave(&list->lock, flags);
+    if (list->data && iter->index < list->size)
+        element = list->data[iter->index++];
+    spin_unlock_irqrestore(&list->lock, flags);
     return element;
 }
 
@@ -227,9 +242,20 @@ static void arraylist_iter_release(struct karray_iterator* iter) {
 
 struct karray_iterator* arraylist_iterator_create(struct karray_list* list) {
     struct karray_iterator* iter;
+    unsigned long flags;
+    bool has_data;
 
-    if (!list || !list->data)
+    if (!list)
         return NULL;
+    if (list->thread_safe) {
+        spin_lock_irqsave(&list->lock, flags);
+        has_data = (list->data != NULL);
+        spin_unlock_irqrestore(&list->lock, flags);
+        if (!has_data)
+            return NULL;
+    } else if (!list->data) {
+        return NULL;
+    }
     iter = kmalloc(sizeof(*iter), GFP_KERNEL);
     if (!iter)
         return NULL;
@@ -364,8 +390,10 @@ void arraylist_for_each_ts(struct karray_list* list, void (*fn)(void*, void*), v
         return arraylist_for_each(list, fn, data);
 
     /* Fetch under lock, call without it: fn may sleep and must never
-     * run in atomic context. Resyncs the index each round so a
-     * concurrent remove only skips/dups instead of going OOB. */
+     * run in atomic context. Index-checked every round so concurrent
+     * growth/shrink cannot go OOB (entries may still skip/duplicate,
+     * and elements must stay alive: callers must not free entries
+     * under a live iteration). */
     for (;;) {
         spin_lock_irqsave(&list->lock, flags);
         if (i >= list->size) {

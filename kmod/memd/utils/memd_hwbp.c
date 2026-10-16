@@ -122,12 +122,19 @@ static void hwbp_context_save(struct task_struct *task)
 
 static void hwbp_context_restore(struct task_struct *task)
  {
-    struct debug_monitor_state *dms = task->thread.debug_monitors;
+    struct debug_monitor_state *dms;
+    unsigned long flags;
     int i;
 
+    if (!task)
+        return;
+    dms = task->thread.debug_monitors;
     if (!dms || !hwbp_supported)
         return;
 
+    /* Table is shared with set/remove/exit-notify: read it locked
+     * (set path also programs registers under the same lock). */
+    spin_lock_irqsave(&hwbp_lock, flags);
     for (i = 0; i < 16; i++) {
         if (hwbp_table[i].enabled && hwbp_table[i].dms == dms) {
             if (hwbp_table[i].type == MEMD_HWBP_TYPE_BREAKPOINT) {
@@ -155,6 +162,7 @@ static void hwbp_context_restore(struct task_struct *task)
             }
         }
     }
+    spin_unlock_irqrestore(&hwbp_lock, flags);
 }
 
 int memd_hwbp_init(void)

@@ -323,7 +323,8 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, KeyError, AttributeError, TypeError,
+            subprocess.CalledProcessError) as error:
         print(f"KernelCI module build failed: {error}", file=sys.stderr)
         sys.exit(1)
 # .github/scripts/build_kcidb_record.py[∂]

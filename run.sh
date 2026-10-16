@@ -482,7 +482,11 @@ if ! try_insmod; then
                     fi
                     log "last resort: finit-force (version-magic only)"
                     sync 2>/dev/null
-                    FR=$("$FFORCE" "$TMPKO" 2>/dev/null)
+                    # --no-verify: the helper derives the module name from
+                    # the temp file (rwbridge-run) but the kernel reports
+                    # rwbridge, so its self-verify can never match; run.sh
+                    # verifies via /proc/modules immediately below.
+                    FR=$("$FFORCE" --no-verify "$TMPKO" 2>/dev/null)
                     log "finit-force: $FR"
                     case "$FR" in
                         rc=0) ;;
@@ -509,7 +513,9 @@ if ! try_insmod; then
                 fi
                 log "no vermagic hint; last resort: finit-force (version-magic only)"
                 sync 2>/dev/null
-                FR=$("$FFORCE" "$TMPKO" 2>/dev/null)
+                # --no-verify (see above): self-verify keyed on the temp
+                # filename can never match; verified below instead.
+                FR=$("$FFORCE" --no-verify "$TMPKO" 2>/dev/null)
                 log "finit-force: $FR"
                 case "$FR" in
                     rc=0) ;;

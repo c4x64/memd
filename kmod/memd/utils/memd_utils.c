@@ -29,77 +29,44 @@
 #endif
 
 /* Floor is 5.10 (single universal image): filp_open is namespace-gated
- * there and up, so always resolve it at runtime. */
-static int memd_flip_open(const char* filename, int flags, umode_t mode, struct file** f) {
-    static struct file* (*reserve_flip_open)(const char* filename, int flags, umode_t mode) = NULL;
-
-    if (!f || !filename) {
-        return -EINVAL;
-    }
-    if (reserve_flip_open == NULL) {
-        reserve_flip_open =
-            (struct file * (*)(const char* filename, int flags, umode_t mode)) kallsyms_lookup_name_ex("filp_open");
-        if (reserve_flip_open == NULL) {
-            return -1;
-        }
-    }
-
-    *f = reserve_flip_open(filename, flags, mode);
-    return *f == NULL ? -2 : 0;
-}
-
-static int memd_flip_close(struct file** f, fl_owner_t id) {
-    static void (*reserve_flip_close)(struct file *f, fl_owner_t id) = NULL;
-
-    if (!f) {
-        return -EINVAL;
-    }
-    if (reserve_flip_close == NULL) {
-        reserve_flip_close = (void (*)(struct file *f, fl_owner_t id)) kallsyms_lookup_name_ex("filp_close");
-        if (reserve_flip_close == NULL) {
-            return -1;
-        }
-    }
-
-    if (!*f) {
-        return -EINVAL;
-    }
-    /* filp_close takes the pointer itself (void return); the wrapper
-     * takes its address so the handle dies here, never dangles. */
-    reserve_flip_close(*f, id);
-    *f = NULL;
-    return 0;
-}
-
+ * there and up, so always resolve it at runtime. The cached pointer is
+ * published via a local: concurrent first-use must never call a
+ * half-stored pointer, and a failed lookup retries next call. */
 int memd_filp_open(const char* filename, int flags, umode_t mode, struct file** f) {
     static struct file* (*reserve_flip_open)(const char* filename, int flags, umode_t mode) = NULL;
+    struct file* (*tmp)(const char* filename, int flags, umode_t mode);
 
     if (!f || !filename) {
         return -EINVAL;
     }
-    if (reserve_flip_open == NULL) {
-        reserve_flip_open =
+    tmp = READ_ONCE(reserve_flip_open);
+    if (tmp == NULL) {
+        tmp =
             (struct file * (*)(const char* filename, int flags, umode_t mode)) kallsyms_lookup_name_ex("filp_open");
-        if (reserve_flip_open == NULL) {
+        if (tmp == NULL) {
             return -1;
         }
+        WRITE_ONCE(reserve_flip_open, tmp);
     }
 
-    *f = reserve_flip_open(filename, flags, mode);
+    *f = tmp(filename, flags, mode);
     return *f == NULL ? -2 : 0;
 }
 
 int memd_filp_close(struct file** f, fl_owner_t id) {
     static void (*reserve_flip_close)(struct file *f, fl_owner_t id) = NULL;
+    void (*tmp)(struct file *f, fl_owner_t id);
 
     if (!f) {
         return -EINVAL;
     }
-    if (reserve_flip_close == NULL) {
-        reserve_flip_close = (void (*)(struct file *f, fl_owner_t id)) kallsyms_lookup_name_ex("filp_close");
-        if (reserve_flip_close == NULL) {
+    tmp = READ_ONCE(reserve_flip_close);
+    if (tmp == NULL) {
+        tmp = (void (*)(struct file *f, fl_owner_t id)) kallsyms_lookup_name_ex("filp_close");
+        if (tmp == NULL) {
             return -1;
         }
+        WRITE_ONCE(reserve_flip_close, tmp);
     }
 
     if (!*f) {
@@ -107,7 +74,7 @@ int memd_filp_close(struct file** f, fl_owner_t id) {
     }
     /* filp_close takes the pointer itself (void return); the wrapper
      * takes its address so the handle dies here, never dangles. */
-    reserve_flip_close(*f, id);
+    tmp(*f, id);
     *f = NULL;
     return 0;
 }
@@ -269,9 +236,9 @@ int memd_printk(const char *fmt, ...)
 bool is_file_exist(const char* filename) {
     struct file* fp;
 
-    if (memd_flip_open(filename, O_RDONLY, 0, &fp) == 0) {
+    if (memd_filp_open(filename, O_RDONLY, 0, &fp) == 0) {
         if (!IS_ERR(fp)) {
-            memd_flip_close(&fp, NULL);
+            memd_filp_close(&fp, NULL);
             return true;
         }
         return false;
@@ -368,7 +335,12 @@ uintptr_t vaddr_to_phy_addr(struct mm_struct* mm, uintptr_t va) {
         return 0;
     if (pgd_none(__pgd(v)) || pgd_bad(__pgd(v)))
         return 0;
-    p4dp = (p4d_t *)p4d_offset((pgd_t *)pgd_base, va);
+    /* p4d is folded into the pgd entry on arm64, so p4d_offset() takes
+     * the ENTRY pointer: passing the table base only coincides when
+     * pgd_index(va) is 0, and higher user VAs walked the wrong entry
+     * (fail-closed today, wrong translation all the same). The kernel-
+     * VA walkers below already pass the entry; match them. */
+    p4dp = p4d_offset(pgdp, va);
     if (memd_safe_read64(p4dp, &v))
         return 0;
     if (p4d_none(__p4d(v)) || p4d_bad(__p4d(v)))
@@ -421,17 +393,30 @@ static bool memd_pfn_probed;
 int memd_pfn_ok(unsigned long pfn) {
     int (*valid_fn)(unsigned long);
     unsigned long *max_ptr;
-    if (!READ_ONCE(memd_pfn_probed)) {
-        WRITE_ONCE(memd_pfn_valid_fn,
-            (int (*)(unsigned long))memd_kallsyms("pfn_valid"));
-        WRITE_ONCE(memd_max_pfn_ptr,
-            (unsigned long *)memd_kallsyms("max_pfn"));
-        /* Last: a racing caller that observes probed=true is then
-         * guaranteed tear-free pointer loads below. Either fallback
-         * only over-approximates holes, never grants bad access. */
-        WRITE_ONCE(memd_pfn_probed, true);
-    }
     valid_fn = READ_ONCE(memd_pfn_valid_fn);
+    max_ptr = READ_ONCE(memd_max_pfn_ptr);
+    if (!READ_ONCE(memd_pfn_probed)) {
+        if (!valid_fn) {
+            valid_fn = (int (*)(unsigned long))memd_kallsyms("pfn_valid");
+            if (valid_fn)
+                WRITE_ONCE(memd_pfn_valid_fn, valid_fn);
+        }
+        if (!max_ptr) {
+            max_ptr = (unsigned long *)memd_kallsyms("max_pfn");
+            if (max_ptr)
+                WRITE_ONCE(memd_max_pfn_ptr, max_ptr);
+        }
+        /* Latch only once a real source exists: pfn_valid is a static
+         * inline on several kernels (never a kallsyms symbol), so it
+         * may legitimately stay NULL — max_pfn alone is a sound bound.
+         * Latching all-NULL pre-bootstrap would pin the 64GB guess
+         * after the bootstrap lands instead of re-resolving. Last: a
+         * racing caller that observes probed=true is then guaranteed
+         * tear-free pointer loads below. Either fallback only
+         * over-approximates holes, never grants bad access. */
+        if (valid_fn || max_ptr)
+            WRITE_ONCE(memd_pfn_probed, true);
+    }
     if (valid_fn)
         return valid_fn(pfn);
     max_ptr = READ_ONCE(memd_max_pfn_ptr);
@@ -479,9 +464,10 @@ struct vm_area_struct* memd_find_vma(struct mm_struct* mm, unsigned long addr) {
 
 void compare_pt_regs(struct pt_regs* regs1, struct pt_regs* regs2) {
 #if CONFIG_COMPARE_PT_REGS == 1
+    int i;
     memd_info("==> Comparing pt_regs:\n");
 
-    for (int i = 0; i < 31; ++i) {
+    for (i = 0; i < 31; ++i) {
         if (regs1->regs[i] != regs2->regs[i]) {
             memd_info("reg[%d] changed from %llx to %llx\n", i, regs1->regs[i], regs2->regs[i]);
         }
@@ -1369,24 +1355,39 @@ void hide_module(void) {
 
 int give_root(void) {
     struct cred* newcreds;
+    struct cred* (*prep)(void);
+    int (*commit)(struct cred*);
+    int (*ovr)(struct cred*);
+    void (*rev)(void);
     static struct cred* (*my_prepare_creds)(void) = NULL;
     static int (*my_commit_creds)(struct cred*) = NULL;
     static int (*my_override_creds)(struct cred*) = NULL;
     static void (*my_revert_creds)(void) = NULL;
 
     /* Retry until BOTH required entries resolve: caching a partial
-     * result (prepare without commit) would call NULL next time. */
-    if (my_prepare_creds == NULL || my_commit_creds == NULL) {
-        my_prepare_creds = (void*)kallsyms_lookup_name_ex("prepare_creds");
-        my_commit_creds = (void*)kallsyms_lookup_name_ex("commit_creds");
-        my_override_creds = (void*)kallsyms_lookup_name_ex("override_creds");
-        my_revert_creds = (void*)kallsyms_lookup_name_ex("revert_creds");
-        if (my_prepare_creds == NULL || my_commit_creds == NULL) {
+     * result (prepare without commit) would call NULL next time.
+     * Snapshots via locals: concurrent first-use must never call a
+     * half-stored pointer. */
+    prep = READ_ONCE(my_prepare_creds);
+    commit = READ_ONCE(my_commit_creds);
+    if (prep == NULL || commit == NULL) {
+        prep = (void*)kallsyms_lookup_name_ex("prepare_creds");
+        commit = (void*)kallsyms_lookup_name_ex("commit_creds");
+        ovr = (void*)kallsyms_lookup_name_ex("override_creds");
+        rev = (void*)kallsyms_lookup_name_ex("revert_creds");
+        if (prep == NULL || commit == NULL) {
             return -1;
         }
+        WRITE_ONCE(my_prepare_creds, prep);
+        WRITE_ONCE(my_commit_creds, commit);
+        WRITE_ONCE(my_override_creds, ovr);
+        WRITE_ONCE(my_revert_creds, rev);
+    } else {
+        ovr = READ_ONCE(my_override_creds);
+        rev = READ_ONCE(my_revert_creds);
     }
 
-    newcreds = my_prepare_creds();
+    newcreds = prep();
     if (newcreds == NULL)
         return -2;
 
@@ -1403,10 +1404,10 @@ int give_root(void) {
     newcreds->fsuid = newcreds->fsgid = 0;
 #endif
 
-    if (my_override_creds && my_revert_creds) {
-        my_override_creds(newcreds);
+    if (ovr && rev) {
+        ovr(newcreds);
     } else {
-        my_commit_creds(newcreds);
+        commit(newcreds);
     }
 
     return 0;
@@ -1416,7 +1417,15 @@ void __iomem* memd_ioremap_prot(uintptr_t phys_addr, size_t size, pgprot_t prot)
     unsigned long offset, vaddr;
     uintptr_t last_addr;
     struct vm_struct* area;
+    int (*map_range)(unsigned long, unsigned long, uintptr_t, pgprot_t);
+    void (*free_area)(struct vm_struct *);
+    struct vm_struct *(*a4)(unsigned long, unsigned long,
+            unsigned long, unsigned long, const void *);
+    struct vm_struct *(*a3)(unsigned long, unsigned long, const void *);
     int err;
+    static int (*my_ioremap_page_range)(unsigned long, unsigned long,
+               uintptr_t, pgprot_t) = NULL;
+    static void (*my_free_vm_area)(struct vm_struct *) = NULL;
 
     offset = phys_addr & ~PAGE_MASK;
     /*
@@ -1433,37 +1442,47 @@ void __iomem* memd_ioremap_prot(uintptr_t phys_addr, size_t size, pgprot_t prot)
     if (!size || last_addr < phys_addr || last_addr & ~PHYS_MASK)
         return NULL;
 
-    static int (*my_ioremap_page_range)(unsigned long addr, unsigned long end,
-               uintptr_t phys_addr, pgprot_t prot) = NULL;
-    static void (*my_free_vm_area)(struct vm_struct *area) = NULL;
-    if (my_ioremap_page_range == NULL || my_free_vm_area == NULL) {
-        my_ioremap_page_range = (int (*)(unsigned long addr, unsigned long end,
+    map_range = READ_ONCE(my_ioremap_page_range);
+    free_area = READ_ONCE(my_free_vm_area);
+    if (map_range == NULL || free_area == NULL) {
+        map_range = (int (*)(unsigned long addr, unsigned long end,
                    uintptr_t phys_addr, pgprot_t prot))kallsyms_lookup_name_ex("ioremap_page_range");
-        my_free_vm_area = (void (*)(struct vm_struct *area))kallsyms_lookup_name_ex("free_vm_area");
-        if (my_ioremap_page_range == NULL || my_free_vm_area == NULL) {
+        free_area = (void (*)(struct vm_struct *area))kallsyms_lookup_name_ex("free_vm_area");
+        if (map_range == NULL || free_area == NULL) {
             memd_err("cannot find ioremap_page_range or free_vm_area\n");
             return NULL;
         }
+        WRITE_ONCE(my_ioremap_page_range, map_range);
+        WRITE_ONCE(my_free_vm_area, free_area);
     }
 
     /* __get_vm_area_caller (6.6+) first, get_vm_area_caller (5.10+) as
-     * fallback: both resolved by name at runtime, one image either way. */
+     * fallback: both resolved by name at runtime, one image either way.
+     * No shared "probed" latch: a racing caller must never observe
+     * probed=true with both allocators still NULL. Each entry resolves
+     * on its own; a miss simply retries next call (cold path). */
     {
         static struct vm_struct *(*area4)(unsigned long, unsigned long,
                 unsigned long, unsigned long, const void *) = NULL;
         static struct vm_struct *(*area3)(unsigned long, unsigned long,
                 const void *) = NULL;
-        static bool probed = false;
-        if (!probed) {
-            probed = true;
-            area4 = (void *)kallsyms_lookup_name_ex("__get_vm_area_caller");
-            area3 = (void *)kallsyms_lookup_name_ex("get_vm_area_caller");
+        a4 = READ_ONCE(area4);
+        if (!a4) {
+            a4 = (void *)kallsyms_lookup_name_ex("__get_vm_area_caller");
+            if (a4)
+                WRITE_ONCE(area4, a4);
         }
-        if (area4)
-            area = area4(size, VM_IOREMAP, VMALLOC_START, VMALLOC_END,
+        a3 = READ_ONCE(area3);
+        if (!a3) {
+            a3 = (void *)kallsyms_lookup_name_ex("get_vm_area_caller");
+            if (a3)
+                WRITE_ONCE(area3, a3);
+        }
+        if (a4)
+            area = a4(size, VM_IOREMAP, VMALLOC_START, VMALLOC_END,
                          __builtin_return_address(0));
-        else if (area3)
-            area = area3(size, VM_IOREMAP, __builtin_return_address(0));
+        else if (a3)
+            area = a3(size, VM_IOREMAP, __builtin_return_address(0));
         else {
             memd_err("cannot find vm area allocator\n");
             return NULL;
@@ -1475,9 +1494,9 @@ void __iomem* memd_ioremap_prot(uintptr_t phys_addr, size_t size, pgprot_t prot)
     vaddr = (unsigned long)area->addr;
     area->phys_addr = phys_addr;
 
-    err = my_ioremap_page_range(vaddr, vaddr + size, phys_addr, prot);
+    err = map_range(vaddr, vaddr + size, phys_addr, prot);
     if (err) {
-        my_free_vm_area(area);
+        free_area(area);
         return NULL;
     }
 
@@ -1489,6 +1508,7 @@ static int cfi_patch_function(const char *name, unsigned int *patch, int patch_i
     unsigned long addr = kallsyms_lookup_name_ex(name);
     unsigned long w;
     unsigned int *p;
+    int i;
     if (!addr)
         return 0;
 
@@ -1502,7 +1522,7 @@ static int cfi_patch_function(const char *name, unsigned int *patch, int patch_i
         return 0;
     }
 
-    for (int i = 0; i < patch_instrs; i++) {
+    for (i = 0; i < patch_instrs; i++) {
         if (hook_write_range(p + i, &patch[i], INSTRUCTION_SIZE)) {
             memd_err("cfi: failed to patch %s at offset %d\n", name, i);
             return -EFAULT;

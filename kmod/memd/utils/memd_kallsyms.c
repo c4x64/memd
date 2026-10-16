@@ -135,9 +135,12 @@ int memd_kallsyms_bootstrap(unsigned long fo, unsigned long kr, unsigned long fc
         (kr & 0xffff000000000000UL) != 0xffff000000000000UL ||
         (fc & 0xffff000000000000UL) != 0xffff000000000000UL)
         return -EINVAL;
-    my_filp_open = (void *)fo;
-    my_kernel_read = (void *)kr;
-    my_filp_close = (void *)fc;
+    /* Plain stores would also be atomic here, but every other cache in
+     * the tree publishes via WRITE_ONCE: one discipline, no guessing
+     * about compiler reordering against the re-arm below. */
+    WRITE_ONCE(my_filp_open, (void *)fo);
+    WRITE_ONCE(my_kernel_read, (void *)kr);
+    WRITE_ONCE(my_filp_close, (void *)fc);
     /* Re-arm: an earlier attempt may have parsed (and failed) already. */
     {
         unsigned long flags;
@@ -241,6 +244,9 @@ static void memd_do_parse(void)
     size_t req = 0;
     int found = 0;
     unsigned long tmp[MEMD_NWANT];
+    struct file *(*open_fn)(const char *, int, umode_t);
+    ssize_t (*read_fn)(struct file *, void *, size_t, loff_t *);
+    void (*close_fn)(struct file *, fl_owner_t);
 
     memset(tmp, 0, sizeof(tmp));
     buf = kmalloc(4096, GFP_KERNEL);
@@ -248,13 +254,18 @@ static void memd_do_parse(void)
         memd_publish(tmp);
         return;
     }
-    if (!my_filp_open || !my_kernel_read || !my_filp_close) {
+    /* Snapshot once: the bootstrap may re-arm (and clear) these under
+     * us; tearing or reordering mid-parse must not corrupt the walk. */
+    open_fn = READ_ONCE(my_filp_open);
+    read_fn = READ_ONCE(my_kernel_read);
+    close_fn = READ_ONCE(my_filp_close);
+    if (!open_fn || !read_fn || !close_fn) {
         /* No bootstrap table yet (see MEMD_IOCTL_BOOTSTRAP). */
         kfree(buf);
         memd_publish(tmp);
         return;
     }
-    f = my_filp_open("/proc/kallsyms", O_RDONLY, 0);
+    f = open_fn("/proc/kallsyms", O_RDONLY, 0);
     if (IS_ERR(f)) {
         memd_publish(tmp);
         kfree(buf);
@@ -264,7 +275,7 @@ static void memd_do_parse(void)
         size_t avail;
         size_t start = 0, eol;
         req = 4096 - carry - 1;
-        n = my_kernel_read(f, buf + carry, req, &pos);
+        n = read_fn(f, buf + carry, req, &pos);
         if (n <= 0) {
             /* Trailing bytes without '\n' still form a line. */
             if (carry > 0)
@@ -301,7 +312,7 @@ static void memd_do_parse(void)
             break; /* EOF */
         }
     }
-    my_filp_close(f, NULL);
+    close_fn(f, NULL);
     kfree(buf);
     memd_publish(tmp);
 }
@@ -311,14 +322,28 @@ unsigned long memd_kallsyms(const char *name)
     int idx;
     unsigned long addr;
     unsigned long flags;
+    int helpers;
     if (!name)
         return 0;
     if (!READ_ONCE(memd_parsed))
         memd_do_parse();
     spin_lock_irqsave(&memd_klock, flags);
     if (memd_unavailable) {
+        helpers = READ_ONCE(my_filp_open) && READ_ONCE(my_kernel_read) &&
+                  READ_ONCE(my_filp_close);
         spin_unlock_irqrestore(&memd_klock, flags);
-        return 0;
+        if (!helpers)
+            return 0;
+        /* Bootstrap armed mid-parse: our all-zero snapshot published
+         * unavailable=true and every future lookup would fail without
+         * another bootstrap. Helpers are real now, so re-parse once
+         * (outside the lock: file IO may sleep) instead of wedging. */
+        memd_do_parse();
+        spin_lock_irqsave(&memd_klock, flags);
+        if (memd_unavailable) {
+            spin_unlock_irqrestore(&memd_klock, flags);
+            return 0;
+        }
     }
     idx = memd_want_index(name);
     addr = (idx < 0) ? 0 : memd_addrs[idx];

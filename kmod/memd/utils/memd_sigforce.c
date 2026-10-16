@@ -86,20 +86,23 @@ int memd_sigforce_init(void)
     struct task_struct *worker;
     int err;
 
-    if (sigforce_worker_task || sigforce_initialized)
+    mutex_lock(&sigforce_pending_lock);
+    if (sigforce_worker_task || sigforce_initialized) {
+        mutex_unlock(&sigforce_pending_lock);
         return 0;
-
+    }
     worker = kthread_run(memd_sigforce_worker, NULL, "memd_sigforce");
     if (IS_ERR(worker)) {
         err = PTR_ERR(worker);
         sigforce_worker_task = NULL;
         sigforce_initialized = false;
+        mutex_unlock(&sigforce_pending_lock);
         memd_err("sigforce: failed to create worker thread\n");
         return err;
     }
-
     sigforce_worker_task = worker;
     sigforce_initialized = true;
+    mutex_unlock(&sigforce_pending_lock);
 
     memd_info("sigforce: initialized with async worker\n");
     return 0;
@@ -108,15 +111,19 @@ int memd_sigforce_init(void)
 void memd_sigforce_cleanup(void)
  {
     struct sigforce_pending *pending, *tmp;
+    struct task_struct *worker;
 
     /* Refuse new queuers first: anything queued after the worker is
-     * gone would wait forever. */
+     * gone would wait forever. Handoff under the same lock the queuers
+     * re-check, and stop outside it (kthread_stop sleeps). */
+    mutex_lock(&sigforce_pending_lock);
     sigforce_initialized = false;
+    worker = sigforce_worker_task;
+    sigforce_worker_task = NULL;
+    mutex_unlock(&sigforce_pending_lock);
 
-    if (sigforce_worker_task) {
-        kthread_stop(sigforce_worker_task);
-        sigforce_worker_task = NULL;
-    }
+    if (worker)
+        kthread_stop(worker);
 
     mutex_lock(&sigforce_pending_lock);
     list_for_each_entry_safe(pending, tmp, &sigforce_pending_list, list) {
@@ -222,6 +229,15 @@ static int memd_sigforce_deliver_async(struct task_struct *task, int sig, int fo
     get_task_struct(task);
 
     mutex_lock(&sigforce_pending_lock);
+    /* Wrapper checked initialized, but cleanup may have stopped the
+     * worker and drained the list since: queueing now would wait on a
+     * completion nobody completes. Fail closed, undo the task ref. */
+    if (!sigforce_initialized || !sigforce_worker_task) {
+        mutex_unlock(&sigforce_pending_lock);
+        put_task_struct(task);
+        kfree(pending);
+        return -ENODEV;
+    }
     list_add_tail(&pending->list, &sigforce_pending_list);
     atomic_inc(&sigforce_pending_count);
     mutex_unlock(&sigforce_pending_lock);

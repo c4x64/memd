@@ -421,7 +421,9 @@ int memd_touch_init(struct task_struct *task, struct memd_touch_init_cmd *cmd)
                 mutex_unlock(&virtual_input_lock);
                 input_unregister_device(dev);
                 kfree(vname);
-            } else if (dev != touch_input_dev) {
+            } else {
+                /* Fresh input_get_device ref even when it aliases the
+                 * current slot; a conditional put would leak it. */
                 input_put_device(dev);
             }
             mutex_unlock(&touch_lock);

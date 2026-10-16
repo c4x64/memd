@@ -109,9 +109,9 @@ static int get_instruction_type(uint32_t instruction)
     if ((instruction & 0xffe0fc00) == 0xcb000000) return INST_ADD_SUB_REG;
     if ((instruction & 0xfff0fc00) == 0x91000000) return INST_ADD_IMM;
     if ((instruction & 0xfff0fc00) == 0xd1000000) return INST_SUB_IMM;
-    if ((instruction & 0xffe0fc00) == 0x92000000) return INST_MOVZ;
-    if ((instruction & 0xffe0fc00) == 0xf2a00000) return INST_MOVN;
-    if ((instruction & 0xffe0fc00) == 0xd2a00000) return INST_MOVK;
+    if ((instruction & 0xff800000) == 0xd2800000) return INST_MOVZ;
+    if ((instruction & 0xff800000) == 0x92800000) return INST_MOVN;
+    if ((instruction & 0xff800000) == 0xf2800000) return INST_MOVK;
     if ((instruction & 0xfffffc00) == 0x1ac00000) return INST_CSEL;
     return INST_UNKNOWN;
 }
@@ -274,7 +274,7 @@ int memd_install_inline_hook(void *target, void *handler, void **orig)
       * immediate and refuse out-of-range handlers instead of writing
       * a truncated branch (vmalloc and kernel text are often
       * farther apart than that). */
-     delta = (long)(uintptr_t)handler - (long)(uintptr_t)target - 4L;
+     delta = (long)(uintptr_t)handler - (long)(uintptr_t)target;
      if ((delta & 3L) || delta < -(128L << 20) || delta > ((128L << 20) - 4L))
          return -ERANGE;
      branch_insn = (u32)0x14000000UL | (u32)(((unsigned long)delta >> 2) & 0x03FFFFFFUL);
@@ -303,11 +303,15 @@ void memd_remove_inline_hook(void *target, void *orig)
      struct memd_trampoline *found = NULL;
      int ret = 0;
 
-     if (orig) {
-         ret = hook_write_range(target, orig, HIJACK_SIZE);
-         if (ret)
-             return;
-     }
+     /* Without the saved bytes we cannot restore; freeing the
+      * trampoline while the patched B still points at the handler
+      * would leave orig callers jumping into freed exec memory.
+      * Fail closed (hook stays, no crash). */
+     if (!target || !orig)
+         return;
+     ret = hook_write_range(target, orig, HIJACK_SIZE);
+     if (ret)
+         return;
 
      /* Unlink under the lock, then free without holding it:
       * memd_destroy_trampoline takes the same lock, so calling it

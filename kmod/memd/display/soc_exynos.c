@@ -338,7 +338,7 @@ int memd_disp_status(struct memd_disp_status_cmd *out)
     if (!out)
         return -EINVAL;
     memd_core_status(&be, &w, &h, &e);
-    out->active = memd_core_active() ? 1 : 0;
+    out->active = be ? 1 : 0;
     out->backend = be;
     out->width = w;
     out->height = h;

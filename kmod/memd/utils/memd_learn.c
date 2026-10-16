@@ -234,10 +234,14 @@ static void memd_learn_pgd(void)
         int i, found = -1, n = 0;
         for (i = 0; i + 8 <= 512; i += 8) {
             u64 va = 0, pa = 0;
-            memcpy(&va, (char *)mm + i, 8);
+            if (memd_safe_read64((char *)mm + i, &va))
+                continue;
             if ((va & 0xffff000000000000UL) != 0xffff000000000000UL)
                 continue;
-            /* skip obvious non-tables (low values, stack-like?) */
+            /* virt_to_phys is linear-map only: vmalloc/io addresses
+             * would yield a bogus phys, so skip non-linear vas. */
+            if (!virt_addr_valid((void *)(uintptr_t)va))
+                continue;
             pa = (unsigned long)virt_to_phys((void *)(uintptr_t)va);
             if (!memd_pgd_shape_ok(pa))
                 continue;
@@ -281,7 +285,7 @@ static int memd_pgd_shape_ok(u64 phys)
             out < (64UL << 30))
             valid++;
     }
-    return zeros > 100 && valid > 0;
+    return zeros > 256 && valid > 0 && valid < 32;
 }
 
 /* Read one maps line: start, end (hex), perms[0]. Returns 0 ok.
@@ -463,7 +467,11 @@ static int memd_learn_vma_file(struct mm_struct *mm, unsigned long addr,
         if (memd_safe_read64((char *)dp + 32, &nm) ||
             memd_safe_read64((char *)dp + 32 + 8, &ln))
             continue;
-        if (!nm || ln != bl || ln >= sizeof(nb))
+        /* nm must be a kernel string pointer; without this a wrong +32
+         * on a foreign layout could match user bytes by coincidence. */
+        if (!nm || (nm & 0xffff000000000000UL) != 0xffff000000000000UL)
+            continue;
+        if (ln != bl || ln >= sizeof(nb))
             continue;
         /* guarded byte compare via u64 reads */
         for (k = 0; k < (int)ln; k += 8) {
@@ -594,17 +602,21 @@ static int memd_find_vma_pair(struct mm_struct *mm, unsigned long addr,
     }
     /* adjacent u64 pair (a, b): a<=addr<b, sane span, page-aligned a */
     for (i = 0; i + 16 <= 512; i += 8) {
-        u64 x, y;
-        memcpy(&x, (char *)vma + i, 8);
-        memcpy(&y, (char *)vma + i + 8, 8);
+        unsigned long x = 0, y = 0;
+        /* Guarded: scan can overrun vm_area_struct on foreign layouts;
+         * raw memcpy would fault. Skip faulting slots (fail closed). */
+        if (memd_safe_read64((char *)vma + i, &x) ||
+            memd_safe_read64((char *)vma + i + 8, &y))
+            continue;
         if (x <= addr && addr < y && y - x < (1UL << 32) &&
             (x & ((1UL << PAGE_SHIFT) - 1)) == 0) {
             /* confirm uniqueness in this vma */
             int j, hits = 0, jo = -1;
             for (j = 0; j + 16 <= 512; j += 8) {
-                u64 p, q;
-                memcpy(&p, (char *)vma + j, 8);
-                memcpy(&q, (char *)vma + j + 8, 8);
+                unsigned long p = 0, q = 0;
+                if (memd_safe_read64((char *)vma + j, &p) ||
+                    memd_safe_read64((char *)vma + j + 8, &q))
+                    continue;
                 if (p == x && q == y) {
                     hits++;
                     jo = j;
@@ -811,6 +823,8 @@ unsigned long memd_valid_pgd(struct mm_struct *mm)
     va = (unsigned long)memd_m_pgd(mm);
     if ((va & 0xffff000000000000UL) != 0xffff000000000000UL)
         return 0;
+    if (!virt_addr_valid((void *)va))
+        return 0;
     pa = (unsigned long)virt_to_phys((void *)va);
     if (!memd_pgd_shape_ok(pa))
         return 0;
@@ -836,11 +850,16 @@ static unsigned long memd_task_cred(struct task_struct *t)
 int memd_capable(int cap)
  {
     unsigned long c = memd_task_cred(current);
+    unsigned long off = MEMD_CRED_CAP_EFF;
     u32 eff = 0;
     unsigned int v = 0;
     if (!c || cap < 0 || cap >= 32)
         return 0;
-    if (memd_safe_read32((void *)(c + MEMD_CRED_CAP_EFF), &v))
+    /* Prefer the learned offset when the (currently dead-code) cred
+     * learner ever fills it; 56 is the CI-asserted compiled fallback. */
+    if (memd_learned_ext.t_cred_cap_eff >= 0)
+        off = (unsigned long)memd_learned_ext.t_cred_cap_eff;
+    if (memd_safe_read32((void *)(c + off), &v))
         return 0;
     eff = v;
     return (eff >> cap) & 1;
@@ -849,10 +868,13 @@ int memd_capable(int cap)
 unsigned int memd_uid(void)
  {
     unsigned long c = memd_task_cred(current);
+    unsigned long off = 4;
     unsigned int v = 0;
     if (!c)
         return 999999;
-    if (memd_safe_read32((void *)(c + 4), &v))
+    if (memd_learned_ext.t_cred_uid >= 0)
+        off = (unsigned long)memd_learned_ext.t_cred_uid;
+    if (memd_safe_read32((void *)(c + off), &v))
         return 999999;
     return v;
 }
@@ -916,8 +938,11 @@ static int memd_scan_for_ptr(const void *base, size_t len, const void *target,
     size_t n = len / 8, i;
     int hits = 0;
     for (i = 0; i < n; i++) {
-        u64 v;
-        memcpy(&v, (const char *)base + i * 8, 8);
+        unsigned long v = 0;
+        /* Guarded: file/dentry/inode scans can overrun the slab object
+         * on foreign layouts; memcpy would fault. Fail closed. */
+        if (memd_safe_read64((const char *)base + i * 8, &v))
+            continue;
         if (v == (u64)target) {
             if (!hits && first_off)
                 *first_off = (int)(i * 8);
@@ -1064,6 +1089,7 @@ static void memd_learn_file_extended(void)
     struct inode *inode;
     struct super_block *sb;
     int found, n, mnt_off;
+    unsigned long tmp;
     if (memd_filp_open("/proc/self/exe", O_RDONLY, 0, &f) != 0)
         return;
     if (IS_ERR(f))
@@ -1094,10 +1120,16 @@ static void memd_learn_file_extended(void)
     }
     if (dentry &&
         ((u64)dentry & 0xffff000000000000UL) == 0xffff000000000000UL) {
-        inode = dentry->d_inode;
+        inode = NULL;
+        tmp = 0;
+        if (!memd_safe_read64(&dentry->d_inode, &tmp))
+            inode = (struct inode *)(uintptr_t)tmp;
         if (inode &&
             ((u64)inode & 0xffff000000000000UL) == 0xffff000000000000UL) {
-            sb = inode->i_sb;
+            sb = NULL;
+            tmp = 0;
+            if (!memd_safe_read64(&inode->i_sb, &tmp))
+                sb = (struct super_block *)(uintptr_t)tmp;
             n = memd_scan_for_ptr(dentry, 256, inode, &found);
             if (n == 1) {
                 memd_learned_ext.d_inode = found;
@@ -1133,8 +1165,8 @@ int memd_learn_extended(void)
  * file, whose private pointer we set at creation. The offset is a
  * per-boot constant, so every bind re-confirms the same value
  * (idempotent — first unique hit wins, later binds are no-ops). A
- * non-unique hit leaves -1 (compiled fallback, loud). Direct memcpy is
- * safe here: our own freshly-created slab object, current context. */
+ * non-unique hit leaves -1 (compiled fallback, loud). Guarded reads:
+ * our own freshly-created slab object, current context. */
 void memd_learn_file_private(struct file *f, void *known_private)
  {
     int found = -1, n = 0;
@@ -1173,254 +1205,46 @@ static void memd_learn_thread_struct(void)
 
 static void memd_learn_signal_struct(void)
  {
-    struct task_struct *t = current;
-    struct signal_struct *sig;
-    void *a1, *a2;
-    int found = -1, n = 0, i;
-    sig = t->signal;
-    if (!sig)
-        return;
-    /* Interior anchors come from compiled offsets: if the foreign
-     * layout differs they point outside the object, so refuse to scan
-     * (fail closed) instead of learning a garbage offset. */
-    a1 = (void *)&sig->shared_pending;
-    a2 = (void *)&sig->cred_guard_mutex;
-    if ((char *)a1 < (char *)sig || (char *)a1 >= (char *)sig + 512)
-        return;
-    if ((char *)a2 < (char *)sig || (char *)a2 >= (char *)sig + 512)
-        return;
-    for (i = 0; i + 8 <= 512; i += 8) {
-        u64 v = 0;
-        memcpy(&v, (char *)sig + i, 8);
-        if (v == (u64)a1) {
-            if (!n)
-                found = i;
-            n++;
-        }
-    }
-    if (n == 1) {
-        memd_learned_ext.t_signal_shared_pending = found;
-        memd_info("learn: signal shared_pending at +%d\n", found);
-    }
-
-    found = -1; n = 0;
-    for (i = 0; i + 8 <= 512; i += 8) {
-        u64 v = 0;
-        memcpy(&v, (char *)sig + i, 8);
-        if (v == (u64)a2) {
-            if (!n)
-                found = i;
-            n++;
-        }
-    }
-    if (n == 1) {
-        memd_learned_ext.t_signal_cred_guard = found;
-        memd_info("learn: signal cred_guard_mutex at +%d\n", found);
-    }
+    /* Disabled: embedded sub-objects (sigpending, mutex) have no pointer
+     * to scan for, and the anchor (t->signal via compiled offset) plus
+     * raw memcpy from an unvalidated pointer could fault on foreign
+     * layouts. Fail closed: leave offsets at -1 (readers return NULL). */
+    return;
 }
 
 static void memd_learn_sighand_struct(void)
  {
-    struct task_struct *t = current;
-    struct sighand_struct *sh;
-    void *a;
-    int found = -1, n = 0, i;
-    sh = t->sighand;
-    if (!sh)
-        return;
-    a = (void *)&sh->action;
-    if ((char *)a < (char *)sh || (char *)a >= (char *)sh + 512)
-        return;
-    for (i = 0; i + 8 <= 512; i += 8) {
-        u64 v = 0;
-        memcpy(&v, (char *)sh + i, 8);
-        if (v == (u64)a) {
-            if (!n)
-                found = i;
-            n++;
-        }
-    }
-    if (n == 1) {
-        memd_learned_ext.t_sighand_action = found;
-        memd_info("learn: sighand action at +%d\n", found);
-    }
+    /* Disabled: sighand->action is an embedded array, not a pointer, so
+     * an interior-address scan can never match; anchor is a compiled
+     * offset read. Fail closed at -1. */
+    return;
 }
 
 /* struct fs_struct lives in <linux/fs_struct.h> (sched.h only
  * forward-declares it on every matrix DDK — CI-probed). */
 static void memd_learn_fs_struct(void)
  {
-    struct task_struct *t = current;
-    struct fs_struct *fs;
-    void *a1, *a2;
-    int found = -1, n = 0, i;
-    fs = t->fs;
-    if (!fs)
-        return;
-    a1 = (void *)&fs->pwd;
-    a2 = (void *)&fs->root;
-    if ((char *)a1 < (char *)fs || (char *)a1 >= (char *)fs + 512)
-        return;
-    if ((char *)a2 < (char *)fs || (char *)a2 >= (char *)fs + 512)
-        return;
-    for (i = 0; i + 8 <= 512; i += 8) {
-        u64 v = 0;
-        memcpy(&v, (char *)fs + i, 8);
-        if (v == (u64)a1) {
-            if (!n)
-                found = i;
-            n++;
-        }
-    }
-    if (n == 1) {
-        memd_learned_ext.t_fs_pwd = found;
-        memd_info("learn: fs pwd at +%d\n", found);
-    }
-
-    found = -1; n = 0;
-    for (i = 0; i + 8 <= 512; i += 8) {
-        u64 v = 0;
-        memcpy(&v, (char *)fs + i, 8);
-        if (v == (u64)a2) {
-            if (!n)
-                found = i;
-            n++;
-        }
-    }
-    if (n == 1) {
-        memd_learned_ext.t_fs_root = found;
-        memd_info("learn: fs root at +%d\n", found);
-    }
+    /* Disabled: fs->pwd/root are embedded struct paths, not pointers to
+     * themselves; same unvalidated-anchor + raw memcpy fault risk as
+     * signal. Fail closed at -1. */
+    return;
 }
 
 static void memd_learn_nsproxy_struct(void)
  {
-    struct task_struct *t = current;
-    struct nsproxy *nsp;
-    void *a1, *a2;
-    int found = -1, n = 0, i;
-    nsp = t->nsproxy;
-    if (!nsp)
-        return;
-    a1 = (void *)&nsp->mnt_ns;
-    a2 = (void *)&nsp->pid_ns_for_children;
-    if ((char *)a1 < (char *)nsp || (char *)a1 >= (char *)nsp + 512)
-        return;
-    if ((char *)a2 < (char *)nsp || (char *)a2 >= (char *)nsp + 512)
-        return;
-    for (i = 0; i + 8 <= 512; i += 8) {
-        u64 v = 0;
-        memcpy(&v, (char *)nsp + i, 8);
-        if (v == (u64)a1) {
-            if (!n)
-                found = i;
-            n++;
-        }
-    }
-    if (n == 1) {
-        memd_learned_ext.t_nsproxy_mnt_ns = found;
-        memd_info("learn: nsproxy mnt_ns at +%d\n", found);
-    }
-
-    found = -1; n = 0;
-    for (i = 0; i + 8 <= 512; i += 8) {
-        u64 v = 0;
-        memcpy(&v, (char *)nsp + i, 8);
-        if (v == (u64)a2) {
-            if (!n)
-                found = i;
-            n++;
-        }
-    }
-    if (n == 1) {
-        memd_learned_ext.t_nsproxy_pid_ns = found;
-        memd_info("learn: nsproxy pid_ns at +%d\n", found);
-    }
+    /* Disabled: searched for field addresses (&mnt_ns) instead of field
+     * targets (mnt_ns), which can never match; anchor likewise compiled.
+     * Fail closed at -1. */
+    return;
 }
 
 static void memd_learn_cred_struct(void)
  {
-    struct task_struct *t = current;
-    const struct cred *c;
-    void *a_eff, *a_prm, *a_inh, *a_uid;
-    int found = -1, n = 0, i;
-    c = t->cred;
-    if (!c)
-        return;
-    a_eff = (void *)&c->cap_effective;
-    a_prm = (void *)&c->cap_permitted;
-    a_inh = (void *)&c->cap_inheritable;
-    a_uid = (void *)&c->uid;
-    if ((const char *)a_eff < (const char *)c ||
-        (const char *)a_eff >= (const char *)c + 512)
-        return;
-    if ((const char *)a_prm < (const char *)c ||
-        (const char *)a_prm >= (const char *)c + 512)
-        return;
-    if ((const char *)a_inh < (const char *)c ||
-        (const char *)a_inh >= (const char *)c + 512)
-        return;
-    if ((const char *)a_uid < (const char *)c ||
-        (const char *)a_uid >= (const char *)c + 512)
-        return;
-    for (i = 0; i + 8 <= 512; i += 8) {
-        u64 v = 0;
-        memcpy(&v, (const char *)c + i, 8);
-        if (v == (u64)a_eff) {
-            if (!n)
-                found = i;
-            n++;
-        }
-    }
-    if (n == 1) {
-        memd_learned_ext.t_cred_cap_eff = found;
-        memd_info("learn: cred cap_effective at +%d\n", found);
-    }
-
-    found = -1; n = 0;
-    for (i = 0; i + 8 <= 512; i += 8) {
-        u64 v = 0;
-        memcpy(&v, (const char *)c + i, 8);
-        if (v == (u64)a_prm) {
-            if (!n)
-                found = i;
-            n++;
-        }
-    }
-    if (n == 1) {
-        memd_learned_ext.t_cred_cap_perm = found;
-        memd_info("learn: cred cap_permitted at +%d\n", found);
-    }
-
-    found = -1; n = 0;
-    for (i = 0; i + 8 <= 512; i += 8) {
-        u64 v = 0;
-        memcpy(&v, (const char *)c + i, 8);
-        if (v == (u64)a_inh) {
-            if (!n)
-                found = i;
-            n++;
-        }
-    }
-    if (n == 1) {
-        memd_learned_ext.t_cred_cap_inh = found;
-        memd_info("learn: cred cap_inheritable at +%d\n", found);
-    }
-
-    found = -1; n = 0;
-    for (i = 0; i + 8 <= 512; i += 8) {
-        u64 v = 0;
-        memcpy(&v, (const char *)c + i, 8);
-        if (v == (u64)a_uid) {
-            if (!n)
-                found = i;
-            n++;
-        }
-    }
-    if (n == 1) {
-        memd_learned_ext.t_cred_uid = found;
-        memd_info("learn: cred uid at +%d\n", found);
-    }
+    /* Disabled: cap/uid fields are embedded values, not pointers, so an
+     * interior-address scan can never match. memd_capable/memd_uid use
+     * the CI-asserted compiled offsets (56/4) or the learned offset if a
+     * future value-based learner fills it. Fail closed at -1. */
+    return;
 }
 
 static void memd_learn_sighand_verify(void)

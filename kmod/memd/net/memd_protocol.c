@@ -55,6 +55,16 @@ int memd_build_proto(void)
         return -1;
     }
     o = &memd_proto_offs[g];
+    /* Fail closed on a corrupt/unknown table (mirrors the ops-side
+     * checks): every written field must land inside the buffer. The
+     * name write below copies 9 bytes ("NFC_LLCP" + NUL). */
+    if (o->name < 0 || o->name + 9 > (int)sizeof(memd_proto_buf) ||
+        o->obj_size < 0 ||
+        o->obj_size + (int)sizeof(obj_size) > (int)sizeof(memd_proto_buf))
+        return -1;
+    if (o->has_owner && (o->owner < 0 ||
+        o->owner + (int)sizeof(struct module *) > (int)sizeof(memd_proto_buf)))
+        return -1;
     memset(memd_proto_buf, 0, sizeof(memd_proto_buf));
     memcpy(memd_proto_buf + o->name, "NFC_LLCP", 9);
     if (o->has_owner) {
@@ -246,7 +256,8 @@ static int memd_sock_create(struct net* net, struct socket* sock, int protocol, 
         return -ENOBUFS;
     }
 
-    memd_family_ops.family = free_family;
+    /* memd_family_ops.family was fixed by register_free_family; do not
+     * rewrite the global here (needless per-socket write). */
     sock->ops = memd_ops_ptr();
     sock_init_data(sock, sk);
 
@@ -255,7 +266,11 @@ static int memd_sock_create(struct net* net, struct socket* sock, int protocol, 
     ws->session = memd_t_pid(current);
     ws->used_pages = pages;
 
-    /* Track socket for stats and cleanup */
+    /* Track socket for stats and cleanup. List head initialized so a
+     * stray destruct (never expected: no failure point sits between
+     * sk_alloc and the add below) degrades to a harmless no-op
+     * instead of corrupting the list via garbage pointers. */
+    INIT_LIST_HEAD(&ws->list);
     spin_lock(&g_sock_list_lock);
     list_add(&ws->list, &g_sock_list);
     spin_unlock(&g_sock_list_lock);

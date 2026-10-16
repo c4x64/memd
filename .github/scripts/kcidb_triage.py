@@ -111,7 +111,7 @@ def main(argv=None):
 
     try:
         report = triage(args.manifest, args.results_dir)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, KeyError, TypeError) as error:
         print("triage failed: %s" % error, file=sys.stderr)
         return 1
     total = report["total"]

@@ -167,13 +167,19 @@ static int64_t memd_get_time_ns(void)
 
 static void memd_vsync_init(void)
  {
+    /* The waitqueue persists across installs: re-initialising it while
+     * a waiter sleeps on it corrupts the queue. Init once only. */
+    static bool wq_ok = false;
     g_core.vsync.enabled = g_core.tear_free;
     if (g_core.frame_interval_ns > 0)
         g_core.vsync.frame_interval_ns = g_core.frame_interval_ns;
     else
         g_core.vsync.frame_interval_ns = 16666666;
     g_core.vsync.next_vsync_ns = memd_get_time_ns() + g_core.vsync.frame_interval_ns;
-    init_waitqueue_head(&g_core.vsync.wq);
+    if (!wq_ok) {
+        init_waitqueue_head(&g_core.vsync.wq);
+        wq_ok = true;
+    }
     atomic_set(&g_core.vsync.frame_pending, 0);
 }
 
@@ -183,7 +189,7 @@ static void memd_vsync_init(void)
 static int memd_vsync_wait_internal(int64_t timeout_ns)
  {
     int64_t target, interval;
-    int enabled;
+    int enabled, present;
     int64_t remaining;
     int ret;
     int64_t now;
@@ -192,9 +198,12 @@ static int memd_vsync_wait_internal(int64_t timeout_ns)
 
     mutex_lock(&g_core_mu);
     enabled = g_core.vsync.enabled ? 1 : 0;
+    present = g_core.be ? 1 : 0;
     target = g_core.vsync.next_vsync_ns;
     interval = g_core.vsync.frame_interval_ns;
     mutex_unlock(&g_core_mu);
+    if (!present)
+        return -ENODEV;
     if (!enabled)
         return 0;
     if (interval <= 0)
@@ -358,8 +367,8 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
     if (g_core.vsync.frame_interval_ns)
         wake_up_all(&g_core.vsync.wq);
 
-    /* Initialize new features */
-    memset(&g_core.vsync, 0, sizeof(g_core.vsync));
+    /* Initialize new features (vsync waitqueue persists: init-once
+     * in memd_vsync_init, never memset while waiters may sleep). */
     memset(&g_core.edid, 0, sizeof(g_core.edid));
     memset(&g_core.current_mode, 0, sizeof(g_core.current_mode));
     memset(g_core.available_modes, 0, sizeof(g_core.available_modes));
@@ -478,6 +487,7 @@ fail_open:
 int memd_core_uninstall(void)
  {
     struct task_struct *t;
+    const struct memd_disp_backend *dead;
     unsigned long i;
     mutex_lock(&g_core_mu);
     if (!g_core.be) {
@@ -486,6 +496,10 @@ int memd_core_uninstall(void)
     }
     t = g_refresh_task;
     g_refresh_task = NULL;
+    /* Fail new frames/queued flips closed across the unlock below
+     * (worker short-circuits on NULL be without touching buffers). */
+    dead = g_core.be;
+    g_core.be = NULL;
     mutex_unlock(&g_core_mu);
     if (t)
         kthread_stop(t);
@@ -495,8 +509,8 @@ int memd_core_uninstall(void)
     if (g_flip_wq)
         flush_workqueue(g_flip_wq);
     mutex_lock(&g_core_mu);
-    if (g_core.be && g_core.be->close)
-        g_core.be->close();
+    if (dead && dead->close)
+        dead->close();
     if (g_core.front)
         vfree(g_core.front);
     if (g_core.back)
@@ -854,26 +868,29 @@ int memd_core_cursor_set(const __u32 *cursor_fb, __u32 w, __u32 h, __u32 x, __u3
         check_mul_overflow(px, (size_t)4, &bytes) || !bytes)
         return -EINVAL;
 
+    /* Copy first so the backend sees the core-owned buffer and a
+     * backend success can never strand core without pixels. */
+    fresh = kmalloc(bytes, GFP_KERNEL);
+    if (!fresh)
+        return -ENOMEM;
+    memcpy(fresh, cursor_fb, bytes);
+
     mutex_lock(&g_core_mu);
     if (!g_core.be) {
         mutex_unlock(&g_core_mu);
+        kfree(fresh);
         return -ENODEV;
     }
 
     if (g_core.be->cursor_set) {
-        rc = g_core.be->cursor_set(cursor_fb, w, h, x, y);
+        rc = g_core.be->cursor_set(fresh, w, h, x, y);
         if (rc) {
             mutex_unlock(&g_core_mu);
+            kfree(fresh);
             return rc;
         }
     }
 
-    fresh = kmalloc(bytes, GFP_KERNEL);
-    if (!fresh) {
-        mutex_unlock(&g_core_mu);
-        return -ENOMEM;
-    }
-    memcpy(fresh, cursor_fb, bytes);
     if (g_core.cursor_fb)
         kfree(g_core.cursor_fb);
     g_core.cursor_fb = fresh;
@@ -917,6 +934,7 @@ int memd_core_layer_add(struct memd_disp_layer *layer)
     size_t px = 0, bytes = 0;
     __u32 *fresh = NULL;
     __u32 *src = NULL;
+    __u32 *old_buf = NULL;
     int rc = 0;
     if (!layer || layer->w == 0 || layer->h == 0)
         return -EINVAL;
@@ -951,15 +969,21 @@ int memd_core_layer_add(struct memd_disp_layer *layer)
     }
 
     if (g_core.be->layer_add) {
+        /* Backend must see the core-owned copy, never the caller's
+         * source pointer (else backend and core disagree). */
+        old_buf = layer->buffer;
+        layer->buffer = fresh;
         rc = g_core.be->layer_add(layer);
         if (rc) {
+            layer->buffer = old_buf;
             mutex_unlock(&g_core_mu);
             kfree(fresh);
             return rc;
         }
+    } else {
+        layer->buffer = fresh;
     }
 
-    layer->buffer = fresh;
     g_core.layers[g_core.layer_count++] = *layer;
     mutex_unlock(&g_core_mu);
     return 0;
@@ -991,6 +1015,8 @@ int memd_core_layer_remove(struct memd_disp_layer *layer)
                 memmove(&g_core.layers[i], &g_core.layers[i + 1],
                         (g_core.layer_count - i - 1) *
                         sizeof(struct memd_disp_layer));
+                memset(&g_core.layers[g_core.layer_count - 1], 0,
+                       sizeof(struct memd_disp_layer));
             } else {
                 memset(&g_core.layers[i], 0,
                        sizeof(struct memd_disp_layer));
@@ -1022,6 +1048,7 @@ int memd_core_layer_update(struct memd_disp_layer *layer)
         for (i = 0; i < g_core.layer_count; i++) {
             if (g_core.layers[i].buffer && layer->buffer &&
                 g_core.layers[i].buffer == layer->buffer) {
+                int rc = 0;
                 /* Buffer is core-owned: resize needs remove+add
                  * (avoids leaking or aliasing the old buffer). */
                 if (layer->w != g_core.layers[i].w ||
@@ -1030,7 +1057,11 @@ int memd_core_layer_update(struct memd_disp_layer *layer)
                     return -EINVAL;
                 }
                 if (g_core.be->layer_update)
-                    g_core.be->layer_update(&g_core.layers[i]);
+                    rc = g_core.be->layer_update(&g_core.layers[i]);
+                if (rc) {
+                    mutex_unlock(&g_core_mu);
+                    return rc;
+                }
                 g_core.layers[i].x = layer->x;
                 g_core.layers[i].y = layer->y;
                 g_core.layers[i].alpha = layer->alpha;
@@ -1057,9 +1088,17 @@ int memd_core_gamma_set(const __u16 *r, const __u16 *g, const __u16 *b, __u32 si
         return -ENODEV;
     }
 
-    if (size != g_core.gamma_size) {
-        g_core.gamma_size = size;
+    /* Backend first: core LUTs mutate only on success (else the next
+     * frame would gamma-correct pixels the backend refused). */
+    if (g_core.be->gamma_set) {
+        int rc = g_core.be->gamma_set(r, g, b, size);
+        if (rc) {
+            mutex_unlock(&g_core_mu);
+            return rc;
+        }
     }
+
+    g_core.gamma_size = size;
 
     {
         unsigned long i;
@@ -1071,12 +1110,6 @@ int memd_core_gamma_set(const __u16 *r, const __u16 *g, const __u16 *b, __u32 si
     }
 
     g_core.gamma_dirty = true;
-
-    if (g_core.be->gamma_set) {
-        int rc = g_core.be->gamma_set(r, g, b, size);
-        mutex_unlock(&g_core_mu);
-        return rc;
-    }
 
     mutex_unlock(&g_core_mu);
     return 0;

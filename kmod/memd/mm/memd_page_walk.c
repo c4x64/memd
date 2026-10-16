@@ -595,6 +595,7 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
          return -ENOENT;
 
      pte = *ptep;
+     pte_unmap(ptep);
      if (!pte_present(pte)) {
         if (memd_is_swap_pte(pte)) {
             info->swapped = true;

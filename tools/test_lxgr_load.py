@@ -215,5 +215,132 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(lxgr_load.cmd_uninstall(args), errno.ENOENT)
 
 
+class HotswapStateTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.join(self.tmp.name, "stage")
+        self.zip_path = os.path.join(self.tmp.name, "demo.zip")
+        make_module_zip(self.zip_path)
+
+    def _args(self, **over):
+        import argparse
+
+        base = dict(zip=self.zip_path, root=self.root, pid=99,
+                    abi="arm64-v8a", entry="lxgr_main", su=False,
+                    ephemeral=False, unlink=False)
+        base.update(over)
+        return argparse.Namespace(**base)
+
+    def _seed(self, record):
+        os.makedirs(os.path.join(self.root, "lxgr.demo"), exist_ok=True)
+        lxgr_load.write_state(self.root, "lxgr.demo", 99, record)
+
+    def test_pending_handles_tolerates_junk(self):
+        self.assertEqual(lxgr_load.pending_handles({}), [])
+        self.assertEqual(lxgr_load.pending_handles({"prev_handle": 7}), [7])
+        self.assertEqual(
+            lxgr_load.pending_handles({"prev_handles": [0, True, "x", 5, 5, 9]}),
+            [5, 9],
+        )
+
+    def test_write_state_leaves_no_tmp(self):
+        self._seed({"handle": 1})
+        path = lxgr_load.state_path(self.root, "lxgr.demo", 99)
+        self.assertFalse(os.path.exists(path + ".tmp"))
+        self.assertEqual(lxgr_load.read_state(self.root, "lxgr.demo", 99)["handle"], 1)
+
+    def test_install_carries_displaced_handle(self):
+        import unittest.mock as mock
+
+        self._seed({"id": "lxgr.demo", "version": "2", "handle": 0xAAA})
+        with mock.patch.object(lxgr_load, "ioctl_load", return_value=(0, 0xBBB, 0)), \
+             mock.patch.object(lxgr_load, "find_driver_family"):
+            self.assertEqual(lxgr_load.cmd_install(self._args()), 0)
+        state = lxgr_load.read_state(self.root, "lxgr.demo", 99)
+        self.assertEqual(state["handle"], 0xBBB)
+        self.assertEqual(state["prev_handles"], [0xAAA])
+
+    def test_double_failed_hotswap_keeps_chain(self):
+        import unittest.mock as mock
+
+        self._seed({"id": "lxgr.demo", "version": "2", "handle": 0x111})
+        handles = iter((0xAAA, 0xBBB))
+        with mock.patch.object(
+            lxgr_load, "ioctl_load",
+            side_effect=lambda *a: (0, next(handles), 0)), \
+             mock.patch.object(lxgr_load, "ioctl_unload", return_value=5), \
+             mock.patch.object(lxgr_load, "find_driver_family"):
+            self.assertEqual(lxgr_load.cmd_hotswap(self._args()), 5)
+            first = lxgr_load.read_state(self.root, "lxgr.demo", 99)
+            self.assertEqual(lxgr_load.cmd_hotswap(self._args()), 5)
+            second = lxgr_load.read_state(self.root, "lxgr.demo", 99)
+        self.assertEqual(first["prev_handles"], [0x111])
+        # 0x111 survived the second unload failure too: still on record.
+        self.assertEqual(second["handle"], 0xBBB)
+        self.assertEqual(second["prev_handles"], [0xAAA, 0x111])
+
+    def test_hotswap_success_clears_chain(self):
+        import unittest.mock as mock
+
+        self._seed({"id": "lxgr.demo", "version": "2", "handle": 0x111,
+                    "prev_handles": [0x222]})
+        with mock.patch.object(lxgr_load, "ioctl_load", return_value=(0, 0xAAA, 0)), \
+             mock.patch.object(lxgr_load, "ioctl_unload", return_value=0), \
+             mock.patch.object(lxgr_load, "find_driver_family"):
+            self.assertEqual(lxgr_load.cmd_hotswap(self._args()), 0)
+        state = lxgr_load.read_state(self.root, "lxgr.demo", 99)
+        self.assertEqual(state["handle"], 0xAAA)
+        self.assertNotIn("prev_handles", state)
+        self.assertNotIn("prev_handle", state)
+
+    def test_uninstall_drains_legacy_prev(self):
+        import argparse
+        import unittest.mock as mock
+
+        self._seed({"id": "lxgr.demo", "version": "2", "handle": 0xAAA,
+                    "prev_handle": 0xBBB})  # round-1 singular key
+        seen = []
+        with mock.patch.object(
+            lxgr_load, "ioctl_unload",
+            side_effect=lambda s, p, h: seen.append(h) or 0), \
+             mock.patch.object(lxgr_load, "find_driver_family"):
+            args = argparse.Namespace(id="lxgr.demo", root=self.root, pid=99)
+            self.assertEqual(lxgr_load.cmd_uninstall(args), 0)
+        self.assertEqual(sorted(seen), [0xAAA, 0xBBB])
+        self.assertFalse(
+            os.path.exists(lxgr_load.state_path(self.root, "lxgr.demo", 99)))
+
+    def test_uninstall_partial_failure_keeps_survivors(self):
+        import argparse
+        import unittest.mock as mock
+
+        self._seed({"id": "lxgr.demo", "version": "2", "handle": 0xAAA,
+                    "prev_handles": [0xBBB]})
+        with mock.patch.object(
+            lxgr_load, "ioctl_unload",
+            side_effect=lambda s, p, h: 0 if h == 0xAAA else 5), \
+             mock.patch.object(lxgr_load, "find_driver_family"):
+            args = argparse.Namespace(id="lxgr.demo", root=self.root, pid=99)
+            self.assertEqual(lxgr_load.cmd_uninstall(args), 5)
+        state = lxgr_load.read_state(self.root, "lxgr.demo", 99)
+        self.assertEqual(state["handle"], 0xBBB)
+        self.assertNotIn("prev_handles", state)
+
+    def test_hotswap_rejects_oversize_prop(self):
+        big = os.path.join(self.tmp.name, "big.zip")
+        with zipfile.ZipFile(big, "w") as archive:
+            archive.writestr(
+                "module.prop", "id=lxgr.demo\nversionCode=1\n" + "k=v\n" * 20000)
+            archive.writestr("zygisk/arm64-v8a.so", b"\x7fELF")
+        self.assertEqual(lxgr_load.cmd_hotswap(self._args(zip=big)), errno.EINVAL)
+
+    def test_hotswap_rejects_no_prop(self):
+        bad = os.path.join(self.tmp.name, "noprop.zip")
+        with zipfile.ZipFile(bad, "w") as archive:
+            archive.writestr("zygisk/arm64-v8a.so", b"\x7fELF")
+        self.assertEqual(lxgr_load.cmd_hotswap(self._args(zip=bad)), errno.EINVAL)
+
+
 if __name__ == "__main__":
     unittest.main()

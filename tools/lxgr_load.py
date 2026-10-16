@@ -210,7 +210,11 @@ def stage_module(zip_path, root, abi):
     """Validate + extract; returns (module_id, staged_path, version_code)."""
     try:
         archive = zipfile.ZipFile(zip_path)
-    except zipfile.BadZipFile as error:
+    except (zipfile.BadZipFile, zipfile.LargeZipFile) as error:
+        raise ValueError("invalid module zip: %s" % error)
+    except RuntimeError as error:
+        # Unsupported compression raises NotImplementedError (a
+        # RuntimeError); normalize it like any other unreadable zip.
         raise ValueError("invalid module zip: %s" % error)
     with archive:
         names = archive.namelist()
@@ -226,6 +230,10 @@ def stage_module(zip_path, root, abi):
             prop_text = archive.read("module.prop").decode("utf-8", "replace")
         except KeyError:
             raise ValueError("module zip has no module.prop")
+        except RuntimeError as error:
+            # Encrypted entries raise here (password required); refuse
+            # instead of leaking a traceback through main().
+            raise ValueError("unreadable module.prop: %s" % error)
         props = parse_module_prop(prop_text)
         lib = pick_abi_lib(names, abi)
         if archive.getinfo(lib).file_size > MAX_SO_BYTES:
@@ -249,14 +257,59 @@ def stage_module(zip_path, root, abi):
                             "payload %s exceeds %d bytes" % (lib, MAX_SO_BYTES)
                         )
                     dst.write(chunk)
-        except Exception:
+        except (OSError, ValueError):
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
             raise
+        except Exception as error:
+            # zipfile can raise RuntimeError (unsupported compression on
+            # stream read) or LargeZipFile mid-extract: clean the partial
+            # file, then normalize so main() reports instead of tracing.
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise ValueError("unreadable payload %s: %s" % (lib, error))
         os.replace(tmp, staged)
     return module_id, staged, props.get("versionCode", "")
+
+
+def read_state(root, module_id, pid):
+    try:
+        with open(state_path(root, module_id, pid), encoding="utf-8") as stream:
+            state = json.load(stream)
+            return state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_state(root, module_id, pid, record):
+    """Atomically replace the state file: a crash mid-write must leave
+    either the old record or the new one, never truncated JSON (which
+    read_state would treat as 'no install' and leak live handles)."""
+    path = state_path(root, module_id, pid)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as stream:
+        json.dump(record, stream)
+    os.replace(tmp, path)
+
+
+def pending_handles(state):
+    """Un-retired handles from earlier installs/hotswaps, oldest first.
+
+    Reads both the current "prev_handles" list and the legacy singular
+    "prev_handle" int; junk entries are ignored, never trusted."""
+    out = []
+    value = state.get("prev_handles")
+    candidates = value if isinstance(value, list) else [state.get("prev_handle")]
+    for handle in candidates:
+        if isinstance(handle, bool) or not isinstance(handle, int):
+            continue
+        if handle and handle not in out:
+            out.append(handle)
+    return out
 
 
 def cmd_install(args):
@@ -274,10 +327,29 @@ def cmd_install(args):
     print("load result=%d handle=0x%x entry=%d" % (result, handle, entry_result))
     if result != 0:
         return result
-    with open(state_path(args.root, module_id, args.pid), "w") as stream:
-        json.dump(
-            {"id": module_id, "version": version, "handle": handle}, stream
-        )
+    # A reinstall displaces the live handle: retire it into the pending
+    # chain (same record, atomic write) instead of orphaning it. A crash
+    # after this point still has every resident handle on record; the
+    # next hotswap/uninstall drains them.
+    record = {"id": module_id, "version": version, "handle": handle}
+    displaced = read_state(args.root, module_id, args.pid)
+    pend = []
+    old = displaced.get("handle", 0)
+    if (
+        isinstance(old, int)
+        and not isinstance(old, bool)
+        and old
+        and old != handle
+    ):
+        pend.append(old)
+    for prev in pending_handles(displaced):
+        if prev != handle and prev not in pend:
+            pend.append(prev)
+    if pend:
+        record["prev_handles"] = pend
+        print("previous handle(s) retained pending unload: %s"
+              % ", ".join("0x%x" % h for h in pend))
+    write_state(args.root, module_id, args.pid, record)
     if args.unlink:
         try:
             os.unlink(staged)
@@ -287,57 +359,76 @@ def cmd_install(args):
     return 0
 
 
-def read_state(root, module_id, pid):
-    try:
-        with open(state_path(root, module_id, pid), encoding="utf-8") as stream:
-            state = json.load(stream)
-            return state if isinstance(state, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
 def cmd_hotswap(args):
     if args.ephemeral:
         print("error: hotswap needs a resident (non-ephemeral) load", file=sys.stderr)
         return errno.EINVAL
     try:
-        with zipfile.ZipFile(args.zip) as archive:
-            prop_text = archive.read("module.prop").decode("utf-8", "replace")
-    except KeyError:
-        print("error: module zip has no module.prop", file=sys.stderr)
+        archive = zipfile.ZipFile(args.zip)
+    except (zipfile.BadZipFile, zipfile.LargeZipFile) as error:
+        print("error: invalid module zip: %s" % error, file=sys.stderr)
         return errno.EINVAL
-    except zipfile.BadZipFile as error:
+    except RuntimeError as error:
+        print("error: invalid module zip: %s" % error, file=sys.stderr)
+        return errno.EINVAL
+    try:
+        with archive:
+            try:
+                prop_info = archive.getinfo("module.prop")
+            except KeyError:
+                print("error: module zip has no module.prop", file=sys.stderr)
+                return errno.EINVAL
+            if prop_info.file_size > MAX_PROP_BYTES:
+                print("error: module.prop is too large", file=sys.stderr)
+                return errno.EINVAL
+            try:
+                prop_text = archive.read("module.prop").decode("utf-8", "replace")
+            except KeyError:
+                print("error: module zip has no module.prop", file=sys.stderr)
+                return errno.EINVAL
+    except (OSError, ValueError) as error:
         print("error: %s" % error, file=sys.stderr)
+        return errno.EINVAL
+    except RuntimeError as error:
+        print("error: unreadable module.prop: %s" % error, file=sys.stderr)
         return errno.EINVAL
     try:
         props = parse_module_prop(prop_text)
     except ValueError as error:
         print("error: %s" % error, file=sys.stderr)
         return errno.EINVAL
-    old_state = read_state(args.root, props["id"], args.pid)
-    old_handle = old_state.get("handle", 0)
     result = cmd_install(args)
     if result != 0:
         return result
-    new_state = read_state(args.root, props["id"], args.pid)
-    new_handle = new_state.get("handle", 0)
-    if old_handle and old_handle != new_handle:
-        sock = find_driver_family()
-        try:
-            result = ioctl_unload(sock, args.pid, old_handle)
-        finally:
-            sock.close()
-        print("unload old handle=0x%x result=%d" % (old_handle, result))
-        if result != 0:
-            # New library is resident but the old one survived too:
-            # keep both handles on record so nothing leaks silently.
-            new_state["prev_handle"] = old_handle
-            with open(
-                state_path(args.root, props["id"], args.pid), "w"
-            ) as stream:
-                json.dump(new_state, stream)
-        return result
-    return 0
+    # cmd_install already folded the displaced handle into prev_handles
+    # (atomic with the new record), so every resident handle is on disk
+    # before the first unload is attempted: crash-safe by construction.
+    state = read_state(args.root, props["id"], args.pid)
+    new_handle = state.get("handle", 0)
+    targets = [h for h in pending_handles(state) if h != new_handle]
+    if not targets:
+        return 0
+    sock = find_driver_family()
+    try:
+        failed = 0
+        survivors = []
+        for old_handle in targets:
+            unload_result = ioctl_unload(sock, args.pid, old_handle)
+            print("unload old handle=0x%x result=%d" % (old_handle, unload_result))
+            if unload_result != 0:
+                survivors.append(old_handle)
+                if not failed:
+                    failed = unload_result
+    finally:
+        sock.close()
+    # Survivors stay on record for the next hotswap/uninstall; a clean
+    # sweep drops the chain back to the bare current handle.
+    state["prev_handles"] = survivors
+    if not survivors:
+        state.pop("prev_handles", None)
+    state.pop("prev_handle", None)  # legacy singular key, superseded
+    write_state(args.root, props["id"], args.pid, state)
+    return failed
 
 
 def cmd_uninstall(args):
@@ -358,20 +449,47 @@ def cmd_uninstall(args):
         return errno.EINVAL
     handle = state.get("handle", 0)
     if isinstance(handle, bool) or not isinstance(handle, int) or not handle:
+        handle = 0
+    # Drain the whole chain: the current handle plus every pending
+    # survivor from earlier installs/hotswaps (legacy "prev_handle"
+    # included). Unlink the record only when nothing is left resident.
+    targets = []
+    if handle:
+        targets.append(handle)
+    for prev in pending_handles(state):
+        if prev != handle and prev not in targets:
+            targets.append(prev)
+    if not targets:
         print("recorded handle is empty")
         return errno.EINVAL
     sock = find_driver_family()
     try:
-        result = ioctl_unload(sock, args.pid, handle)
+        failed = 0
+        survivors = []
+        for target in targets:
+            result = ioctl_unload(sock, args.pid, target)
+            print("unload handle=0x%x result=%d" % (target, result))
+            if result != 0:
+                survivors.append(target)
+                if not failed:
+                    failed = result
     finally:
         sock.close()
-    print("unload result=%d" % result)
-    if result == 0:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-    return result
+    if survivors:
+        # Anything still resident stays on record (first survivor as
+        # the current handle) for the next uninstall attempt.
+        state["handle"] = survivors[0]
+        state["prev_handles"] = survivors[1:]
+        if not state["prev_handles"]:
+            state.pop("prev_handles", None)
+        state.pop("prev_handle", None)  # legacy singular key, superseded
+        write_state(args.root, args.id, args.pid, state)
+        return failed
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    return 0
 
 
 def main(argv=None):

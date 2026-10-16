@@ -18,6 +18,13 @@ static int memd_release(struct socket* sock) {
     if (!sk) {
         return 0;
     }
+    /* Detach first: release must be idempotent (the core may call it
+     * again on error paths) and destruct must never see a stale
+     * sock->sk after our sock_put. This is the safe half of
+     * sock_orphan; the callback-lock half is skipped (foreign layout)
+     * and nothing here needs detaching. The sk stays alive through
+     * the teardown below via the ref dropped at the end. */
+    sock->sk = NULL;
 
     ws = (struct memd_sock*)sk;
     ws->version = 0;
