@@ -1396,8 +1396,13 @@ static int get_cmdline_ex(struct task_struct* task, char* buffer, int buflen) {
 
     len = arg_end - arg_start;
 
-    if (len > buflen)
-        len = buflen;
+    /* Reserve one byte for NUL: a full-buffer argv read must never
+     * return unterminated (callers treat the buffer as a C string;
+     * len == buflen skips the NUL leg below). Fail closed on tiny buflen. */
+    if (buflen <= 1)
+        goto out_mm;
+    if (len > (unsigned int)(buflen - 1))
+        len = (unsigned int)(buflen - 1);
 
     res = access_process_vm(task, arg_start, buffer, len, FOLL_FORCE);
 
@@ -1420,6 +1425,13 @@ static int get_cmdline_ex(struct task_struct* task, char* buffer, int buflen) {
             }
             res = strnlen(buffer, res);
         }
+    }
+    /* Contract: buffer always NUL-terminated on res > 0; res clamped
+     * into the buffer so callers can use it as a length safely. */
+    if (res > 0) {
+        if (res >= buflen)
+            res = buflen - 1;
+        buffer[res] = '\0';
     }
 out_mm:
     mmput(mm);

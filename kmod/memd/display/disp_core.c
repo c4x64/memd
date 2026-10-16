@@ -265,8 +265,8 @@ static int memd_vsync_wait_internal(int64_t timeout_ns)
     if (g_core.vsync.frame_interval_ns <= 0)
         g_core.vsync.frame_interval_ns = interval;
     g_core.vsync.next_vsync_ns = now + g_core.vsync.frame_interval_ns;
-    mutex_unlock(&g_core_mu);
     atomic_inc(&g_core.frame_count);
+    mutex_unlock(&g_core_mu);
 
     return 0;
 }
