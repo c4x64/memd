@@ -554,6 +554,10 @@ jobs:
           echo "keeping __versions (CRC intact for no-FORCE_LOAD kernels)"
           echo "OBJCOPY_BIN=$OBJCOPY_BIN" >> "$GITHUB_ENV"
           
+          echo "== ELF section dump (rwbridge.ko) =="
+          for T in llvm-readelf readelf eu-readelf; do command -v $T >/dev/null 2>&1 && { $T -S rwbridge.ko | grep -iE "versions|crc|modinfo|this_module" || true; break; }; done
+          echo "== modpost usage =="
+          "$KDIR_RESOLVED/scripts/mod/modpost" --help 2>&1 | head -40 || true
           set -o pipefail
           make V=1 KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.dbg == true && 'DBG=1' || '' }} ${{ matrix.test == true && 'DISP_TEST=1' || '' }} NM="$NM_BIN" OBJDUMP="$OBJDUMP_BIN" check-universal 2>&1 | tee build.log
           if grep -qiE "does not import it|namespace.*mismatch" build.log; then
