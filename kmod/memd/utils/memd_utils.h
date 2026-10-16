@@ -88,6 +88,11 @@ unsigned long kallsyms_lookup_name_ex(const char* symbol_name);
 /* pfn_valid without the import (see memd_utils.c for the chain). */
 int memd_pfn_ok(unsigned long pfn);
 
+/* virt_addr_valid without the import (see memd_utils.c): routes the
+ * underlying pfn through memd_pfn_ok instead of importing pfn_valid,
+ * which is denied on universal images and stripped by some vendors. */
+int memd_virt_addr_valid(const void *va);
+
 struct task_struct* get_target_task(pid_t pid);
 
 /* find_vma without the import: name differs by generation (find_vma vs

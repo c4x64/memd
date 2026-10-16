@@ -19,6 +19,7 @@
 #endif
 #include <linux/hugetlb.h>
 #include <linux/interrupt.h>
+#include <asm/io.h>
 #include <linux/mm.h>
 #include <linux/pgtable.h>
 #include <linux/printk.h>
@@ -502,6 +503,19 @@ int memd_pfn_ok(unsigned long pfn) {
     if (max_ptr)
         return pfn < READ_ONCE(*max_ptr);
     return pfn < ((64UL << 30) >> PAGE_SHIFT);
+}
+
+/* Import-free virt_addr_valid: linear-map VA validity (pfn in DRAM).
+ * virt_addr_valid() inlines pfn_valid(), which is an imported symbol
+ * denied on universal images and stripped by some vendors. Route the
+ * underlying pfn through memd_pfn_ok instead. */
+int memd_virt_addr_valid(const void *va)
+{
+    unsigned long pa;
+    if (!va)
+        return 0;
+    pa = (unsigned long)virt_to_phys(va);
+    return memd_pfn_ok((unsigned long)(pa >> PAGE_SHIFT));
 }
 
 struct task_struct* get_target_task(pid_t pid) {

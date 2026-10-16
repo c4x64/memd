@@ -227,7 +227,7 @@ static void memd_learn_pgd(void)
         u64 pa = 0;
         int pa_match = 0;
         if ((pgd_va & 0xffff000000000000UL) == 0xffff000000000000UL &&
-            virt_addr_valid((void *)(uintptr_t)pgd_va)) {
+            memd_virt_addr_valid((const void *)(uintptr_t)pgd_va)) {
             pa = (u64)(uintptr_t)virt_to_phys((void *)(uintptr_t)pgd_va);
             pa_match = (pa == want);
         }
@@ -256,7 +256,7 @@ static void memd_learn_pgd(void)
                 continue;
             /* virt_to_phys is linear-map only: vmalloc/io addresses
              * would yield a bogus phys, so skip non-linear vas. */
-            if (!virt_addr_valid((void *)(uintptr_t)va))
+            if (!memd_virt_addr_valid((const void *)(uintptr_t)va))
                 continue;
             pa = (unsigned long)virt_to_phys((void *)(uintptr_t)va);
             if (!memd_pgd_shape_ok(pa))
@@ -868,7 +868,7 @@ unsigned long memd_valid_pgd(struct mm_struct *mm)
     va = (unsigned long)memd_m_pgd(mm);
     if ((va & 0xffff000000000000UL) != 0xffff000000000000UL)
         return 0;
-    if (!virt_addr_valid((void *)va))
+    if (!memd_virt_addr_valid((const void *)va))
         return 0;
     pa = (unsigned long)virt_to_phys((void *)va);
     if (!memd_pgd_shape_ok(pa))

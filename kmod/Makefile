@@ -119,6 +119,11 @@ all:
 		echo "KDIR unset: point it at the prepared tree for one matrix target (see README + CI)"; \
 		exit 1; \
 	fi
+	# Stage the donor tree's Module.symvers locally so modpost can resolve
+	# per-symbol CRCs on 6.x DDKs (implicit lookup stopped feeding them).
+	# Writing it into $(CURDIR) lets kbuild merge CRCs instead of importing
+	# the whole kernel symvers (which triggers duplicate-export fatals).
+	@if [ -f "$(KDIR)/Module.symvers" ]; then cp -f "$(KDIR)/Module.symvers" "$(CURDIR)/Module.symvers"; fi
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
 
 clean:
