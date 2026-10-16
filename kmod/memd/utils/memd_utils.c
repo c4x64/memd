@@ -199,6 +199,16 @@ void *memd_vmalloc_exec(unsigned long size)
         vfree(p);
         return NULL;
     }
+    /* Flush instruction cache for any later trampoline stores. Use the
+     * same range backend the rest of the tree resolves via kallsyms. */
+    {
+        int (*tmp_flush_icache)(unsigned long, unsigned long) = NULL;
+        tmp_flush_icache = (void *)kallsyms_lookup_name_ex("__flush_icache_range");
+        if (!tmp_flush_icache)
+            tmp_flush_icache = (void *)kallsyms_lookup_name_ex("caches_clean_inval_pou");
+        if (tmp_flush_icache)
+            tmp_flush_icache((unsigned long)p, (unsigned long)p + aligned);
+    }
     return p;
 }
 

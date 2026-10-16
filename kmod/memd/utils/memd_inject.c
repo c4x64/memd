@@ -580,7 +580,7 @@ static int flush_user_range(struct mm_struct *mm, uintptr_t start, size_t len)
     for (va = start & PAGE_MASK; va < end; va += PAGE_SIZE) {
         struct page *pg = vaddr_to_page(mm, va);
         if (!pg)
-            return -EFAULT;
+            continue;
         my_flush_dcache_page(pg);
     }
     return 0;
