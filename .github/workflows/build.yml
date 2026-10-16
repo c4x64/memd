@@ -357,6 +357,21 @@ jobs:
           else
             echo "no Module.symvers in kdir"
           fi
+          echo "--- kdir MODVERSIONS config ---"
+          grep -E "^CONFIG_MODVERSIONS=|^# CONFIG_MODVERSIONS" "$KDIR_RESOLVED/.config" 2>/dev/null || echo "no MODVERSIONS line in kdir .config"
+          # Recovery: kdir config without MODVERSIONS but a populated
+          # symvers means modpost runs without -m and emits CRC-less
+          # modules. Flip the generated config on for this build only
+          # (tree is ephemeral per job): modpost then attaches CRCs
+          # from the shipped symvers, and the vermagic gains the
+          # modversions token the runtime patch expects.
+          if [ -f "$KDIR_RESOLVED/Module.symvers" ] && [ -s "$KDIR_RESOLVED/Module.symvers" ] && [ -f "$KDIR_RESOLVED/.config" ] && ! grep -q "^CONFIG_MODVERSIONS=y" "$KDIR_RESOLVED/.config"; then
+            echo "enabling MODVERSIONS for this build (symvers present)"
+            grep -v "CONFIG_MODVERSIONS" "$KDIR_RESOLVED/.config" > /tmp/kcfg && echo "CONFIG_MODVERSIONS=y" >> /tmp/kcfg && cp /tmp/kcfg "$KDIR_RESOLVED/.config"
+            grep -v "CONFIG_MODVERSIONS" "$KDIR_RESOLVED/include/config/auto.conf" > /tmp/kauto 2>/dev/null && echo "CONFIG_MODVERSIONS=y" >> /tmp/kauto && cp /tmp/kauto "$KDIR_RESOLVED/include/config/auto.conf" || true
+            grep -v "CONFIG_MODVERSIONS" "$KDIR_RESOLVED/include/generated/autoconf.h" > /tmp/kauto.h 2>/dev/null && echo "#define CONFIG_MODVERSIONS 1" >> /tmp/kauto.h && cp /tmp/kauto.h "$KDIR_RESOLVED/include/generated/autoconf.h" || true
+            echo "#define CONFIG_MODVERSIONS 1" > "$KDIR_RESOLVED/include/config/modversions.h" 2>/dev/null || true
+          fi
           
           if command -v pahole >/dev/null 2>&1 && [ -f "$KDIR_RESOLVED/vmlinux" ]; then
             echo "=== pahole task_struct ($IMG) ==="
