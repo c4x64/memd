@@ -3,6 +3,7 @@
 #include "memd_learn.h"
 
 #include <asm/sysreg.h>
+#include <linux/atomic.h>
 #include <linux/capability.h>
 #include <linux/compiler.h>
 #include <linux/errno.h>
@@ -217,7 +218,7 @@ int memd_input_dev_ok(struct input_dev *dev)
 int memd_printk(const char *fmt, ...)
  {
     static int (*fn)(const char *, va_list) = NULL;
-    static long dropped = 0;
+    static atomic_long_t dropped;
     int (*tmp)(const char *, va_list);
     va_list ap;
     int r;
@@ -228,26 +229,41 @@ int memd_printk(const char *fmt, ...)
     if (!tmp) {
         tmp = (void *)kallsyms_lookup_name_ex("vprintk");
         if (!tmp) {
-            d = READ_ONCE(dropped);
-            /* Saturating: a pre-bootstrap reader storm must never wrap
-             * the counter (signed overflow); the loss report stays
-             * exact until the cap, then pins. A racing increment that
-             * lands after the reset below is a benign undercount. */
-            if (d < 2147483647L)
-                WRITE_ONCE(dropped, d + 1);
-            return 0;
-        }
-        WRITE_ONCE(fn, tmp);
-        d = READ_ONCE(dropped);
-        if (d > 0) {
-            WRITE_ONCE(dropped, 0);
-            /* Report through memd_printk, not tmp directly: tmp is
-             * vprintk and takes a va_list, so handing it the count
-             * would feed a small integer as the varargs pointer and
-             * oops on first use. The recursive call is depth-1 (fn
-             * is already published, so it takes the fast path). */
-            memd_printk(KERN_WARNING MEMD_LOG_PREFIX
-                "early messages dropped before bootstrap: %ld\n", d);
+            /* Re-check before dropping: a racing CPU may have
+             * published fn while this lookup ran. Printing through
+             * it keeps the message (and keeps the drop count exact:
+             * an increment after the reporter's claim below would
+             * otherwise strand a count no future report can claim,
+             * since fn stays published). A stale NULL here only
+             * costs one counted drop, never a fault. */
+            tmp = READ_ONCE(fn);
+            if (!tmp) {
+                /* Saturating RMW: a pre-bootstrap storm must never
+                 * wrap the counter (signed overflow) and concurrent
+                 * increments must never be lost to a torn
+                 * read-modify-write; the loss report stays exact
+                 * until the cap, then pins. */
+                atomic_long_add_unless(&dropped, 1, 2147483647L);
+                return 0;
+            }
+        } else {
+            WRITE_ONCE(fn, tmp);
+            /* Atomic claim: the old READ/reset pair let two CPUs
+             * that both missed fn read the same N and report 2N,
+             * and a racing increment could be overwritten by the
+             * reset. xchg makes the claim single-winner (losers see
+             * 0); concurrent increments land either inside the
+             * claimed N or after it, never double-counted. */
+            d = atomic_long_xchg(&dropped, 0);
+            if (d > 0) {
+                /* Report through memd_printk, not tmp directly: tmp is
+                 * vprintk and takes a va_list, so handing it the count
+                 * would feed a small integer as the varargs pointer and
+                 * oops on first use. The recursive call is depth-1 (fn
+                 * is already published, so it takes the fast path). */
+                memd_printk(KERN_WARNING MEMD_LOG_PREFIX
+                    "early messages dropped before bootstrap: %ld\n", d);
+            }
         }
     }
     va_start(ap, fmt);
