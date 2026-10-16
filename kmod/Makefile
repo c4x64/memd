@@ -17,13 +17,6 @@
 # job: KMI=android13-5.15 etc.). KMI names the output for packing.
 # check-universal runs on the already-built rwbridge.ko, no KDIR needed.
 
-# 6.x kbuild no longer feeds the kernel's Module.symvers to external
-# module builds implicitly (5.x did): without KBUILD_EXTRA_SYMBOLS,
-# modpost emits CRC-less modules even with a populated symvers sitting
-# in the tree. Point it at the tree's file when present; harmless (and
-# redundant) on 5.x, load-bearing on 6.x no-FORCE_LOAD kernels.
-SYMVERS := $(wildcard $(KDIR)/Module.symvers)
-
 obj-m += rwbridge.o
 # PARKED (explicit — keep parked, do not delete, do not re-add silently):
 # memd/utils/memd_hwbp.o is NOT part of rwbridge-y. It programs the
@@ -126,7 +119,7 @@ all:
 		echo "KDIR unset: point it at the prepared tree for one matrix target (see README + CI)"; \
 		exit 1; \
 	fi
-	$(MAKE) -C $(KDIR) M=$(CURDIR) modules $(if $(SYMVERS),KBUILD_EXTRA_SYMBOLS=$(SYMVERS))
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
 
 clean:
 	@if [ -z "$(KDIR)" ]; then \
