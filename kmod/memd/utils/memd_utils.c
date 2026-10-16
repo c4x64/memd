@@ -1,4 +1,5 @@
 #include "memd_utils.h"
+#include <linux/version.h>
 #include "memd_kallsyms.h"
 #include "memd_learn.h"
 
@@ -11,7 +12,11 @@
 #include <linux/input.h>
 #include <linux/preempt.h>
 #include <linux/sched/signal.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
 #include <linux/stdarg.h>
+#else
+#include <stdarg.h>
+#endif
 #include <linux/hugetlb.h>
 #include <linux/interrupt.h>
 #include <linux/mm.h>
