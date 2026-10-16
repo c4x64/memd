@@ -526,6 +526,14 @@ jobs:
           fi
           echo "baked UTS: $(cat "$KDIR_RESOLVED/include/generated/utsrelease.h")"
           
+          # Stage donor Module.symvers for CRC resolution (6.x DDKs do not
+          # feed CRCs implicitly; presence in the extmod dir lets kbuild merge
+          # them instead of importing the whole symvers via KBUILD_EXTRA_SYMBOLS).
+          if [ -f "$KDIR_RESOLVED/Module.symvers" ]; then
+            mkdir -p kmod
+            cp -f "$KDIR_RESOLVED/Module.symvers" kmod/Module.symvers
+          fi
+          
           cd kmod
           export PATH="$(echo /opt/ddk/clang/*/bin | cut -d' ' -f1):$PATH"
           make KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.dbg == true && 'DBG=1' || '' }} ${{ matrix.test == true && 'DISP_TEST=1' || '' }}
