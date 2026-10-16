@@ -1,8 +1,6 @@
 name: build-matrix-kmod
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       manifest_run_id:
@@ -23,9 +21,6 @@ on:
           - beta
           - rc
           - stable
-  schedule:
-    - cron: '0 2 * * 0'  # Weekly rebuild to identify new DDK tags
-
 permissions:
   actions: read
   contents: read
