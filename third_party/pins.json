@@ -1,0 +1,19 @@
+{
+  "mirror_dir": "third_party/upstream",
+  "note": "Immutable pins. Mirror of the UPSTREAM.md table (human authority). Move a pin only via a dedicated reviewed change: update this file AND UPSTREAM.md, review release notes/compat, run the full app test suite + CI. Never point at a moving branch.",
+  "pins": [
+    {
+      "name": "dirtyfrag",
+      "url": "https://github.com/mitschud/DirtyFrag",
+      "ref": "master",
+      "rev": "639fddf808c6e3e320560589418916c1f694d3e2",
+      "candidate": "v1.16 tag = 205ceee98612908cc2d52e7529c91498e4fc7969 (operator-named release; adopting it is a pin-update change, not automatic)"
+    },
+    {
+      "name": "kernelsu-diabl0w",
+      "url": "https://github.com/diabl0w/KernelSU",
+      "ref": "main",
+      "rev": "b38f4096f33632ad5871dc3fff0ec426e23c9358"
+    }
+  ]
+}

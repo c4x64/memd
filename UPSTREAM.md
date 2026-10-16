@@ -14,6 +14,9 @@ Rules per `Userspace App/AGENTS.md` ("CI and upstream dependencies"):
 - Never move these pins without a dedicated, reviewed change.
 - A pin update = update this file + review release notes/compat + run the
   full app test suite + CI before merging. No silent or automatic updates.
+- Machine-readable mirror: `third_party/pins.json` (same SHAs; change both
+  together). `tools/sync-upstream.py` materializes the pinned trees under
+  gitignored `third_party/upstream/` for review diffing only — never compiled.
 
 ## Licenses and attribution (binding)
 
