@@ -54,15 +54,22 @@
 #include <linux/string.h>
 
 /* Timing budget vs mutex hold (DoS lens). Every remote_call runs under
- * memd_inj_mutex because all ops share one below-SP scratch window, so a
- * worst-case inject holds the mutex ~5s (seize) + 3x10s (dlopen, entry,
- * dlclose) ~= 35s. The 10s per-call budget stands: real constructors
- * (relocations, dex work on low-end parts) take seconds and a shorter
- * fuse would turn slow targets into spurious recapture-kills. The hog is
- * bounded, fail-closed (timeout always recaptures or kills, never leaks
- * a hijacked thread), and admin-only (CAP_SYS_ADMIN callers), so an
- * unprivileged target cannot weaponize it — worst case a second admin
- * ioctl waits. Do not shorten without measuring slow-device init. */
+ * memd_inj_mutex because the seize/hijack/restore sequence must be atomic
+ * against a concurrent inject/unload on the SAME target (shared below-SP
+ * scratch and saved-regs window per thread). Different targets use
+ * disjoint scratch, so a per-target lock could allow parallelism — and is
+ * deliberately NOT used: it needs a dynamic per-pid lock table with
+ * lifetime/GFP races in kernel context for no privilege gain (callers
+ * are CAP_SYS_ADMIN-only; an unprivileged target cannot weaponize the
+ * wait). A worst-case inject holds the mutex ~5s (seize) + 3x10s
+ * (dlopen, entry, dlclose) ~= 35s. The 10s per-call budget stands: real
+ * constructors (relocations, dex work on low-end parts) take seconds
+ * and a shorter fuse would turn slow targets into spurious
+ * recapture-kills. The hog is bounded, fail-closed (timeout always
+ * recaptures or kills, never leaks a hijacked thread), and the wait is
+ * interruptible (mutex_lock_interruptible), so a second admin ioctl can
+ * abort with -ERESTARTSYS instead of hanging unkillably. Do not shorten
+ * without measuring slow-device init. */
 #define MEMD_INJ_SEIZE_TRIES 250   /* 250 x 20ms = 5s to reach STOPPED */
 #define MEMD_INJ_CALL_TRIES  500   /* 500 x 20ms = 10s for dlopen return */
 #define MEMD_INJ_POLL_MS     20
@@ -432,9 +439,23 @@ static int resolve_lib_sym(struct task_struct *t, uintptr_t base,
 /* ---- seize / release (SIGSTOP + wait_task_inactive, SIGCONT) ----
  * All entry points below serialize on memd_inj_mutex: concurrent
  * inject/unload calls on one target would otherwise share the same
- * below-SP scratch and clobber each other's stub/regs. Sleepable
+ * below-SP scratch and clobber each other's stub/regs. Serialization is
+ * global (not per-target) by design — see the timing-budget note above.
+ * The mutex wait is interruptible so concurrent DIFFERENT-target injects
+ * queue instead of corrupting, and a waiter can abort with -ERESTARTSYS.
+ * A serialized inject-then-unload pair is therefore sequential: the
+ * unload observes the inject's completed state (handle installed or
+ * zero on failure/ephemeral), never a half-hijacked thread. Sleepable
  * (ioctl process context; remote_call sleeps), never held across
- * anything but one inject/unload operation. */
+ * anything but one inject/unload operation.
+ * D-state note: a thread in uninterruptible sleep is inactive but never
+ * TASK_STOPPED, so the seize loop intentionally burns the full 5s: the
+ * I/O may complete and the group-stop may still land. Failing fast on
+ * D-state would turn slow-I/O targets into spurious -ETIMEDOUTs.
+ * SIGCONT guarantee: seize_task SIGCONTs on every path where it sent
+ * SIGSTOP and then failed (timeout or wait error); the pre-STOP resolve
+ * failure path sent nothing so nothing is owed. Callers therefore release
+ * exactly once on success paths and zero times on failed-seize paths. */
 static DEFINE_MUTEX(memd_inj_mutex);
 
 static int send_task_sig(struct task_struct *task, int sig)
@@ -668,7 +689,19 @@ static int su_unstage(struct task_struct *task, struct memd_su_saved *s,
  * Entry: task STOPPED (caller seized). extra/extralen (e.g. the .so
  * path) is written at path_va and x0 gets path_va; with NULL extra,
  * x0 gets a0 directly (e.g. dlclose handle). Exit: task STOPPED with
- * original regs restored (caller SIGCONTs exactly once at the end). */
+ * original regs restored (caller SIGCONTs exactly once at the end).
+ * Multithread soundness: SIGSTOP is group-wide, so siblings stop too,
+ * but only THIS task's regs are rewritten to point at the stub and only
+ * this task's below-SP flag word is polled. A second stopped thread
+ * never runs the stub (its pc is untouched); it simply resumes its saved
+ * state at the final SIGCONT. One hijacked thread per call is therefore
+ * sufficient for multithreaded targets.
+ * Timeout semantics (incl. an entry that never returns): a poll timeout
+ * re-STOPs and restores saved regs, returning -ETIMEDOUT with the target
+ * ALIVE and unhijacked — kill happens only when recapture or restore
+ * itself fails (*killed_out set, SIGKILL sent, SIGCONT delivered so the
+ * kill is not left stopped). Callers preserve the dlopen handle on an
+ * entry timeout so unload can still drop the resident library. */
 static int remote_call(struct task_struct *task, struct mm_struct *mm,
                        uintptr_t fn, uintptr_t a0, const void *extra,
                        size_t extralen, uintptr_t *retval, int timeout_ms,
@@ -860,7 +893,8 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
     ephemeral = (flags & MEMD_LOADSO_EPHEMERAL) != 0;
     if (pid == task_pid_vnr(current))
         return -EINVAL;
-    mutex_lock(&memd_inj_mutex);
+    if (mutex_lock_interruptible(&memd_inj_mutex))
+        return -ERESTARTSYS;
     if (!is_pid_alive(pid)) {
         ret = -ESRCH;
         goto out_lock;
@@ -1086,7 +1120,8 @@ static int unload_so(pid_t pid, uintptr_t handle)
         return -EINVAL;
     if (pid == task_pid_vnr(current))
         return -EINVAL;
-    mutex_lock(&memd_inj_mutex);
+    if (mutex_lock_interruptible(&memd_inj_mutex))
+        return -ERESTARTSYS;
     if (!is_pid_alive(pid)) {
         ret = -ESRCH;
         goto out_lock;

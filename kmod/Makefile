@@ -25,10 +25,17 @@
 SYMVERS := $(wildcard $(KDIR)/Module.symvers)
 
 obj-m += rwbridge.o
-# TODO(hwbp): memd/utils/memd_hwbp.o is parked (not in rwbridge-y): it
-# targets the removed thread_struct.debug_monitors / debug_monitor_state
-# model (absent on every matrix DDK; new model is thread debug_info).
-# Re-add with a rewrite; API stubs in memd_hwbp.h fail soft meanwhile.
+# PARKED (explicit — keep parked, do not delete, do not re-add silently):
+# memd/utils/memd_hwbp.o is NOT part of rwbridge-y. It programs the
+# removed thread_struct.debug_monitors / struct debug_monitor_state
+# model (absent on every matrix DDK; new model is thread debug_info +
+# live registers). Re-adding requires a rewrite against that model;
+# until then the API stubs in memd_hwbp.h keep ioctl opcodes 21-24
+# wired and fail soft (-ENODEV). Deletion is rejected: it would orphan
+# the wired ioctl ABI plus retired/HWBP_ANALYSIS_REPORT.md. This list
+# is explicit (no wildcard anywhere pulls parked files back in).
+# PARKED_OBJS documents parked objects; no rule may reference it.
+PARKED_OBJS := memd/utils/memd_hwbp.o
 rwbridge-y := \
     memd/core/memd.o \
     memd/net/memd_sock.o \
@@ -122,7 +129,14 @@ all:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules $(if $(SYMVERS),KBUILD_EXTRA_SYMBOLS=$(SYMVERS))
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
+	@if [ -z "$(KDIR)" ]; then \
+		echo "KDIR unset: removing local build leftovers only (no kbuild tree)"; \
+	else \
+		$(MAKE) -C $(KDIR) M=$(CURDIR) clean; \
+	fi
+	rm -rf .tmp_versions
+	find . \( -name '*.o' -o -name '*.ko' -o -name '*.mod' -o -name '*.mod.c' -o -name '*.mod.o' -o -name '.*.cmd' \) -delete
+	rm -f modules.order Module.symvers build.log ../blobs.c
 
 # Static gate: fails the build if the module drifted off the checked
 # surface. Import rule (owner-amended for the universal architecture):

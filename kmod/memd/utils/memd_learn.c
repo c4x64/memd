@@ -23,6 +23,7 @@
 #include "memd_netlayout.h"
 
 static bool memd_learn_initialized = false;
+static bool memd_learn_started = false;
 static DEFINE_SPINLOCK(memd_learn_lock);
 
 struct memd_learned memd_learned = {
@@ -676,22 +677,34 @@ void memd_learn_vma_once(void)
 
 pid_t memd_t_pid(struct task_struct *t)
  {
-    if (memd_learned.t_pid >= 0)
-        return *(pid_t *)((char *)t + memd_learned.t_pid);
+    unsigned int v = 0;
+    if (t && memd_learned.t_pid >= 0 &&
+        !memd_safe_read32((char *)t + memd_learned.t_pid, &v))
+        return (pid_t)v;
+    if (!t)
+        return 0;
     return t->pid;
 }
 
 pid_t memd_t_tgid(struct task_struct *t)
  {
-    if (memd_learned.t_tgid >= 0)
-        return *(pid_t *)((char *)t + memd_learned.t_tgid);
+    unsigned int v = 0;
+    if (t && memd_learned.t_tgid >= 0 &&
+        !memd_safe_read32((char *)t + memd_learned.t_tgid, &v))
+        return (pid_t)v;
+    if (!t)
+        return 0;
     return t->tgid;
 }
 
 struct mm_struct *memd_t_mm(struct task_struct *t)
  {
-    if (memd_learned.t_mm >= 0)
-        return *(struct mm_struct **)((char *)t + memd_learned.t_mm);
+    unsigned long v = 0;
+    if (t && memd_learned.t_mm >= 0 &&
+        !memd_safe_read64((char *)t + memd_learned.t_mm, &v))
+        return (struct mm_struct *)(uintptr_t)v;
+    if (!t)
+        return NULL;
     return t->mm;
 }
 
@@ -702,10 +715,15 @@ int memd_t_mm_null(struct task_struct *t)
 
 struct cred *memd_t_cred(struct task_struct *t)
  {
-    if (memd_learned.t_cred >= 0)
-        return *(struct cred **)((char *)t + memd_learned.t_cred);
+    unsigned long v = 0;
+    if (t && memd_learned.t_cred >= 0 &&
+        !memd_safe_read64((char *)t + memd_learned.t_cred, &v) &&
+        (v & 0xffff000000000000UL) == 0xffff000000000000UL)
+        return (struct cred *)(uintptr_t)v;
     /* task->cred is const-qualified (RCU); callers must not write
      * through it — all stores go via computed addresses. */
+    if (!t)
+        return NULL;
     return (struct cred *)t->cred;
 }
 
@@ -799,18 +817,25 @@ void memd_learn_task_stack_once(void)
 
 void memd_t_comm(struct task_struct *t, char *buf, size_t cap)
  {
-    if (memd_learned.t_comm >= 0 && cap > 0) {
-        size_t n = cap - 1;
+    size_t n = 0;
+    unsigned long w0 = 0, w1 = 0;
+    char tmp[TASK_COMM_LEN];
+    if (t && memd_learned.t_comm >= 0 && cap > 0) {
+        n = cap - 1;
         if (n > 15)
             n = 15;
-        memcpy(buf, (char *)t + memd_learned.t_comm, n);
-        buf[n] = '\0';
-        return;
+        if (!memd_safe_read64((char *)t + memd_learned.t_comm, &w0) &&
+            !memd_safe_read64((char *)t + memd_learned.t_comm + 8, &w1)) {
+            memcpy(tmp, &w0, 8);
+            memcpy(tmp + 8, &w1, 8);
+            memcpy(buf, tmp, n);
+            buf[n] = '\0';
+            return;
+        }
     }
     if (cap > 0) {
         /* get_task_comm requires exactly TASK_COMM_LEN bytes. */
-        char tmp[TASK_COMM_LEN];
-        size_t n = cap - 1;
+        n = cap - 1;
         get_task_comm(tmp, t);
         if (n >= sizeof(tmp))
             n = sizeof(tmp) - 1;
@@ -821,8 +846,12 @@ void memd_t_comm(struct task_struct *t, char *buf, size_t cap)
 
 unsigned long memd_m_pgd(struct mm_struct *mm)
  {
-    if (memd_learned.m_pgd >= 0)
-        return *(unsigned long *)((char *)mm + memd_learned.m_pgd);
+    unsigned long v = 0;
+    if (mm && memd_learned.m_pgd >= 0 &&
+        !memd_safe_read64((char *)mm + memd_learned.m_pgd, &v))
+        return v;
+    if (!mm)
+        return 0;
     return mm->pgd;
 }
 
@@ -909,22 +938,34 @@ unsigned int memd_uid(void)
 
 unsigned long memd_v_start(struct vm_area_struct *vma)
  {
-    if (memd_learned.v_start >= 0)
-        return *(unsigned long *)((char *)vma + memd_learned.v_start);
+    unsigned long v = 0;
+    if (vma && memd_learned.v_start >= 0 &&
+        !memd_safe_read64((char *)vma + memd_learned.v_start, &v))
+        return v;
+    if (!vma)
+        return 0;
     return vma->vm_start;
 }
 
 unsigned long memd_v_end(struct vm_area_struct *vma)
  {
-    if (memd_learned.v_end >= 0)
-        return *(unsigned long *)((char *)vma + memd_learned.v_end);
+    unsigned long v = 0;
+    if (vma && memd_learned.v_end >= 0 &&
+        !memd_safe_read64((char *)vma + memd_learned.v_end, &v))
+        return v;
+    if (!vma)
+        return 0;
     return vma->vm_end;
 }
 
 unsigned long memd_v_flags(struct vm_area_struct *vma)
  {
-    if (memd_learned.v_flags >= 0)
-        return *(unsigned long *)((char *)vma + memd_learned.v_flags);
+    unsigned long v = 0;
+    if (vma && memd_learned.v_flags >= 0 &&
+        !memd_safe_read64((char *)vma + memd_learned.v_flags, &v))
+        return v;
+    if (!vma)
+        return 0;
     return vma->vm_flags;
 }
 
@@ -954,9 +995,117 @@ struct dentry *memd_file_dentry(struct file *f)
 
 unsigned long memd_v_file(struct vm_area_struct *vma)
  {
-    if (memd_v_file_off >= 0)
-        return *(unsigned long *)((char *)vma + memd_v_file_off);
+    unsigned long v = 0;
+    if (vma && memd_v_file_off >= 0 &&
+        !memd_safe_read64((char *)vma + memd_v_file_off, &v))
+        return v;
+    if (!vma)
+        return 0;
     return (unsigned long)vma->vm_file;
+}
+
+/* Guarded learned-slot readers backing the header macros (extable-guarded
+ * slot, compiled fallback on fault/unknown, NULL-safe fail closed). Plain
+ * functions (not inlines) so the header needs no include reordering. */
+struct files_struct *memd_t_files_fn(struct task_struct *t)
+ {
+    unsigned long v = 0;
+    if (t && memd_learned_ext.t_files >= 0 &&
+        !memd_safe_read64((char *)t + memd_learned_ext.t_files, &v))
+        return (struct files_struct *)(uintptr_t)v;
+    if (!t)
+        return NULL;
+    return t->files;
+}
+
+struct signal_struct *memd_t_signal_fn(struct task_struct *t)
+ {
+    unsigned long v = 0;
+    if (t && memd_learned_ext.t_signal >= 0 &&
+        !memd_safe_read64((char *)t + memd_learned_ext.t_signal, &v))
+        return (struct signal_struct *)(uintptr_t)v;
+    if (!t)
+        return NULL;
+    return t->signal;
+}
+
+struct sighand_struct *memd_t_sighand_fn(struct task_struct *t)
+ {
+    unsigned long v = 0;
+    if (t && memd_learned_ext.t_sighand >= 0 &&
+        !memd_safe_read64((char *)t + memd_learned_ext.t_sighand, &v))
+        return (struct sighand_struct *)(uintptr_t)v;
+    if (!t)
+        return NULL;
+    return t->sighand;
+}
+
+struct task_struct *memd_t_real_parent_fn(struct task_struct *t)
+ {
+    unsigned long v = 0;
+    if (t && memd_learned_ext.t_real_parent >= 0 &&
+        !memd_safe_read64((char *)t + memd_learned_ext.t_real_parent, &v))
+        return (struct task_struct *)(uintptr_t)v;
+    if (!t)
+        return NULL;
+    return t->real_parent;
+}
+
+void *memd_t_stack_fn(struct task_struct *t)
+ {
+    unsigned long v = 0;
+    if (t && memd_learned_ext.t_stack >= 0 &&
+        !memd_safe_read64((char *)t + memd_learned_ext.t_stack, &v))
+        return (void *)(uintptr_t)v;
+    if (!t)
+        return NULL;
+    return t->stack;
+}
+
+struct vm_area_struct *memd_m_mmap_fn(struct mm_struct *mm)
+ {
+    unsigned long v = 0;
+    if (mm && memd_learned_ext.m_mmap >= 0 &&
+        !memd_safe_read64((char *)mm + memd_learned_ext.m_mmap, &v))
+        return (struct vm_area_struct *)(uintptr_t)v;
+    if (!mm)
+        return NULL;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+    return mm->mmap;
+#else
+    /* 6.1+: vma list removed (maple tree); nothing to fall back to. */
+    return NULL;
+#endif
+}
+
+struct path memd_f_path_fn(struct file *f)
+ {
+    unsigned long m = 0, d = 0;
+    struct path p;
+    if (f && memd_learned_ext.f_fpath >= 0 &&
+        !memd_safe_read64((char *)f + memd_learned_ext.f_fpath, &m) &&
+        !memd_safe_read64((char *)f + memd_learned_ext.f_fpath + 8, &d)) {
+        p.mnt = (struct vfsmount *)(uintptr_t)m;
+        p.dentry = (struct dentry *)(uintptr_t)d;
+        return p;
+    }
+    if (!f) {
+        p.mnt = NULL;
+        p.dentry = NULL;
+        return p;
+    }
+    return f->f_path;
+}
+
+void *memd_f_private_fn(struct file *f)
+ {
+    unsigned long v = 0;
+    if (f && memd_learned_ext.f_private >= 0 &&
+        !memd_safe_read64((char *)f + memd_learned_ext.f_private, &v))
+        return (void *)(uintptr_t)v;
+    if (!f)
+        return NULL;
+    return f->private_data;
 }
 
 /* Extended offset learning for more universality */
@@ -1086,7 +1235,8 @@ static void memd_learn_mm_extended(void)
         int found = -1, n = 0, i;
         for (i = 0; i + 8 <= 512; i += 8) {
             u64 v = 0;
-            memcpy(&v, (char *)mm + i, 8);
+            if (memd_safe_read64((char *)mm + i, &v))
+                continue;
             if (v == (u64)mmap) {
                 if (!n)
                     found = i;
@@ -1198,11 +1348,23 @@ int memd_learn_extended(void)
 void memd_learn_file_private(struct file *f, void *known_private)
  {
     int found = -1, n = 0;
-    if (!f || !known_private || memd_learned_ext.f_private >= 0)
+    bool skip = false;
+    if (!f || !known_private)
+        return;
+    spin_lock(&memd_learn_lock);
+    if (memd_learned_ext.f_private >= 0)
+        skip = true;
+    spin_unlock(&memd_learn_lock);
+    if (skip)
         return;
     n = memd_scan_for_ptr(f, 512, known_private, &found);
     if (n == 1) {
-        memd_learned_ext.f_private = found;
+        /* First win sticks: a concurrent bind confirming the same
+         * per-boot constant must not rewrite it (publish-once). */
+        spin_lock(&memd_learn_lock);
+        if (memd_learned_ext.f_private < 0)
+            memd_learned_ext.f_private = found;
+        spin_unlock(&memd_learn_lock);
         memd_info("learn: file private_data at +%d\n", found);
     } else {
         memd_err("learn: file private_data ambiguous (%d)\n", n);
@@ -1213,10 +1375,15 @@ void memd_f_private_set(struct file *f, void *v)
  {
     if (!f)
         return;
-    if (memd_learned_ext.f_private >= 0)
-        *(void **)((char *)f + memd_learned_ext.f_private) = v;
-    else
-        f->private_data = v;
+    if (memd_learned_ext.f_private >= 0) {
+        /* Guarded: a wrong learned slot must fault softly, never
+         * corrupt. Falls back to compiled on a guard fault. */
+        if (!memd_safe_write64((char *)f + memd_learned_ext.f_private,
+                               (unsigned long)v))
+            return;
+        memd_err("learn: f_private guarded write fault, compiled fallback\n");
+    }
+    f->private_data = v;
 }
 
 /* thread_struct is embedded in task_struct (no pointer to scan for):
@@ -1369,18 +1536,20 @@ static int memd_verify_all_offsets(void)
 
 int memd_learn_comprehensive(void)
  {
-    int ret = 0;
     int errors = 0;
+    bool skip = false;
     spin_lock(&memd_learn_lock);
-    if (memd_learn_initialized) {
-        spin_unlock(&memd_learn_lock);
-        return 0;
-    }
+    if (memd_learn_initialized || memd_learn_started)
+        skip = true;
+    else
+        memd_learn_started = true;
     spin_unlock(&memd_learn_lock);
+    if (skip)
+        return 0;
 
-    ret = memd_learn();
-    if (ret)
-        return ret;
+    /* Every learner is fail-soft per field (loud, -1) and never aborts
+     * the pass: an early failure must not starve later learners. */
+    memd_learn();
 
     memd_learn_extended();
 

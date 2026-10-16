@@ -115,6 +115,8 @@ static struct {
  * 5.10..6.12 client layout family; assert pins the assumption). */
 _Static_assert(sizeof(struct drm_client) <= 512, "drm client fits blob");
 
+static void memd_drm_close(void);
+
 static int memd_drm_match(struct device *dev, const void *data)
  {
     const char *n;
@@ -145,6 +147,11 @@ static int memd_drm_open(__u32 w, __u32 h)
     g_drm.seen = 0;
     if (!w || !h)
         return -EINVAL;
+    /* Belt-and-braces like simplefb/RAM: a re-open without close must
+     * not strand the client/fb (core always closes first; the auto
+     * loop depends on each failed open owning its own cleanup). */
+    if (g_drm.client || g_drm.fb)
+        memd_drm_close();
 
     cls_addr = memd_kallsyms("drm_class");
     if (!cls_addr)

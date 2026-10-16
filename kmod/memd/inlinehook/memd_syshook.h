@@ -19,6 +19,15 @@
  * failed uninstall the bookkeeping (and hook_active) is retained, so
  * a later uninstall retries with the saved orig pointers instead of
  * leaking a still-hooked table.
+ *
+ * Owner-modification policy: uninstall restores the saved orig only
+ * when the live slot still points at our replacement (or already
+ * equals the saved orig). If the owner repointed the slot after
+ * install, uninstall refuses with -EBUSY and keeps the bookkeeping:
+ * restoring the stale saved pointer would clobber the owner's live
+ * entry, while adopting the modified value would republish a pointer
+ * we did not author (and cannot vouch for). Same rule at install:
+ * the slot must still hold the snapshotted orig, else -EBUSY.
  */
 int memd_hide_install(void);
 int memd_hide_uninstall(void);

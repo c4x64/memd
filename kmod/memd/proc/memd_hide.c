@@ -163,6 +163,7 @@ int memd_hide_add_ns(pid_t pid, struct pid_namespace *ns)
     struct memd_hide_entry *entry;
     struct memd_hide_ns_entry *ns_entry;
     struct memd_hide_ns_entry *found;
+    struct pid *p;
     unsigned long flags;
     unsigned int hash;
     unsigned int ns_hash;
@@ -201,7 +202,20 @@ int memd_hide_add_ns(pid_t pid, struct pid_namespace *ns)
 
     entry->pid = pid;
     entry->ns = get_pid_ns(ns);
-    entry->pid_struct = find_get_pid(pid);
+    /* Pin the struct pid for (pid, ns), not the caller's view:
+     * find_get_pid resolves in the caller's namespace, so an entry for
+     * a foreign ns would pin a live same-numbered pid elsewhere while
+     * its own (pid, ns) is dead. Reap keys off the pin, so that entry
+     * could never be reaped (stale-yet-pinned): it would hide a future
+     * reuse and leak the slot. find_pid_ns is RCU + atomic get only,
+     * so it is safe under this spinlock. A NULL pin (nr absent in ns)
+     * stays reap-eligible, never permanently lost. */
+    rcu_read_lock();
+    p = find_pid_ns(pid, ns);
+    if (p)
+        get_pid(p);
+    rcu_read_unlock();
+    entry->pid_struct = p;
     entry->flags = 0;
 
     hash = hide_hash_fn(pid, ns);

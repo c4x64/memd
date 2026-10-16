@@ -209,9 +209,15 @@ static int vermagic_from_ko(const char *path, char *out, int cap)
 
 static int target_vermagic(char *out, int cap)
  {
+    /* Mirror of run.sh section 3 (same first pick): on-device reference
+     * .ko first, uname fallback with GKI-standard extras. Dir list is
+     * kept in lockstep with run.sh; run.sh additionally globs
+     * /vendor/lib/modules/*/extra (one-level vendor subdir), which this
+     * flat scan does not walk — a reference visible only there resolves
+     * via run.sh but falls back to uname here. */
     static const char *dirs[] = {
-        "/vendor/lib/modules", "/vendor_dlkm/lib/modules",
-        "/system/lib/modules", NULL
+        "/boot/bstmods", "/vendor/lib/modules", "/vendor_dlkm/lib/modules",
+        "/odm_dlkm/lib/modules", "/system/lib/modules", NULL
     };
     int i;
     for (i = 0; dirs[i]; i++) {

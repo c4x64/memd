@@ -12,6 +12,21 @@
  *   --dry-run    Print what would be done without loading
  *   --verbose    Show detailed information
  *   --no-verify  Skip post-load verification
+ *
+ * Exit/status contract (run.sh consumes stdout, not the exit code):
+ *   exit 0: loaded (stdout is exactly "rc=0", bare or --no-verify);
+ *     --dry-run loads nothing (stdout "rc=0 (dry run)"); --help
+ *     prints help. run.sh matches stdout exactly against "rc=0", so
+ *     only the bare/--no-verify non-verbose form is run.sh-consumed:
+ *     never pass --verbose/--dry-run under run.sh.
+ *   exit 1: runtime failure, no load (stdout "rc=-<errno> <msg>"):
+ *     open failed, finit_module errno (EKEYREJECTED = signature
+ *     enforcement active, NO-GO), or post-load /proc/modules verify
+ *     miss. Name for verify is basename minus ".ko"; extensionless
+ *     temp copies (rwbridge-run) can never verify — hence run.sh
+ *     always passes --no-verify and verifies itself.
+ *   exit 2: CLI usage error, no syscall attempted (multiple module
+ *     paths, unknown option, missing module path).
  */
 #include <errno.h>
 #include <fcntl.h>

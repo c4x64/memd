@@ -47,6 +47,17 @@ static int memd_sfb_open(__u32 w, __u32 h)
     if (!w || !h)
         return -ENODEV;
     g_sfb.last_errno = -ENODEV;
+    /* Drop a stale mapping first (re-open without close must not leak;
+     * core always closes first, this is belt-and-braces like the RAM
+     * backend). */
+    if (g_sfb.base) {
+        memunmap(g_sfb.base);
+        g_sfb.base = NULL;
+        g_sfb.size = 0;
+        g_sfb.stride = 0;
+        g_sfb.w = 0;
+        g_sfb.h = 0;
+    }
     np = of_find_compatible_node(NULL, NULL, "simple-framebuffer");
     if (!np)
         return -ENODEV;

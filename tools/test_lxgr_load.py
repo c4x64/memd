@@ -476,6 +476,11 @@ class MemdHppTwoTuTests(unittest.TestCase):
         """memd.hpp must parse everywhere (syntax-only; runs on any host)."""
         compiler = self._compiler()
         if compiler is None:
+            # Same rule as tools/two_tu_gate.py: a missing compiler is a
+            # loud SKIP off-Linux but a FAIL on Linux, where the gate is
+            # expected to run (otherwise a broken builder hides as SKIP).
+            if sys.platform.startswith("linux"):
+                self.fail("on Linux but no C++ compiler found; gate cannot run")
             self.skipTest("no C++ compiler found; cannot syntax-check memd.hpp")
         with tempfile.TemporaryDirectory() as tmp:
             self._write_tus(tmp)
@@ -583,6 +588,15 @@ class HotswapCrashConsistencyTests(unittest.TestCase):
     survivor write happens after the loop, so a crash replays the full
     chain and already-unloaded handles come back as bounded -ENOENT
     corpses (MAX_PREV_HANDLES caps the chain), never silent leaks.
+
+    Two windows outside cmd_hotswap's own loop are pinned separately:
+    - kill -9 mid-UNINSTALL-loop (test_uninstall_midloop_crash_drains):
+      the survivor write also happens after the loop, so the crash leaves
+      the full pre-run record on disk and the retry replays the chain.
+    - kill -9 between install's record write and the staged-file unlink
+      (test_install_crash_between_record_and_unlink): the mapping is
+      already recorded, so the leftover staged file is just garbage the
+      next install overwrites via tmp+rename.
     """
 
     def setUp(self):
@@ -721,6 +735,109 @@ class HotswapCrashConsistencyTests(unittest.TestCase):
         self.assertEqual(state["prev_handles"], [self.old])
         self.assertLessEqual(len(state["prev_handles"]),
                              lxgr_load.MAX_PREV_HANDLES)
+
+    def test_uninstall_midloop_crash_drains(self):
+        """kill -9 mid-UNINSTALL-loop: no test covered this window before.
+
+        cmd_uninstall's survivor write also happens after the loop, so a
+        crash leaves the full pre-run record on disk (nothing resident is
+        ever unrecorded) and the retry replays the whole chain. The handle
+        the crashed run DID unload (OLD) comes back as a bounded -ENOENT
+        corpse on retry -- same double-dlclose semantics as the hotswap
+        mid-loop crash.
+
+        Pinned wart: unlike hotswap, uninstall mints no replacement
+        handle, so after the retry the on-record current handle (OLD) is
+        itself the corpse while nothing is resident. The next uninstall
+        reports -ENOENT again for the same corpse instead of converging
+        to 0 -- bounded (one entry, no leak: driver.resident is empty),
+        but nothing auto-drops it today."""
+        import argparse
+        import unittest.mock as mock
+
+        driver = _FakeDriver()
+        driver.resident = {self.old, self.p1}
+        self._seed({"id": "lxgr.demo", "version": "2",
+                    "handle": self.old, "prev_handles": [self.p1]})
+        calls = []
+
+        def crashing_unload(sock, pid, handle):
+            calls.append(handle)
+            if len(calls) == 2:
+                raise _SimCrash("kill -9 mid uninstall loop")
+            return driver.unload(handle)
+
+        with mock.patch.object(lxgr_load, "ioctl_unload",
+                               side_effect=crashing_unload), \
+             mock.patch.object(lxgr_load, "find_driver_family",
+                               return_value=_FakeSock()):
+            args = argparse.Namespace(id="lxgr.demo", root=self.root,
+                                      pid=self.pid)
+            with self.assertRaises(_SimCrash):
+                lxgr_load.cmd_uninstall(args)
+        # Crash left the pre-run record intact: OLD unloaded but still on
+        # disk, P1 never attempted -- both accounted for, no orphan.
+        recorded = _recorded_handles(
+            lxgr_load.read_state(self.root, "lxgr.demo", self.pid))
+        self.assertEqual(recorded, {self.old, self.p1})
+        self.assertEqual(set(driver.resident) - recorded, set())
+        # Clean retry replays the chain: OLD is already gone (-ENOENT
+        # corpse), P1 unloads cleanly. Nothing resident, nothing leaked.
+        with mock.patch.object(lxgr_load, "ioctl_unload",
+                               side_effect=lambda s, p, h: driver.unload(h)), \
+             mock.patch.object(lxgr_load, "find_driver_family",
+                               return_value=_FakeSock()):
+            args = argparse.Namespace(id="lxgr.demo", root=self.root,
+                                      pid=self.pid)
+            self.assertEqual(lxgr_load.cmd_uninstall(args), -errno.ENOENT)
+        self.assertEqual(driver.resident, set())
+        state = lxgr_load.read_state(self.root, "lxgr.demo", self.pid)
+        self.assertEqual(state["handle"], self.old)  # corpse, not resident
+        self.assertNotIn("prev_handles", state)
+
+    def test_install_crash_between_record_and_unlink(self):
+        """kill -9 after install's record write but before staged unlink.
+
+        Uncovered window: the new handle is already on disk (write_state
+        precedes unlink in cmd_install), so the crash orphans nothing --
+        it only leaves a stale staged payload.so behind. The next install
+        stages via tmp+rename (overwriting the leftover) and folds the
+        recorded handle into prev_handles, so the leftover is garbage,
+        not a leak, and the staged file converges to unlinked.
+        """
+        import unittest.mock as mock
+
+        driver = _FakeDriver()
+        with mock.patch.object(lxgr_load, "ioctl_load",
+                               side_effect=lambda *a: driver.load()), \
+             mock.patch.object(lxgr_load, "find_driver_family",
+                               return_value=_FakeSock()), \
+             mock.patch("os.unlink",
+                        side_effect=_SimCrash("kill -9 pre-unlink")):
+            with self.assertRaises(_SimCrash):
+                lxgr_load.cmd_install(self._args(unlink=True))
+        state = lxgr_load.read_state(self.root, "lxgr.demo", self.pid)
+        new_handle = state["handle"]
+        # Recorded before the crash: the resident handle is on disk.
+        self.assertEqual(set(driver.resident), {new_handle})
+        self.assertEqual(set(driver.resident) - _recorded_handles(state),
+                         set())
+        # The staged file survived the crash (unlink never ran).
+        staged = lxgr_load.staging_path(self.root, "lxgr.demo")
+        self.assertTrue(os.path.exists(staged))
+        # Next install recovers: leftover staged file is overwritten via
+        # tmp+rename, the recorded handle is retained pending unload.
+        with mock.patch.object(lxgr_load, "ioctl_load",
+                               side_effect=lambda *a: driver.load()), \
+             mock.patch.object(lxgr_load, "find_driver_family",
+                               return_value=_FakeSock()):
+            self.assertEqual(lxgr_load.cmd_install(self._args(unlink=True)),
+                             0)
+        state = lxgr_load.read_state(self.root, "lxgr.demo", self.pid)
+        self.assertEqual(state["prev_handles"], [new_handle])
+        self.assertEqual(set(driver.resident) - _recorded_handles(state),
+                         set())
+        self.assertFalse(os.path.exists(staged))
 
     def test_kill_during_replace_keeps_old_record(self):
         """write_state = tmp + fsync + rename: killing the rename leaves

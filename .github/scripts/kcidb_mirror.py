@@ -169,10 +169,14 @@ def collect_manifest(api_base, tree, want_unique, page_size, timeout, max_pages)
     records = []
     seen = set()
     offset = 0
+    raw_items = 0
+    pages = 0
     for _ in range(max_pages):
         items = fetch_page(api_base, tree, page_size, offset, timeout)
         if not items:
             break
+        pages += 1
+        raw_items += len(items)
         offset += len(items)
         for node in items:
             record = map_node(node)
@@ -196,11 +200,17 @@ def collect_manifest(api_base, tree, want_unique, page_size, timeout, max_pages)
             if len(records) >= want_unique:
                 break
         if len(records) >= want_unique or len(items) < page_size:
+            # A short (non-empty) page is the API's end-of-data: stop
+            # instead of paging on. A perpetually full-size stream ends
+            # at max_pages; either way this loop always terminates.
             break
     if len(records) < MIN_TARGETS:
         raise ValueError(
-            "mirror yielded %d unique targets; at least %d are required"
-            % (len(records), MIN_TARGETS)
+            "mirror yielded %d unique targets (%d raw items over %d "
+            "pages, offset %d; dedup drops repeats/ineligible nodes) "
+            "from %s tree %s; at least %d are required"
+            % (len(records), raw_items, pages, offset,
+               api_base, tree, MIN_TARGETS)
         )
     count = len(records)
     return {

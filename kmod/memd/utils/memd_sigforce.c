@@ -9,6 +9,7 @@
 #include <linux/errno.h>
 #include <linux/sched/task.h>
 #include <linux/completion.h>
+#include <linux/jiffies.h>
 #include <linux/wait.h>
 #include <linux/kthread.h>
 #include <linux/slab.h>
@@ -56,7 +57,7 @@ static int memd_sigforce_worker(void *data)
         }
 
         pending = list_first_entry(&sigforce_pending_list, struct sigforce_pending, list);
-        list_del(&pending->list);
+        list_del_init(&pending->list);
         atomic_dec(&sigforce_pending_count);
         mutex_unlock(&sigforce_pending_lock);
 
@@ -87,12 +88,28 @@ static int memd_sigforce_worker(void *data)
 int memd_sigforce_init(void)
  {
     struct task_struct *worker;
+    struct task_struct *stale;
     int err;
 
     mutex_lock(&sigforce_pending_lock);
     if (sigforce_worker_task || sigforce_initialized) {
+        /* A kthread has no mm (OOM skips it) and ignores signals, but
+         * an oops/panic path can still reap it. The zombie stays valid
+         * until kthread_stop, so this deref is safe while the pointer
+         * is non-NULL. Reap and recreate instead of wedging forever
+         * on a stale pointer (old code returned 0 without a worker). */
+        if (!sigforce_worker_task ||
+            (!(sigforce_worker_task->flags & PF_EXITING) &&
+             !sigforce_worker_task->exit_state)) {
+            mutex_unlock(&sigforce_pending_lock);
+            return 0;
+        }
+        stale = sigforce_worker_task;
+        sigforce_worker_task = NULL;
+        sigforce_initialized = false;
         mutex_unlock(&sigforce_pending_lock);
-        return 0;
+        kthread_stop(stale);
+        mutex_lock(&sigforce_pending_lock);
     }
     worker = kthread_run(memd_sigforce_worker, NULL, "memd_sigforce");
     if (IS_ERR(worker)) {
@@ -214,7 +231,9 @@ static int memd_sigforce_deliver_async(struct task_struct *task, int sig, int fo
  {
     struct sigforce_pending *pending;
     struct siginfo info;
+    unsigned long tmo;
     int ret;
+    int dead;
 
     if (!task || task->flags & PF_EXITING)
         return -ESRCH;
@@ -257,13 +276,60 @@ static int memd_sigforce_deliver_async(struct task_struct *task, int sig, int fo
         kfree(pending);
         return -ENODEV;
     }
+    /* Dead worker (see init): queueing would wait forever. The zombie
+     * stays valid until kthread_stop, so this deref is safe here. */
+    if ((sigforce_worker_task->flags & PF_EXITING) ||
+        sigforce_worker_task->exit_state) {
+        mutex_unlock(&sigforce_pending_lock);
+        put_task_struct(task);
+        kfree(pending);
+        return -ENODEV;
+    }
     list_add_tail(&pending->list, &sigforce_pending_list);
     atomic_inc(&sigforce_pending_count);
     mutex_unlock(&sigforce_pending_lock);
 
     wake_up(&sigforce_worker_wq);
 
-    wait_for_completion(&pending->done);
+    /* Unbounded wait_for_completion on a dead worker hangs unkillably.
+     * Bound it: reclaim the entry if it is still queued (the worker
+     * dequeues with list_del_init, so non-empty under the lock means
+     * it never picked this entry up). */
+    tmo = wait_for_completion_timeout(&pending->done,
+                                      msecs_to_jiffies(30000));
+    if (!tmo) {
+        mutex_lock(&sigforce_pending_lock);
+        if (!list_empty(&pending->list)) {
+            list_del_init(&pending->list);
+            atomic_dec(&sigforce_pending_count);
+            mutex_unlock(&sigforce_pending_lock);
+            put_task_struct(task);
+            kfree(pending);
+            return -ETIMEDOUT;
+        }
+        mutex_unlock(&sigforce_pending_lock);
+        /* Dequeued but uncompleted: the worker owns it and touches it
+         * only before complete, so one short grace wait is safe. If
+         * that also expires and the worker is observably dead, it can
+         * never complete: reclaim (dead stays dead, no future touch).
+         * A live worker will complete; keep waiting (freeing under a
+         * live owner would UAF its complete). */
+        tmo = wait_for_completion_timeout(&pending->done,
+                                          msecs_to_jiffies(5000));
+        if (!tmo) {
+            mutex_lock(&sigforce_pending_lock);
+            dead = !sigforce_worker_task ||
+                   (sigforce_worker_task->flags & PF_EXITING) ||
+                   sigforce_worker_task->exit_state;
+            mutex_unlock(&sigforce_pending_lock);
+            if (dead) {
+                put_task_struct(task);
+                kfree(pending);
+                return -ETIMEDOUT;
+            }
+            wait_for_completion(&pending->done);
+        }
+    }
     ret = pending->result;
     put_task_struct(task);
     kfree(pending);

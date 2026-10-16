@@ -18,8 +18,11 @@ Future CI use: run this script on a Linux builder instead of (or in
 addition to) the unittest; it needs only a C++ compiler and python3.
 
 Exit codes: 0 PASS (everything ran and passed), 1 FAIL (anything failed
-on a host where it should run), 2 SKIP (loud: non-Linux link+run, or no
-C++ compiler for the syntax check). SKIP never masquerades as PASS.
+on a host where it should run -- including a Linux host with no C++
+compiler, where the toolchain is expected to exist), 2 SKIP (loud:
+non-Linux link+run, or no C++ compiler on a non-Linux host for the
+syntax check). SKIP never masquerades as PASS, and a missing compiler
+on Linux never masquerades as SKIP.
 """
 
 import os
@@ -52,6 +55,15 @@ def _write_tus(tmp):
 def main():
     compiler = _compiler()
     if compiler is None:
+        # No compiler at all: SKIP on hosts where the toolchain is
+        # optional, FAIL on Linux where the gate is expected to run --
+        # otherwise a broken Linux builder reports SKIP (exit 2) and CI
+        # mistakes it for "not applicable".
+        if sys.platform.startswith("linux"):
+            print("2TU-GATE FAIL: no C++ compiler found on Linux; the "
+                  "syntax check and 2-TU link+run must run here "
+                  "(tried g++, c++, clang++)")
+            return FAIL
         print("2TU-GATE SKIP: no C++ compiler found; cannot syntax-check "
               "memd.hpp (host %s/%s)"
               % (sys.platform, platform.machine()))

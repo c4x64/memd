@@ -38,6 +38,12 @@ struct page_info {
 
 struct page_walk_context;
 
+/* Locking contract: all four walkers take the target mm's read lock
+ * (MM_READ_LOCK) across the descent. get_task_mm pins only the
+ * mm_struct, so without the lock a racing exit_mmap frees table pages
+ * mid-walk (oops); with it a dying mm yields clean -ENOENT instead.
+ * Callbacks run under the read lock and must not take the mmap write
+ * lock. Callers must hold no mmap lock on entry. */
 int memd_page_walk(struct mm_struct *mm, struct page_walk_context *ctx);
 int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_info *info);
 int memd_walk_page_range(struct mm_struct *mm, unsigned long start, unsigned long end,

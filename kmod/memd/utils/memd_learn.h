@@ -10,6 +10,10 @@ struct file;
 struct file_operations;
 struct dentry;
 struct cred;
+struct files_struct;
+struct signal_struct;
+struct sighand_struct;
+struct path;
 
 /* Runtime struct-offset learning (KPM-grade universality). Instead of
  * trusting build-header layouts on foreign kernels, derive critical
@@ -212,46 +216,37 @@ extern struct memd_learned_ext memd_learned_ext;
 /* Learn extended offsets for more universality */
 int memd_learn_extended(void);
 
-/* Readers for extended offsets */
-#define memd_t_files(t) \
-    (memd_learned_ext.t_files >= 0 ? \
-     *(struct files_struct **)((char *)(t) + memd_learned_ext.t_files) : \
-     (t)->files)
+/* Readers for extended offsets (defined in memd_learn.c). The learned
+ * slot load is extable-guarded: fault/unknown/NULL falls back to the
+ * compiled field (fail-soft) or NULL, never oopses. Plain functions
+ * (not inlines) so this header needs no include reordering. */
+struct files_struct *memd_t_files_fn(struct task_struct *t);
+struct signal_struct *memd_t_signal_fn(struct task_struct *t);
+struct sighand_struct *memd_t_sighand_fn(struct task_struct *t);
+struct task_struct *memd_t_real_parent_fn(struct task_struct *t);
+void *memd_t_stack_fn(struct task_struct *t);
+struct vm_area_struct *memd_m_mmap_fn(struct mm_struct *mm);
+struct path memd_f_path_fn(struct file *f);
+void *memd_f_private_fn(struct file *f);
 
-#define memd_t_signal(t) \
-    (memd_learned_ext.t_signal >= 0 ? \
-     *(struct signal_struct **)((char *)(t) + memd_learned_ext.t_signal) : \
-     (t)->signal)
+#define memd_t_files(t) (memd_t_files_fn(t))
 
-#define memd_t_sighand(t) \
-    (memd_learned_ext.t_sighand >= 0 ? \
-     *(struct sighand_struct **)((char *)(t) + memd_learned_ext.t_sighand) : \
-     (t)->sighand)
+#define memd_t_signal(t) (memd_t_signal_fn(t))
 
-#define memd_t_real_parent(t) \
-    (memd_learned_ext.t_real_parent >= 0 ? \
-     *(struct task_struct **)((char *)(t) + memd_learned_ext.t_real_parent) : \
-     (t)->real_parent)
+#define memd_t_sighand(t) (memd_t_sighand_fn(t))
 
-#define memd_t_stack(t) \
-    (memd_learned_ext.t_stack >= 0 ? \
-     *(void **)((char *)(t) + memd_learned_ext.t_stack) : \
-     (t)->stack)
+#define memd_t_real_parent(t) (memd_t_real_parent_fn(t))
 
-#define memd_f_path(f) \
-    (memd_learned_ext.f_fpath >= 0 ? \
-     *(struct path *)((char *)(f) + memd_learned_ext.f_fpath) : \
-     (f)->f_path)
+#define memd_t_stack(t) (memd_t_stack_fn(t))
+
+#define memd_f_path(f) (memd_f_path_fn(f))
 
 #define memd_f_op(f) \
     (memd_learned_ext.f_op >= 0 ? \
      *(struct file_operations **)((char *)(f) + memd_learned_ext.f_op) : \
      (f)->f_op)
 
-#define memd_f_private(f) \
-    (memd_learned_ext.f_private >= 0 ? \
-     *(void **)((char *)(f) + memd_learned_ext.f_private) : \
-     (f)->private_data)
+#define memd_f_private(f) (memd_f_private_fn(f))
 
 /* Writer twin of memd_f_private (release path NULL-ing). Real function
  * (not inline: struct file is incomplete in this header). */
@@ -282,10 +277,7 @@ void memd_learn_file_private(struct file *f, void *known_private);
      *(struct dentry **)((char *)(s) + memd_learned_ext.s_root) : \
      (s)->s_root)
 
-#define memd_m_mmap(mm) \
-    (memd_learned_ext.m_mmap >= 0 ? \
-     *(struct vm_area_struct **)((char *)(mm) + memd_learned_ext.m_mmap) : \
-     (mm)->mmap)
+#define memd_m_mmap(mm) (memd_m_mmap_fn(mm))
 
 #define memd_m_arg_lock(mm) \
     (memd_learned_ext.m_arg_lock >= 0 ? \

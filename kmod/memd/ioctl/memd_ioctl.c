@@ -955,6 +955,8 @@ int do_read_physical_memory_ioremap(struct socket* sock, void* arg) {
     pgprot_t prot;
     uintptr_t pa;
     void* mapped;
+    void* map_base;
+    unsigned long ioff;
     int ret;
 
     if (memd_copy_from_user(&cmd, arg, sizeof(cmd))) {
@@ -996,18 +998,15 @@ int do_read_physical_memory_ioremap(struct socket* sock, void* arg) {
     /* memd_ioremap_prot returns the page-base mapping; add the page
      * offset back so the copy hits the translated bytes, not up to
      * 4095B before them. The request must not cross the page. */
-    {
-    unsigned long ioff = pa & ~PAGE_MASK;
-    void *map_base;
+    ioff = pa & ~PAGE_MASK;
     if (ioff + cmd.size > PAGE_SIZE)
         return -EINVAL;
-    map_base = mapped = memd_ioremap_prot(pa & PAGE_MASK, PAGE_SIZE, prot);
-    if (!mapped) {
+    map_base = memd_ioremap_prot(pa & PAGE_MASK, PAGE_SIZE, prot);
+    if (!map_base) {
         memd_err("failed to ioremap physical address 0x%lx\n", pa);
         return -ENOMEM;
     }
     mapped = (void *)((char *)map_base + ioff);
-    }
 
     ret = memd_copy_to_user((void*)cmd.dst_va, mapped, cmd.size);
     iounmap(map_base);
@@ -1020,6 +1019,8 @@ int do_write_physical_memory_ioremap(struct socket* sock, void* arg) {
     pgprot_t prot;
     uintptr_t pa;
     void* mapped;
+    void* map_base;
+    unsigned long ioff;
     int ret;
 
     if (memd_copy_from_user(&cmd, arg, sizeof(cmd))) {
@@ -1058,18 +1059,15 @@ int do_write_physical_memory_ioremap(struct socket* sock, void* arg) {
         return -EFAULT;
     }
 
-    {
-    unsigned long ioff = pa & ~PAGE_MASK;
-    void *map_base;
+    ioff = pa & ~PAGE_MASK;
     if (ioff + cmd.size > PAGE_SIZE)
         return -EINVAL;
-    map_base = mapped = memd_ioremap_prot(pa & PAGE_MASK, PAGE_SIZE, prot);
-    if (!mapped) {
+    map_base = memd_ioremap_prot(pa & PAGE_MASK, PAGE_SIZE, prot);
+    if (!map_base) {
         memd_err("failed to ioremap physical address 0x%lx\n", pa);
         return -ENOMEM;
     }
     mapped = (void *)((char *)map_base + ioff);
-    }
 
     ret = memd_copy_from_user(mapped, (void*)cmd.dst_va, cmd.size);
     iounmap(map_base);

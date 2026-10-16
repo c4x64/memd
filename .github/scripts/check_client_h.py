@@ -131,6 +131,16 @@ def extract_consts(src, prefixes):
 # right model for both sides: arm64 Android and the client hosts agree on
 # every type used here (fixed-width ints, pid_t/uid_t 4B, pointers /
 # size_t / uintptr_t / unsigned long 8B, _Bool/bool/char 1B).
+#
+# Known parser limits (fail CLOSED, never silently wrong):
+# - __attribute__((...)) on a field or struct is stripped, EXCEPT packed:
+#   packed changes every offset, so a packed struct raises instead of
+#   laying out as unpacked. None of the product headers use either today.
+# - Bitfields (e.g. "uint32_t a:4") raise: the old code laid them out as
+#   separate 4-byte fields (8B with bogus "a:4" labels for a 4B word).
+#   Anonymous-union interiors are layout-compared only by size (members
+#   share offset 0, so per-field offsets are meaningless); renames inside
+#   them are still caught by the canon body gate above.
 
 _LP64_SCALARS = {
     "bool": (1, 1), "_Bool": (1, 1), "char": (1, 1),
@@ -143,6 +153,7 @@ _LP64_SCALARS = {
     "pid_t": (4, 4), "uid_t": (4, 4), "atomic_t": (4, 4), "float": (4, 4),
     "long": (8, 8), "unsigned long": (8, 8),
     "long long": (8, 8), "unsigned long long": (8, 8),
+    "unsigned": (4, 4), "signed": (4, 4),  # bare C spellings of (unsigned) int
     "int64_t": (8, 8), "uint64_t": (8, 8), "__u64": (8, 8), "u64": (8, 8),
     "size_t": (8, 8), "ssize_t": (8, 8),
     "uintptr_t": (8, 8), "intptr_t": (8, 8), "double": (8, 8),
@@ -179,9 +190,55 @@ def _split_top(text, sep):
     return parts
 
 
+def _strip_gcc_attributes(text):
+    """Remove __attribute__((...)) spans (balanced parens); fail on packed.
+
+    Aligned/ignored attributes do not move LP64 offsets, so stripping is
+    exact. packed DOES move every offset, and this engine has no packed
+    model, so refuse loudly instead of byte-comparing a lie."""
+    if "__attribute__" not in text and "__packed" not in text:
+        return text
+    if "__packed" in text:
+        raise ValueError("layout: __packed structs are not modelled")
+    out, i = [], 0
+    while i < len(text):
+        hit = text.find("__attribute__", i)
+        if hit < 0:
+            out.append(text[i:])
+            break
+        out.append(text[i:hit])
+        paren = text.find("(", hit)
+        if paren < 0:
+            raise ValueError("layout: malformed __attribute__")
+        depth, j = 0, paren
+        while j < len(text):
+            if text[j] == "(":
+                depth += 1
+            elif text[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if depth != 0:
+            raise ValueError("layout: unbalanced __attribute__ parens")
+        inner = text[paren:j + 1]
+        if "packed" in inner:
+            raise ValueError("layout: __attribute__((packed)) is not modelled")
+        i = j + 1
+    return "".join(out)
+
+
+def _reject_bitfield(declarator):
+    # A trailing ":N" is a bitfield width, not a label. Arrays use "[N]",
+    # so a top-level colon is unambiguous here.
+    if re.search(r":\s*\d+\s*$", declarator):
+        raise ValueError(
+            "layout: bitfields are not modelled (got %r)" % declarator[:40])
+
+
 def raw_structs(src):
     """name -> raw body (comments stripped, type spellings intact)."""
-    src = strip_comments(src)
+    src = _strip_gcc_attributes(strip_comments(src))
     found = {}
     for m in re.finditer(r"struct\s+(\w+)\s*\{", src):
         name, depth, j = m.group(1), 0, m.end() - 1
@@ -216,6 +273,7 @@ def _layout_body(body, resolved, depth=0):
     """(fields, size, align) for one struct/union body.
 
     fields: [(label, offset, size)]; resolved: name -> (size, align)."""
+    body = _strip_gcc_attributes(body)
     if depth > 8:
         raise ValueError("layout: nesting too deep")
     is_union = False
@@ -296,6 +354,7 @@ def _layout_body(body, resolved, depth=0):
                 else:
                     size, align = _scalar_layout(base)
             n = _array_len(declarator)
+            _reject_bitfield(re.sub(r"\s*\[.*", "", declarator))
             label = re.sub(r"\s*\[.*", "", declarator).strip()
             label = re.sub(r"\b__user\b", "", label).strip()
             label = re.sub(r"\s+", " ", label)
@@ -503,9 +562,63 @@ def synthetic_size_collision_selftest():
     return 0
 
 
+def layout_robustness_selftest():
+    """Prove the layout engine fails closed on C it cannot model.
+
+    - __attribute__((aligned(N))) fields lay out exactly as without it;
+    - bare "unsigned" lays out as a 4-byte int;
+    - bitfields and packed structs RAISE (the old code laid "a:4; b:28"
+      out as two 4-byte fields with bogus labels instead of one word).
+    Returns 0 on success, 1 otherwise. Run with:
+        python3 .github/scripts/check_client_h.py --self-test
+    """
+    failures = []
+    try:
+        plain = compute_layouts(
+            {"s": "uint32_t a; uint16_t b;"}, {"s"})["s"]
+        attr = compute_layouts(
+            {"s": "uint32_t a __attribute__((aligned(16))); uint16_t b;"},
+            {"s"})["s"]
+        if (plain[1], plain[0]) != (attr[1], attr[0]):
+            failures.append("aligned attribute moved the layout: %r vs %r"
+                            % (plain, attr))
+    except ValueError as error:
+        failures.append("aligned attribute raised: %s" % error)
+    try:
+        bare = compute_layouts({"s": "unsigned x;"}, {"s"})["s"]
+        if bare[1] != 4 or bare[0] != [("x", 0, 4)]:
+            failures.append("bare unsigned mislaid: %r" % (bare,))
+    except ValueError as error:
+        failures.append("bare unsigned raised: %s" % error)
+    for bad, why in [
+        ("uint32_t a:4; uint32_t b:28;", "bitfield"),
+        ("__u32 a __attribute__((packed));", "packed field"),
+    ]:
+        try:
+            compute_layouts({"s": bad}, {"s"})
+            failures.append("%s laid out silently (must raise)" % why)
+        except ValueError:
+            pass
+    try:
+        raw_structs("struct __attribute__((packed)) s { uint32_t a; };")
+        failures.append("packed struct parsed silently (must raise)")
+    except ValueError:
+        pass
+    if failures:
+        print("self-test FAIL (layout robustness):")
+        for failure in failures:
+            print("  - " + failure)
+        return 1
+    print("self-test PASS: attributes stripped, bare unsigned ok, "
+          "bitfield/packed raise")
+    return 0
+
+
 def main():
     if "--self-test" in sys.argv:
-        return synthetic_size_collision_selftest()
+        first = synthetic_size_collision_selftest()
+        second = layout_robustness_selftest()
+        return first or second
     errors = []
     ksrc = "\n".join(read(p) for p in KERN_FILES)
     csrc = read(CLIENT)

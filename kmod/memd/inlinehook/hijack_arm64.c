@@ -433,6 +433,24 @@ void memd_remove_inline_hook(void *target, void *orig)
          mutex_unlock(&g_install_lock);
          return;
      }
+     /* Dead/recycled target check: the first word must still be the
+      * branch install wrote (recomputed from the live entry, not from
+      * caller input). An unloaded owner fails the guarded read; pages
+      * recycled to a new owner fail the compare. Either way refuse and
+      * retain the entry: writing stale prologue bytes there would fault
+      * or corrupt the new owner. A later remove retries. */
+     {
+         long delta;
+         u32 expect;
+         u32 livew;
+         delta = (long)(uintptr_t)found->handler - (long)(uintptr_t)target;
+         expect = (u32)0x14000000UL | (u32)(((unsigned long)delta >> 2) & 0x03FFFFFFUL);
+         if (memd_target_read32(target, 0, &livew) || livew != expect) {
+             spin_unlock(&g_trampoline_lock);
+             mutex_unlock(&g_install_lock);
+             return;
+         }
+     }
      /* Unlink under the lock, then patch and free without holding it:
       * memd_destroy_trampoline takes the same lock, so calling it
       * inside list_for_each_entry_safe deadlocked. The entry stays

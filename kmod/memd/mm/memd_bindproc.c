@@ -325,8 +325,12 @@ static long bindproc_compat_ioctl(struct file* f, unsigned int cmd, unsigned lon
      (void)f;
      (void)cmd;
      (void)arg;
-     /* 32-bit bp_*_cmd layout differs (pointers/size_t); the native
-      * handler would misparse it. Fail closed. */
+     /* 32-bit bp_*_cmd layout differs (pointers/size_t narrow to 4
+      * bytes) and the _IOWR-encoded cmd values differ too, so the
+      * native handler would misparse them into wrong addresses/sizes
+      * over physical memory. No compat translator is provided (it
+      * would need compat_uptr_t plumbing); fail closed with the
+      * conventional -ENOTTY. */
      return -ENOTTY;
 }
 #endif

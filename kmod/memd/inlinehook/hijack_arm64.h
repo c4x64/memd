@@ -44,6 +44,13 @@ struct memd_trampoline;
  *   be used again (a second remove is a silent no-op, never a UAF).
  *   Installing with orig == NULL is permanent: the entry stays listed
  *   but no handle exists to remove it, so prefer passing orig.
+ * - Dead target (owning module unloaded before remove, or pages
+ *   recycled to a new owner): remove refuses without writing. The
+ *   live first word must still equal the installed branch (recomputed
+ *   from the entry); an unmapped target fails the guarded read and a
+ *   recycled one fails the compare, so stale prologue bytes can never
+ *   corrupt the new owner. The entry is retained for a later retry.
+ *   Callers must still prefer removing before the owner unloads.
  * - Every successful create pairs with exactly one free: install
  *   failure destroys the trampoline; remove frees only after the
  *   restore write succeeds (on restore failure the entry is re-linked

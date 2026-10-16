@@ -48,7 +48,7 @@ static struct unsafe_region_area *region_find(uintptr_t addr)
         struct unsafe_region_area *area = rb_entry(node, struct unsafe_region_area, rb_node);
         if (addr < area->addr)
             node = node->rb_left;
-        else if (addr >= area->addr + (area->nums_page << PAGE_SHIFT))
+        else if (addr >= area->addr + ((uintptr_t)area->nums_page << PAGE_SHIFT))
             node = node->rb_right;
         else
             return area;
@@ -59,11 +59,14 @@ static struct unsafe_region_area *region_find(uintptr_t addr)
 static bool region_overlaps(struct unsafe_region_area *new_area)
  {
     struct rb_node *node = g_region_tree->root.rb_node;
-    uintptr_t new_end = new_area->addr + (new_area->nums_page << PAGE_SHIFT);
+    /* Cast before shift: nums_page is u32 and the max span (1M pages)
+     * overflows 32 bits; uncast shifting wraps to 0 and defeats the
+     * overlap test (region_find already casts). */
+    uintptr_t new_end = new_area->addr + ((uintptr_t)new_area->nums_page << PAGE_SHIFT);
     while (node) {
         struct unsafe_region_area *area = rb_entry(node, struct unsafe_region_area, rb_node);
-        uintptr_t area_end = area->addr + (area->nums_page << PAGE_SHIFT);
-        if (new_area->addr < area_end && new_area->addr + (new_area->nums_page << PAGE_SHIFT) > area->addr)
+        uintptr_t area_end = area->addr + ((uintptr_t)area->nums_page << PAGE_SHIFT);
+        if (new_area->addr < area_end && new_end > area->addr)
             return true;
         if (new_area->addr < area->addr)
             node = node->rb_left;

@@ -262,8 +262,11 @@ int memd_copy_from_user_iovec(void *dst, const struct iovec *iov,
          * value and dodge the clamp, copying gigabytes. */
         if (seg_len > len - total_copied)
             seg_len = len - total_copied;
+        /* Skip empty segments: breaking here would return -EFAULT even
+         * when a later segment could satisfy the request. Clamped zero
+         * at total_copied == len just walks out and returns success. */
         if (seg_len == 0)
-            break;
+            continue;
 
         remaining = memd_copy_from_user(kdst, iov[i].iov_base, seg_len);
         copied = seg_len - remaining;
@@ -317,8 +320,9 @@ int memd_copy_to_user_iovec(void *dst, const struct iovec *iov,
         /* See above: never add before comparing. */
         if (seg_len > len - total_copied)
             seg_len = len - total_copied;
+        /* Same skip-empty rule as the from-user path. */
         if (seg_len == 0)
-            break;
+            continue;
 
         remaining = memd_copy_to_user((void *)iov[i].iov_base, kdst, seg_len);
         copied = seg_len - remaining;

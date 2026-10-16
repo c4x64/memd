@@ -234,10 +234,17 @@ void traverse_page_tables(struct mm_struct* mm, struct page_walk_stats* stats) {
         stats->pud_huge_count = 0;
     }
 
-    /* no mmap_lock: universal image (offset varies); mm pinned + fail-closed walk */
+    /* Hold the MM read lock across the descent: get_task_mm (caller)
+     * pins only the mm_struct; exit_mmap can still tear down tables
+     * underneath us. The lock serializes against that teardown, so a
+     * dying mm yields empty tables (clean -ENOENT paths) instead of
+     * a use-after-free oops. Macro is generation-proof (mmap_lock on
+     * 5.8+, mmap_sem below); no mm layout offset is needed. */
 
+    MM_READ_LOCK(mm);
     pgd = (pgd_t *)memd_valid_pgd(mm);
     if (!pgd) {
+        MM_READ_UNLOCK(mm);
         return;
     }
 
@@ -254,7 +261,9 @@ void traverse_page_tables(struct mm_struct* mm, struct page_walk_stats* stats) {
 
     print_merged_region(&region_start, &region_end);
 
-    /* no mmap_lock: universal image (offset varies); mm pinned + fail-closed walk */
+    /* Paired with the MM_READ_LOCK above: the walk ran under the read
+     * lock so exit_mmap could not free tables mid-descent. */
+    MM_READ_UNLOCK(mm);
 }
 
 static int walk_pte_level_ctx(pmd_t *pmd, unsigned long addr, unsigned long end,
@@ -516,6 +525,7 @@ int memd_page_walk(struct mm_struct *mm, struct page_walk_context *ctx)
   {
      unsigned long start;
      unsigned long end;
+     int ret;
 
      if (!mm || !ctx)
          return -EINVAL;
@@ -535,7 +545,16 @@ int memd_page_walk(struct mm_struct *mm, struct page_walk_context *ctx)
      start = 0;
      end = ctx->include_kernel ? ULONG_MAX : TASK_SIZE_64;
 
-     return walk_pgd_level_ctx(mm, start, end, ctx);
+     /* Serialize against exit_mmap: get_task_mm pins only the
+      * mm_struct, not its tables. Without the read lock a racing
+      * teardown frees table pages mid-descent (oops); with it the
+      * walk either completes first or blocks until teardown ends and
+      * then fails closed on empty tables. Callbacks run under this
+      * lock: they must not take the mmap write lock. */
+     MM_READ_LOCK(mm);
+     ret = walk_pgd_level_ctx(mm, start, end, ctx);
+     MM_READ_UNLOCK(mm);
+     return ret;
  }
 
 int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_info *info)
@@ -546,6 +565,7 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
      p4d_t *p4d;
      pgd_t *pgd;
      pte_t pte;
+     int ret;
 
      if (!mm || !info)
          return -EINVAL;
@@ -553,46 +573,65 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
      info->present = false;
      info->swapped = false;
 
+     /* Read lock across the whole descent (same reason as in
+      * memd_page_walk): without it a racing exit_mmap frees tables
+      * under these direct walks. */
+     MM_READ_LOCK(mm);
+
      /* Runtime-learned pgd base (verified); fail closed. The lower
       * levels are indexed from live table contents, not structs. */
      pgd = (pgd_t *)memd_valid_pgd(mm);
-     if (!pgd)
-         return -ENOENT;
+     if (!pgd) {
+         ret = -ENOENT;
+         goto out;
+     }
      pgd = pgd + pgd_index(addr);
-     if (pgd_none(*pgd) || pgd_bad(*pgd))
-         return -ENOENT;
+     if (pgd_none(*pgd) || pgd_bad(*pgd)) {
+         ret = -ENOENT;
+         goto out;
+     }
 
     p4d = p4d_offset(pgd, addr);
-    if (p4d_none(*p4d) || p4d_bad(*p4d))
-        return -ENOENT;
+    if (p4d_none(*p4d) || p4d_bad(*p4d)) {
+        ret = -ENOENT;
+        goto out;
+    }
 
     pud = pud_offset(p4d, addr);
-    if (pud_none(*pud) || pud_bad(*pud))
-        return -ENOENT;
+    if (pud_none(*pud) || pud_bad(*pud)) {
+        ret = -ENOENT;
+        goto out;
+    }
 
      if (pud_huge(*pud)) {
          info->page_size = PUD_SIZE;
          info->pfn = pud_pfn(*pud);
          info->present = true;
          info->huge = true;
-         return 0;
+         ret = 0;
+         goto out;
      }
 
      pmd = pmd_offset(pud, addr);
-    if (pmd_none(*pmd) || pmd_bad(*pmd))
-        return -ENOENT;
+    if (pmd_none(*pmd) || pmd_bad(*pmd)) {
+        ret = -ENOENT;
+        goto out;
+    }
 
     if (pmd_huge(*pmd)) {
         info->page_size = PMD_SIZE;
         info->pfn = pmd_pfn(*pmd);
         info->present = true;
         info->huge = true;
-        return 0;
+        ret = 0;
+        goto out;
     }
 
      ptep = pte_offset_kernel(pmd, addr);
-     if (!ptep)
-         return -ENOENT;
+     if (!ptep) {
+         ret = -ENOENT;
+         goto out;
+     }
 
      pte = *ptep;
      pte_unmap(ptep);
@@ -602,7 +641,8 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
             info->swap_offset = memd_pte_swp_offset(pte);
             info->swap_type = memd_pte_swp_type(pte);
         }
-        return -ENOENT;
+        ret = -ENOENT;
+        goto out;
     }
 
     info->page_size = PAGE_SIZE;
@@ -616,7 +656,11 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
     info->user = memd_pte_user(pte);
     info->huge = false;
 
-    return 0;
+    ret = 0;
+
+ out:
+    MM_READ_UNLOCK(mm);
+    return ret;
 }
 
 int memd_walk_page_range(struct mm_struct *mm, unsigned long start, unsigned long end,
@@ -633,6 +677,7 @@ int memd_walk_page_range(struct mm_struct *mm, unsigned long start, unsigned lon
      };
      unsigned long aligned_start;
      unsigned long aligned_end;
+     int ret;
 
      if (!mm || !callback || start >= end)
          return -EINVAL;
@@ -650,7 +695,12 @@ int memd_walk_page_range(struct mm_struct *mm, unsigned long start, unsigned lon
          return -EINVAL;
 
      /* Honor the caller's range (the old code ignored start/end and
-      * always walked the whole address space). */
-     return walk_pgd_level_ctx(mm, aligned_start, aligned_end, &ctx);
+      * always walked the whole address space). Same exit_mmap
+      * serialization as memd_page_walk; the callback runs under the
+      * read lock and must not take the mmap write lock. */
+     MM_READ_LOCK(mm);
+     ret = walk_pgd_level_ctx(mm, aligned_start, aligned_end, &ctx);
+     MM_READ_UNLOCK(mm);
+     return ret;
  }
 /* kmod/memd/mm/memd_page_walk.c[∂] */

@@ -242,6 +242,13 @@ static int memd_vsync_wait_internal(int64_t timeout_ns)
 
     now = memd_get_time_ns();
     mutex_lock(&g_core_mu);
+    /* Teardown during the sleep must not poison the next session:
+     * a waiter woken by uninstall (or racing a reinstall) leaves
+     * last_flip/next/frame_count untouched and fails closed. */
+    if (!g_core.be) {
+        mutex_unlock(&g_core_mu);
+        return -ENODEV;
+    }
     g_core.last_flip_ns = now;
     if (g_core.vsync.frame_interval_ns <= 0)
         g_core.vsync.frame_interval_ns = interval;
@@ -579,6 +586,9 @@ int memd_core_uninstall(void)
     }
     memset(g_core.layers, 0, sizeof(g_core.layers));
     g_core.layer_count = 0;
+    /* Drop a pending gamma re-target so a bare uninstall leaves no
+     * stale dirty flag (install re-arms it from identity anyway). */
+    g_core.gamma_dirty = false;
     if (g_vsync_wq_ok)
         wake_up_all(&g_core.vsync.wq);
     mutex_unlock(&g_core_mu);
@@ -629,6 +639,11 @@ int memd_core_frame(const struct memd_disp_op *ops, __u32 count)
     __u32 *tmp;
     int rc = 0;
 
+    /* No-op frame first (matches the ioctl count==0 short-circuit):
+     * touch no state, flip nothing, advance no vsync — even with
+     * ops==NULL, nothing is dereferenced. */
+    if (count == 0)
+        return 0;
     if (!ops)
         return -EINVAL;
     if (count > MEMD_DISP_MAX_OPS)

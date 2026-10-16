@@ -31,6 +31,19 @@
  * before the final SIGCONT, so no payload bytes linger in target stack
  * memory (readable via /proc/pid/mem or core dumps).
  *
+ * Concurrency: inject/unload serialize on one global mutex (interruptible
+ * wait). Same-target inject-vs-unload is sequential (unload sees the
+ * inject's completed state); different-target injects queue for up to the
+ * ~35s worst-case hold — bounded, admin-only, abortable with -ERESTARTSYS.
+ * Only one thread per target is hijacked; siblings group-stop and resume
+ * untouched, so single-thread selection is sound for multithreaded apps.
+ *
+ * Timeout: a call (dlopen/entry/dlclose) that never sets its done flag
+ * is re-STOPped and register-restored, returning -ETIMEDOUT with the
+ * target alive (an infinite-loop entry does NOT kill); SIGKILL happens
+ * only when recapture/restore itself fails. A timed-out entry leaves the
+ * dlopen handle installed for a later unload.
+ *
  * The .so path must be absolute and visible in the TARGET's mount
  * namespace (/data/local/tmp paths work everywhere). The entry lookup
  * matches the library by BASENAME, so it must be unique in the target.
