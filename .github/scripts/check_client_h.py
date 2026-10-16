@@ -125,6 +125,288 @@ def extract_consts(src, prefixes):
     return consts
 
 
+# ---- LP64 byte-layout cross-check: exact offsets/sizes, not eyeballing ----
+# Every command struct is laid out here in Python under LP64 rules and the
+# kernel and client.h results are byte-compared field by field. LP64 is the
+# right model for both sides: arm64 Android and the client hosts agree on
+# every type used here (fixed-width ints, pid_t/uid_t 4B, pointers /
+# size_t / uintptr_t / unsigned long 8B, _Bool/bool/char 1B).
+
+_LP64_SCALARS = {
+    "bool": (1, 1), "_Bool": (1, 1), "char": (1, 1),
+    "signed char": (1, 1), "unsigned char": (1, 1),
+    "int8_t": (1, 1), "uint8_t": (1, 1), "__u8": (1, 1), "u8": (1, 1),
+    "int16_t": (2, 2), "uint16_t": (2, 2), "__u16": (2, 2), "u16": (2, 2),
+    "short": (2, 2), "unsigned short": (2, 2),
+    "int": (4, 4), "unsigned int": (4, 4),
+    "int32_t": (4, 4), "uint32_t": (4, 4), "__u32": (4, 4), "u32": (4, 4),
+    "pid_t": (4, 4), "uid_t": (4, 4), "atomic_t": (4, 4), "float": (4, 4),
+    "long": (8, 8), "unsigned long": (8, 8),
+    "long long": (8, 8), "unsigned long long": (8, 8),
+    "int64_t": (8, 8), "uint64_t": (8, 8), "__u64": (8, 8), "u64": (8, 8),
+    "size_t": (8, 8), "ssize_t": (8, 8),
+    "uintptr_t": (8, 8), "intptr_t": (8, 8), "double": (8, 8),
+}
+
+# Golden sizes pin the layout engine itself: if the parser mis-modelled
+# LP64, both sides could agree wrongly. 352/24 mirror tools/lxgr_load.py
+# LOADSO_FMT/UNLOAD_FMT; 32 is static_asserted in memd.hpp.
+_GOLDEN_SIZES = {
+    "memd_loadso_cmd": 352,
+    "memd_loadso_unload_cmd": 24,
+    "memd_bootstrap_cmd": 32,
+}
+
+
+def _align_up(n, a):
+    return (n + a - 1) // a * a
+
+
+def _split_top(text, sep):
+    """Split on sep at brace/paren/bracket depth 0."""
+    parts, depth, cur = [], 0, ""
+    for ch in text:
+        if ch in "{[(":
+            depth += 1
+        elif ch in "}])":
+            depth -= 1
+        if ch == sep and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    return parts
+
+
+def raw_structs(src):
+    """name -> raw body (comments stripped, type spellings intact)."""
+    src = strip_comments(src)
+    found = {}
+    for m in re.finditer(r"struct\s+(\w+)\s*\{", src):
+        name, depth, j = m.group(1), 0, m.end() - 1
+        for k in range(j, len(src)):
+            if src[k] == "{":
+                depth += 1
+            elif src[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    found[name] = src[m.end():k]
+                    break
+    return found
+
+
+def _scalar_layout(base):
+    base = re.sub(r"\b__user\b", "", base)
+    base = re.sub(r"\b(const|volatile)\b", "", base)
+    base = re.sub(r"\bsigned\s+char\b", "char", base)
+    base = re.sub(r"\s+", " ", base).strip()
+    try:
+        return _LP64_SCALARS[base]
+    except KeyError:
+        raise ValueError("layout: unknown scalar type %r" % base)
+
+
+def _array_len(declarator):
+    m = re.search(r"\[(\d+)\]\s*$", declarator)
+    return int(m.group(1)) if m else 1
+
+
+def _layout_body(body, resolved, depth=0):
+    """(fields, size, align) for one struct/union body.
+
+    fields: [(label, offset, size)]; resolved: name -> (size, align)."""
+    if depth > 8:
+        raise ValueError("layout: nesting too deep")
+    is_union = False
+    members = []  # (size, align, label)
+    for decl in _split_top(body, ";"):
+        decl = decl.strip()
+        if not decl:
+            continue
+        if "{" in decl:
+            m = re.match(r"(struct|union)\s*(\w+)?\s*\{(.*)\}\s*(.*)$",
+                         decl, re.S)
+            if not m:
+                raise ValueError("layout: cannot parse nested %r" % decl[:60])
+            kind, inner, rest = m.group(1), m.group(3), m.group(4).strip()
+            sub_fields, sub_size, sub_align = _layout_body(
+                inner, resolved, depth + 1)
+            if kind == "union":
+                # Union: every member starts at 0; size is the largest
+                # member, align the strictest member.
+                align = sub_align
+                size = 0
+                for _, _, sz in sub_fields:
+                    size = max(size, sz)
+            else:
+                size, align = sub_size, sub_align
+            label = rest if rest else "anon-%s" % kind
+            if rest:
+                n = _array_len(rest)
+                label = re.sub(r"\s*\[.*", "", rest).strip() or label
+                size *= n
+            members.append((size, align, label or "anon"))
+            continue
+        # Function pointer, optionally __user-annotated: int (*__user fn)(void *)
+        # -- always a pointer. (__user is an address-space annotation, not
+        # part of the name; the canon gate strips it the same way.)
+        m = re.search(r"\(\*\s*(?:__user\s+)?(\w+)\s*\)", decl)
+        if m:
+            members.append((8, 8, m.group(1)))
+            continue
+        parts = _split_top(decl, ",")
+        base = None
+        for i, part in enumerate(parts):
+            part = part.strip()
+            if i == 0:
+                if "*" in part:
+                    base, _, declarator = part.rpartition("*")
+                    declarator = declarator.strip()
+                    size, align = 8, 8
+                else:
+                    tokens = part.rsplit(None, 1)
+                    if len(tokens) != 2:
+                        raise ValueError(
+                            "layout: cannot parse decl %r" % part[:60])
+                    base, declarator = tokens
+                    if "*" in declarator:
+                        size, align = 8, 8
+                        declarator = declarator.replace("*", "").strip()
+                    elif base.startswith("struct "):
+                        sname = base.split(None, 1)[1]
+                        if sname not in resolved:
+                            raise ValueError(
+                                "layout: unresolved struct %s" % sname)
+                        size, align = resolved[sname]
+                    else:
+                        size, align = _scalar_layout(base)
+                base = base.strip()
+            else:
+                declarator = part
+                if "*" in declarator:
+                    size, align = 8, 8
+                    declarator = declarator.replace("*", "").strip()
+                elif base.startswith("struct "):
+                    sname = base.split(None, 1)[1]
+                    if sname not in resolved:
+                        raise ValueError(
+                            "layout: unresolved struct %s" % sname)
+                    size, align = resolved[sname]
+                else:
+                    size, align = _scalar_layout(base)
+            n = _array_len(declarator)
+            label = re.sub(r"\s*\[.*", "", declarator).strip()
+            label = re.sub(r"\b__user\b", "", label).strip()
+            label = re.sub(r"\s+", " ", label)
+            members.append((size * n, align, label))
+    # Lay out sequentially (struct semantics); unions handled by caller.
+    fields, offset, max_align = [], 0, 1
+    for size, align, label in members:
+        offset = _align_up(offset, align)
+        fields.append((label, offset, size))
+        offset += size
+        max_align = max(max_align, align)
+    return fields, _align_up(offset, max_align), max_align
+
+
+def compute_layouts(raw, wanted):
+    """raw name->body to name -> (fields, size, align); dependency-ordered.
+
+    Only `wanted` structs (plus their transitive struct dependencies) are
+    resolved, so kernel-only helpers in the same headers (ioctl_cmd_map
+    with its handler typedef, mapped_page_info with list_head, ...) never
+    enter the LP64 model."""
+    wanted = set(wanted)
+    resolved, pending = {}, {}
+    # Seed with wanted structs present in raw; deps are pulled in lazily.
+    stack = sorted(wanted)
+    while stack:
+        name = stack.pop()
+        if name in resolved or name in pending:
+            continue
+        if name not in raw:
+            continue  # absence is reported by the canon gate
+        pending[name] = raw[name]
+        # Pre-seed struct dependencies so single-pass resolution works.
+        for dep in re.findall(r"struct\s+(\w+)\s+\w+", strip_comments(raw[name])):
+            if dep not in resolved and dep not in pending:
+                stack.append(dep)
+    while pending:
+        progress = False
+        for name in sorted(pending):
+            try:
+                fields, size, align = _layout_body(pending[name], resolved)
+            except ValueError as error:
+                if "unresolved struct" not in str(error):
+                    raise
+                # Pull the missing dependency in if the headers have it.
+                m = re.search(r"unresolved struct (\w+)", str(error))
+                if m and m.group(1) in raw and m.group(1) not in pending:
+                    pending[m.group(1)] = raw[m.group(1)]
+                continue
+            resolved[name] = (size, align)
+            resolved[name + "\x00fields"] = fields
+            del pending[name]
+            progress = True
+        if not progress:
+            raise ValueError("layout: circular/unknown structs: %s"
+                             % sorted(pending))
+    out = {}
+    for name in wanted:
+        if name in raw and name in resolved:
+            size, align = resolved[name]
+            out[name] = (resolved[name + "\x00fields"], size, align)
+    return out
+
+
+def compare_layouts(knorm, clay, needed):
+    """Byte-compare kernel vs client layouts. Returns error strings."""
+    errors = []
+    for name in needed:
+        if name not in knorm or name not in clay:
+            continue  # missing-struct errors are reported by the canon gate
+        kfields, ksize, _ = knorm[name]
+        cfields, csize, _ = clay[name]
+        if ksize != csize:
+            errors.append("layout size drift: %s kernel %d vs client %d"
+                          % (name, ksize, csize))
+        kmap = {label: (off, sz) for label, off, sz in kfields}
+        cmap = {label: (off, sz) for label, off, sz in cfields}
+        for label, (koff, ksz) in sorted(kmap.items()):
+            if label.startswith("anon-"):
+                continue
+            if label not in cmap:
+                errors.append("layout field drift: %s.%s missing in client"
+                              % (name, label))
+            elif cmap[label] != (koff, ksz):
+                errors.append(
+                    "layout field drift: %s.%s kernel @%d+%d vs client @%d+%d"
+                    % (name, label, koff, ksz,
+                       cmap[label][0], cmap[label][1]))
+        for label in sorted(cmap):
+            if not label.startswith("anon-") and label not in kmap:
+                errors.append("layout field drift: %s.%s extra in client"
+                              % (name, label))
+        if name in _GOLDEN_SIZES and ksize != _GOLDEN_SIZES[name]:
+            errors.append("layout golden mismatch: %s is %d, want %d "
+                          "(parser or headers changed)"
+                          % (name, ksize, _GOLDEN_SIZES[name]))
+    return errors
+
+
+def format_layouts(layouts, needed):
+    lines = []
+    for name in needed:
+        if name not in layouts:
+            continue
+        fields, size, _ = layouts[name]
+        desc = " ".join("%s@%d+%d" % (label, off, sz)
+                        for label, off, sz in fields)
+        lines.append("    %-28s size %3d | %s" % (name, size, desc))
+    return lines
+
+
 def main():
     errors = []
     ksrc = "\n".join(read(p) for p in KERN_FILES)
@@ -203,6 +485,28 @@ def main():
 
     print("check-client-h: %d ops, %d structs, %d consts checked"
           % (len(kops), len(needed), len(kn)))
+    # LP64 byte-layout gate: exact offsets/sizes per struct, both sides.
+    # Catches padding/reorder drift the canon (whitespace-folded) gate
+    # cannot see. Runs anywhere (pure Python LP64 model, no toolchain).
+    try:
+        kraw_all = {}
+        for p in KERN_FILES:
+            kraw_all.update(raw_structs(read(p)))
+        craw = raw_structs(csrc)
+        klay = compute_layouts(
+            kraw_all,
+            set(s for _, s in kops.values()) - {"int"} - excluded_structs)
+        clay = compute_layouts(craw, set(needed))
+        klnorm = {STRUCT_ALIAS.get(n, n): v for n, v in klay.items()}
+    except ValueError as error:
+        errors.append("layout engine: %s" % error)
+        klnorm = {}
+    else:
+        errors.extend(compare_layouts(klnorm, clay, needed))
+    # Exact offsets/sizes report: the evidence, not eyeballing.
+    print("check-client-h layouts (LP64, kernel side):")
+    for line in format_layouts(klnorm, needed):
+        print(line)
     if errors:
         print("check-client-h FAIL:")
         for e in errors[:25]:

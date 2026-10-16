@@ -12,6 +12,13 @@
  *
  * rmmod always restores the original entry first (dangling pointer
  * after unload would panic the next /proc readdir).
+ *
+ * Caller contract: install/uninstall are idempotent (repeat install
+ * returns 0 via hook_active; repeat uninstall returns 0). Concurrent
+ * install vs uninstall are serialized by the syshook mutex. On a
+ * failed uninstall the bookkeeping (and hook_active) is retained, so
+ * a later uninstall retries with the saved orig pointers instead of
+ * leaking a still-hooked table.
  */
 int memd_hide_install(void);
 int memd_hide_uninstall(void);

@@ -35,9 +35,12 @@ static const struct memd_disp_backend *memd_backends[] = {
 #endif
 };
 
+/* Lock discipline: g_core_mu guards every be/front/back/cursor/layers
+ * touch (frame, status, active, set/get/cursor/layer/gamma/readback,
+ * refresh thread, flip worker). g_inst_mu is install/uninstall only,
+ * held outside g_core_mu. Vsync wait sleeps lock-free; wake needs none. */
 static DEFINE_MUTEX(g_core_mu);
-/* Serializes install/uninstall across the flush_workqueue unlock window
- * (worker takes only g_core_mu, so inst -> core ordering never inverts). */
+/* Serializes install vs uninstall (see discipline above; inst -> core). */
 static DEFINE_MUTEX(g_inst_mu);
 /* Waitqueue lifetime: init-once, survives installs; install/uninstall wake
  * only when true (first install must not wake an uninitialised queue). */
@@ -132,6 +135,7 @@ static int memd_refresh_fn(void *data)
 }
 
 
+/* Requires g_core_mu (reads/writes g_core.w/h/dirty). Only caller: frame. */
 static void memd_dirty_add(__u32 x, __u32 y, __u32 w, __u32 h)
  {
     __u32 x1, y1;
@@ -171,6 +175,7 @@ static int64_t memd_get_time_ns(void)
     return ktime_get_ns();
 }
 
+/* Requires g_core_mu (rewrites vsync state). Only caller: install. */
 static void memd_vsync_init(void)
  {
     /* The waitqueue persists across installs: re-initialising it while
@@ -302,8 +307,9 @@ static const struct memd_disp_backend *memd_find_be(__u32 id)
     return NULL;
 }
 
-/* Must hold g_core_mu. Starts the refresh thread once (idempotent:
- * kthread_run is non-blocking; the thread blocks on the mutex). */
+/* Must hold g_core_mu. Starts the refresh thread once (idempotent) and
+ * creates the flip workqueue if missing (destroyed on uninstall, so each
+ * install owns exactly one; rmmod via uninstall leaks neither). */
 static void memd_refresh_start_locked(void)
  {
     if (g_refresh_task)
@@ -407,6 +413,8 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
 
     if (backend != 0) {
         be = memd_find_be(backend);
+        if (be && !be->open)
+            be = NULL;
         if (!be) {
             g_core.last_errno = -ENODEV;
             mutex_unlock(&g_core_mu);
@@ -441,6 +449,10 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
      * wins; nothing retained on failure (each open cleans itself). */
     for (i = 0; i < sizeof(memd_backends) / sizeof(memd_backends[0]); i++) {
         be = memd_backends[i];
+        if (!be || !be->open) {
+            g_core.last_errno = -ENODEV;
+            continue;
+        }
         g_core.front = vmalloc(bytes);
         g_core.back = vmalloc(bytes);
         if (!g_core.front || !g_core.back) {
@@ -525,8 +537,11 @@ int memd_core_uninstall(void)
 #ifdef MEMD_DISP_TEST
     memd_vnc_stop();
 #endif
-    if (g_flip_wq)
+    if (g_flip_wq) {
         flush_workqueue(g_flip_wq);
+        destroy_workqueue(g_flip_wq);
+        g_flip_wq = NULL;
+    }
     mutex_lock(&g_core_mu);
     if (dead && dead->close)
         dead->close();
@@ -932,10 +947,19 @@ int memd_core_cursor_move(__u32 x, __u32 y)
  {
     int rc = 0;
     mutex_lock(&g_core_mu);
+    if (!g_core.be) {
+        mutex_unlock(&g_core_mu);
+        return -ENODEV;
+    }
+    if (g_core.be->cursor_move) {
+        rc = g_core.be->cursor_move(x, y);
+        if (rc) {
+            mutex_unlock(&g_core_mu);
+            return rc;
+        }
+    }
     g_core.cursor_x = x;
     g_core.cursor_y = y;
-    if (g_core.be && g_core.be->cursor_move)
-        rc = g_core.be->cursor_move(x, y);
     mutex_unlock(&g_core_mu);
 
     return rc;
@@ -945,9 +969,18 @@ int memd_core_cursor_show(bool show)
  {
     int rc = 0;
     mutex_lock(&g_core_mu);
-    g_core.cursor_visible = show;
-    if (g_core.be && g_core.be->cursor_show)
+    if (!g_core.be) {
+        mutex_unlock(&g_core_mu);
+        return -ENODEV;
+    }
+    if (g_core.be->cursor_show) {
         rc = g_core.be->cursor_show(show);
+        if (rc) {
+            mutex_unlock(&g_core_mu);
+            return rc;
+        }
+    }
+    g_core.cursor_visible = show;
     mutex_unlock(&g_core_mu);
 
     return rc;

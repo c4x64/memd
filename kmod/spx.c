@@ -15,8 +15,8 @@
  * No python3, no toybox beyond sh, no zlib (ground truth from journal +
  * Live checks instead). Static PIE (runs on bionic).
  *
- * Build (CI pack job): blobs generated from the eight .ko files + run.sh
- * (see workflow heredoc) then
+ * Build (CI pack job): blobs generated from the twelve .ko files + run.sh
+ * (see gen_blobs.py/gen_ko_list.py) then
  *   aarch64-linux-gnu-gcc -static-pie -O2 -o rwbridge-spx spx.c blobs.c
  *
  * CLI: rwbridge-spx [--dry-run] [--extract-runsh] [--ko PATH (test hook)]

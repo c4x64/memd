@@ -15,6 +15,11 @@ int memd_del_unsafe_region(pid_t pid);
 
 /* Enhanced API */
 int memd_find_region(uintptr_t addr, void *out);
+/* Callback runs under the tree spinlock (atomic context): it must not
+ * sleep, must not call any memd_region_* API (add/del/find/iterate/
+ * stats/quota: re-entrancy would self-deadlock on the tree spinlock),
+ * and must not drop/free any entry except its current area argument.
+ * Non-zero return stops the walk. */
 int memd_region_iterate(int (*callback)(void *area, void *data), void *data);
 int memd_get_region_stats(u64 *total_pages, u32 *region_count);
 int memd_set_session_quota(pid_t session, u32 max_regions);

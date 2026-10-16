@@ -51,12 +51,18 @@ static int hwbp_task_exit_notify(struct notifier_block *nb, unsigned long action
         if (hwbp_table[i].enabled && hwbp_table[i].task == task) {
             struct debug_monitor_state *dms = hwbp_table[i].dms;
             if (dms) {
+                /* dms bvr/bcr sized by max_brps, wvr/wcr by max_wrps:
+                 * never index past the caps (table is 16 wide). */
                 if (hwbp_table[i].type == MEMD_HWBP_TYPE_BREAKPOINT) {
-                    dms->bcr[i] = 0;
-                    dms->bvr[i] = 0;
+                    if (i < max_brps) {
+                        dms->bcr[i] = 0;
+                        dms->bvr[i] = 0;
+                    }
                 } else {
-                    dms->wcr[i] = 0;
-                    dms->wvr[i] = 0;
+                    if (i < max_wrps) {
+                        dms->wcr[i] = 0;
+                        dms->wvr[i] = 0;
+                    }
                 }
             }
             hwbp_table[i].enabled = 0;
@@ -85,39 +91,37 @@ static int get_debug_monitor_state(struct task_struct *task, struct debug_monito
 static void hwbp_context_save(struct task_struct *task)
  {
     struct debug_monitor_state *dms = task->thread.debug_monitors;
+    unsigned long flags;
     int i;
 
     if (!dms || !hwbp_supported)
         return;
 
-    for (i = 0; i < max_brps; i++) {
-        if (dms->bcr[i] & 1) {
-            unsigned long flags;
-            spin_lock_irqsave(&hwbp_lock, flags);
-            for (int j = 0; j < 16; j++) {
-                if (hwbp_table[j].enabled && hwbp_table[j].dms == dms &&
-                    hwbp_table[j].type == MEMD_HWBP_TYPE_BREAKPOINT) {
-                    hwbp_table[j].addr = dms->bvr[j];
-                    hwbp_table[j].len = 1 << ((dms->bcr[j] >> 5) & 0xF);
-                }
+    /* Table slot == register index (see set path). Single locked pass:
+     * outer loops bounded by caps keep every dms[] read in range;
+     * indexing dms arrays by table slot j without a cap check (prior
+     * code) read past bvr/bcr/wvr/wcr when max_* < 16. */
+    spin_lock_irqsave(&hwbp_lock, flags);
+    for (i = 0; i < 16; i++) {
+        if (!hwbp_table[i].enabled || hwbp_table[i].dms != dms)
+            continue;
+        if (hwbp_table[i].type == MEMD_HWBP_TYPE_BREAKPOINT) {
+            if (i >= max_brps)
+                continue;
+            if (dms->bcr[i] & 1) {
+                hwbp_table[i].addr = dms->bvr[i];
+                hwbp_table[i].len = 1 << ((dms->bcr[i] >> 5) & 0xF);
             }
-            spin_unlock_irqrestore(&hwbp_lock, flags);
+        } else {
+            if (i >= max_wrps)
+                continue;
+            if (dms->wcr[i] & 1) {
+                hwbp_table[i].addr = dms->wvr[i];
+                hwbp_table[i].len = 1 << ((dms->wcr[i] >> 5) & 0xF);
+            }
         }
     }
-    for (i = 0; i < max_wrps; i++) {
-        if (dms->wcr[i] & 1) {
-            unsigned long flags;
-            spin_lock_irqsave(&hwbp_lock, flags);
-            for (int j = 0; j < 16; j++) {
-                if (hwbp_table[j].enabled && hwbp_table[j].dms == dms &&
-                    hwbp_table[j].type != MEMD_HWBP_TYPE_BREAKPOINT) {
-                    hwbp_table[j].addr = dms->wvr[j];
-                    hwbp_table[j].len = 1 << ((dms->wcr[j] >> 5) & 0xF);
-                }
-            }
-            spin_unlock_irqrestore(&hwbp_lock, flags);
-        }
-    }
+    spin_unlock_irqrestore(&hwbp_lock, flags);
 }
 
 static void hwbp_context_restore(struct task_struct *task)
@@ -133,11 +137,16 @@ static void hwbp_context_restore(struct task_struct *task)
         return;
 
     /* Table is shared with set/remove/exit-notify: read it locked
-     * (set path also programs registers under the same lock). */
+     * (set path also programs registers under the same lock). Skip any
+     * slot past the live caps: set already rejects slot >= max_*, but
+     * caps can shrink across re-probe, so every dms[] write is
+     * re-checked here. */
     spin_lock_irqsave(&hwbp_lock, flags);
     for (i = 0; i < 16; i++) {
         if (hwbp_table[i].enabled && hwbp_table[i].dms == dms) {
             if (hwbp_table[i].type == MEMD_HWBP_TYPE_BREAKPOINT) {
+                if (i >= max_brps)
+                    continue;
                 dms->bvr[i] = hwbp_table[i].addr;
                 dms->bcr[i] = (1ULL << 0) |
                     ((u64)hwbp_encode_len(hwbp_table[i].len) << 5) |
@@ -146,6 +155,8 @@ static void hwbp_context_restore(struct task_struct *task)
                     dms->bcr[i] |= (hwbp_table[i].condition_mask & 0xFFFF) << 16;
                 }
             } else {
+                if (i >= max_wrps)
+                    continue;
                 dms->wvr[i] = hwbp_table[i].addr;
                 dms->wcr[i] = (1ULL << 0) |
                     ((u64)hwbp_encode_len(hwbp_table[i].len) << 5);
@@ -209,12 +220,18 @@ void memd_hwbp_cleanup(void)
     spin_lock_irqsave(&hwbp_lock, flags);
     for (i = 0; i < 16; i++) {
         if (hwbp_table[i].enabled && hwbp_table[i].dms) {
+            /* Same cap rule as exit-notify/restore: table is 16 wide,
+             * dms arrays are max_brps/max_wrps wide. */
             if (hwbp_table[i].type == MEMD_HWBP_TYPE_BREAKPOINT) {
-                hwbp_table[i].dms->bcr[i] = 0;
-                hwbp_table[i].dms->bvr[i] = 0;
+                if (i < max_brps) {
+                    hwbp_table[i].dms->bcr[i] = 0;
+                    hwbp_table[i].dms->bvr[i] = 0;
+                }
             } else {
-                hwbp_table[i].dms->wcr[i] = 0;
-                hwbp_table[i].dms->wvr[i] = 0;
+                if (i < max_wrps) {
+                    hwbp_table[i].dms->wcr[i] = 0;
+                    hwbp_table[i].dms->wvr[i] = 0;
+                }
             }
             hwbp_table[i].enabled = 0;
             hwbp_table[i].dms = NULL;
@@ -405,12 +422,19 @@ int memd_hwbp_remove(struct task_struct *task, u32 hwbp_id)
 
     dms = task->thread.debug_monitors;
 
+    /* dms arrays are max_brps/max_wrps wide, not 16: re-check the live
+     * caps even though set validated the slot (caps can shrink). Stale
+     * slots still clear the table below, just skip the register write. */
     if (hwbp_table[slot].type == MEMD_HWBP_TYPE_BREAKPOINT) {
-        dms->bcr[slot] = 0;
-        dms->bvr[slot] = 0;
+        if (slot < max_brps) {
+            dms->bcr[slot] = 0;
+            dms->bvr[slot] = 0;
+        }
     } else {
-        dms->wcr[slot] = 0;
-        dms->wvr[slot] = 0;
+        if (slot < max_wrps) {
+            dms->wcr[slot] = 0;
+            dms->wvr[slot] = 0;
+        }
     }
 
     hwbp_table[slot].enabled = 0;

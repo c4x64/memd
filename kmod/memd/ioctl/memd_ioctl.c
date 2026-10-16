@@ -29,6 +29,7 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 
 #include "memd_proc.h"
 
@@ -54,6 +55,10 @@ int do_vaddr_translate(struct socket* sock, void* arg) {
 int do_debug_info(struct socket* sock, void* arg) {
     struct memd_debug_info_cmd debug_info_cmd;
 
+    /* Zero first: the struct ends with 4 bytes of tail padding after
+     * mm_right that no field assignment touches; copy_to_user below
+     * would otherwise leak kernel stack to userspace. */
+    memset(&debug_info_cmd, 0, sizeof(debug_info_cmd));
     {
         struct mm_struct *dmm = memd_t_mm(current);
         debug_info_cmd.ttbr0_el1 = read_sysreg_s(SYS_TTBR0_EL1);
@@ -1033,7 +1038,7 @@ int do_write_physical_memory_ioremap(struct socket* sock, void* arg) {
         return -EFAULT;
     }
 
-    // Map and read physical memory
+    // Map and write physical memory
     pa = cmd.phy_addr;
     if (!pa || !memd_pfn_ok(__phys_to_pfn(pa))) {
         return -EFAULT;

@@ -44,6 +44,7 @@ static const char *memd_wanted[] = {
     "cfi_slowpath",
     "__cfi_verify",
     "__kcfi_check_fail",
+    "__ubsan_handle_type_mismatch_v1",
     "__ubsan_handle_type_mismatch",
     "__ubsan_handle_builtin_unreachable",
     "__ubsan_handle_pointer_overflow",

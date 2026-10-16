@@ -350,4 +350,11 @@ int memd_disp_frame(const struct memd_disp_op *ops, __u32 count)
  {
     return memd_core_frame(ops, count);
 }
+
+#ifdef MEMD_DISP_TEST
+int memd_disp_readback(__u64 dst, __u32 size, __u32 *w, __u32 *h)
+ {
+    return memd_core_readback(dst, size, w, h);
+}
+#endif
 /* kmod/memd/display/soc_exynos.c[∂] */

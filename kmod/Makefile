@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-# rwbridge — memd-derived driver, 8-target DDK matrix + single SPX deliverable.
+# rwbridge — memd-derived driver, per-KMI DDK matrix + single SPX deliverable.
 #
 # Each artifact is built against its own generation's headers (DDK); nothing
 # is shared across generations at compile time. Runtime kernel variance

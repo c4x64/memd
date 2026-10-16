@@ -77,10 +77,11 @@ static void region_insert(struct unsafe_region_area *area)
  {
     struct rb_node **link = &g_region_tree->root.rb_node;
     struct rb_node *parent = NULL;
+    struct unsafe_region_area *this_area;
     while (*link) {
         parent = *link;
-        struct unsafe_region_area *this = rb_entry(parent, struct unsafe_region_area, rb_node);
-        if (area->addr < this->addr)
+        this_area = rb_entry(parent, struct unsafe_region_area, rb_node);
+        if (area->addr < this_area->addr)
             link = &parent->rb_left;
         else
             link = &parent->rb_right;

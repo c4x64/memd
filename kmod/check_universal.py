@@ -126,7 +126,7 @@ def main():
             bad.append(sym)
     if bad:
         die("imports missing from %s System.map: %s" % (kmi, " ".join(sorted(set(bad)))))
-    # All 8 artifacts (incl. -dbg, identical code to plain) must be free
+    # All shipped artifacts (incl. -dbg, identical code to plain) must be free
     # of CFI/ubsan imports: DDK CFI instrumentation must have been
     # neutralized above or the module cannot load on non-enforcing
     # kernels. Enforcing kernels are handled at runtime (cfi_bypass).

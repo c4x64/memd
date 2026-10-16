@@ -267,10 +267,13 @@ def stage_module(zip_path, root, abi):
             except OSError:
                 pass
             raise
-        except Exception as error:
-            # zipfile can raise RuntimeError (unsupported compression on
-            # stream read) or LargeZipFile mid-extract: clean the partial
-            # file, then normalize so main() reports instead of tracing.
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, RuntimeError) as error:
+            # Stream-read failures only: BadZipFile (CRC), LargeZipFile
+            # (>2GB entry), RuntimeError (unsupported compression, which
+            # surfaces as NotImplementedError, a RuntimeError subclass).
+            # Anything else is a programming error and must propagate.
+            # Clean the partial file, then normalize so main() reports
+            # instead of tracing.
             try:
                 os.unlink(tmp)
             except OSError:

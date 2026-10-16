@@ -54,7 +54,9 @@ pid_t memd_t_tgid(struct task_struct *t);
 struct mm_struct *memd_t_mm(struct task_struct *t);
 int memd_t_mm_null(struct task_struct *t);
 struct cred *memd_t_cred(struct task_struct *t);
-void *memd_t_stack(struct task_struct *t);
+/* NOTE: memd_t_stack is the macro below (single definition). Do not add
+ * a prototype here: a same-named declaration + macro is a collision with
+ * no function definition behind it. */
 /* Kernel stack size in bytes (16384/65536), learned with t_stack; 0 if
  * unknown (callers must fail closed). */
 unsigned long memd_thread_size(void);

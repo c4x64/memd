@@ -217,11 +217,11 @@ int memd_input_dev_ok(struct input_dev *dev)
 int memd_printk(const char *fmt, ...)
  {
     static int (*fn)(const char *, va_list) = NULL;
-    static int dropped = 0;
+    static long dropped = 0;
     int (*tmp)(const char *, va_list);
     va_list ap;
     int r;
-    int d;
+    long d;
     if (!fmt)
         return 0;
     tmp = READ_ONCE(fn);
@@ -237,7 +237,7 @@ int memd_printk(const char *fmt, ...)
         if (d > 0) {
             WRITE_ONCE(dropped, 0);
             tmp(KERN_WARNING MEMD_LOG_PREFIX
-                "early messages dropped before bootstrap: %d\n", d);
+                "early messages dropped before bootstrap: %ld\n", d);
         }
     }
     va_start(ap, fmt);
@@ -998,7 +998,9 @@ int translate_process_vaddr(pid_t pid, uintptr_t vaddr, uintptr_t* paddr_out) {
     /* Canonical-high addresses are kernel VAs on every VA_BITS config:
      * walk swapper directly (pid is irrelevant, no task touched).
      * Priv-gated: kernel memory reads defeat KASLR for any local
-     * process, so non-root gets nothing here (user reads unaffected). */
+     * process, so non-root gets nothing here (user reads unaffected).
+     * memd_capable denies cap>=32 fail-closed (second word unread);
+     * every in-tree cap (SYS_ADMIN/KILL/NET_BIND_SERVICE) is < 32. */
     if ((long)vaddr < 0) {
         if (!memd_capable(CAP_SYS_ADMIN))
             return -EPERM;
@@ -1161,7 +1163,7 @@ int is_pid_alive(pid_t pid) {
  * on pinned tasks with no locks held. Sleeping inside rcu_read_lock()
  * would stall grace periods and trip lockdep; the old single-pass loop
  * did exactly that. */
-int get_cmdline_ex(struct task_struct *task, char *buffer, int buflen);
+static int get_cmdline_ex(struct task_struct *task, char *buffer, int buflen);
 pid_t find_process_by_name(const char* name) {
     struct task_struct* task;
     char cmdline[256];
@@ -1287,7 +1289,7 @@ pid_t find_process_by_name(const char* name) {
     return 0;
 }
 
-int get_cmdline_ex(struct task_struct* task, char* buffer, int buflen) {
+static int get_cmdline_ex(struct task_struct* task, char* buffer, int buflen) {
     int res = 0;
     unsigned int len;
     struct mm_struct* mm = get_task_mm(task);

@@ -1,8 +1,13 @@
 import errno
 import json
 import os
+import platform
+import shutil
 import struct
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 import zipfile
 
@@ -383,6 +388,360 @@ class HotswapStateTests(unittest.TestCase):
         with zipfile.ZipFile(bad, "w") as archive:
             archive.writestr("zygisk/arm64-v8a.so", b"\x7fELF")
         self.assertEqual(lxgr_load.cmd_hotswap(self._args(zip=bad)), errno.EINVAL)
+
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class MemdHppTwoTuTests(unittest.TestCase):
+    """memd.hpp must compile, link and run across TWO translation units.
+
+    The module registry (lxgr::detail::factory_slot) and the PLT-hook
+    state deliberately have external linkage with a function-local static,
+    so REGISTER_MEMD_MODULE in one TU and lxgr_main/boot in another meet
+    on ONE registry. If either regressed to per-TU (static) linkage,
+    payloads spanning translation units would silently lose their module
+    and boot with -ENODEV.
+
+    CI gate usage (Linux-only link+run; build.yml is intentionally NOT
+    touched this round): run from tools/ on a Linux host --
+        python3 -m unittest test_lxgr_load.MemdHppTwoTuTests -v
+    On non-Linux hosts the link+run half SKIPS with a loud reason (the
+    payload path needs Linux: abstract unix sockets, dladdr, link.h) and
+    only the header syntax check runs.
+    """
+
+    TU_A = textwrap.dedent("""\
+        #include "memd.hpp"
+        class TwoTuMod : public zygisk::Module {
+          public:
+            void onLoad(zygisk::Api *api, JNIEnv *env) override {
+                (void)api;
+                (void)env;
+            }
+        };
+        REGISTER_MEMD_MODULE(TwoTuMod);
+        int tu_a_probe() {
+            return lxgr::detail::factory_slot() ? 0 : 1;
+        }
+        void *tu_a_slot_addr() {
+            return (void *)&lxgr::detail::factory_slot();
+        }
+        """)
+
+    TU_B = textwrap.dedent("""\
+        #include "memd.hpp"
+        #include <cstdio>
+        int tu_a_probe();
+        void *tu_a_slot_addr();
+        int main() {
+            if (tu_a_probe() != 0) {
+                std::printf("2TU-FAIL factory null in TU-A\\n");
+                return 1;
+            }
+            if (!lxgr::detail::factory_slot()) {
+                std::printf("2TU-FAIL factory null in TU-B\\n");
+                return 2;
+            }
+            if (tu_a_slot_addr() != (void *)&lxgr::detail::factory_slot()) {
+                std::printf("2TU-FAIL registry not shared across TUs\\n");
+                return 3;
+            }
+            int r = zygisk::detail::boot_module(0x1234);
+            if (r != 0) {
+                std::printf("2TU-FAIL boot rc=%d\\n", r);
+                return 4;
+            }
+            std::printf("2TU-PASS\\n");
+            return 0;
+        }
+        """)
+
+    def _compiler(self):
+        for candidate in ("g++", "c++", "clang++"):
+            if shutil.which(candidate):
+                return candidate
+        return None
+
+    def _write_tus(self, tmp):
+        with open(os.path.join(tmp, "tu_a.cpp"), "w") as stream:
+            stream.write(self.TU_A)
+        with open(os.path.join(tmp, "tu_b.cpp"), "w") as stream:
+            stream.write(self.TU_B)
+
+    def test_header_parses(self):
+        """memd.hpp must parse everywhere (syntax-only; runs on any host)."""
+        compiler = self._compiler()
+        if compiler is None:
+            self.skipTest("no C++ compiler found; cannot syntax-check memd.hpp")
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_tus(tmp)
+            proc = subprocess.run(
+                [compiler, "-std=c++17", "-fsyntax-only",
+                 "-I", REPO_ROOT, os.path.join(tmp, "tu_a.cpp")],
+                capture_output=True, text=True, timeout=300)
+        self.assertEqual(proc.returncode, 0,
+                         "memd.hpp failed to parse:\n%s" % proc.stderr[-2000:])
+
+    def test_two_tu_link_and_run(self):
+        """Link TU-A (REGISTER) + TU-B (main/boot) and RUN the binary.
+
+        Linux-only: fails loudly anywhere else is wrong (the payload path
+        needs Linux), so non-Linux hosts SKIP with the host limit stated.
+        """
+        if not sys.platform.startswith("linux"):
+            self.skipTest(
+                "2-TU link+run requires Linux (payload path: abstract "
+                "unix sockets, dladdr, link.h); host is %s/%s -- "
+                "header syntax check (test_header_parses) ran instead"
+                % (sys.platform, platform.machine()))
+        compiler = self._compiler()
+        if compiler is None:
+            self.fail("on Linux but no C++ compiler found; gate cannot run")
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_tus(tmp)
+            binary = os.path.join(tmp, "two_tu")
+            compile_proc = subprocess.run(
+                [compiler, "-std=c++17", "-Wall", "-Wextra",
+                 "-I", REPO_ROOT,
+                 os.path.join(tmp, "tu_a.cpp"), os.path.join(tmp, "tu_b.cpp"),
+                 "-o", binary, "-ldl"],
+                capture_output=True, text=True, timeout=300)
+            self.assertEqual(
+                compile_proc.returncode, 0,
+                "2-TU link failed:\n%s" % compile_proc.stderr[-3000:])
+            run_proc = subprocess.run(
+                [binary], capture_output=True, text=True, timeout=120)
+            self.assertEqual(run_proc.returncode, 0,
+                             "2-TU binary exited %d:\n%s"
+                             % (run_proc.returncode, run_proc.stdout[-2000:]))
+            self.assertIn("2TU-PASS", run_proc.stdout)
+
+
+class _SimCrash(Exception):
+    """Simulated kill -9 at a chosen line (NOT caught by lxgr_load)."""
+
+
+class _FakeDriver:
+    """Fake MEMD driver: load() mints a resident handle, unload() drops it.
+
+    Missing-handle unload returns -ENOENT like a real double-dlclose, so
+    retry-after-crash corpse behavior is visible instead of masked."""
+
+    def __init__(self):
+        self.resident = set()
+        self.next_handle = 0x1000
+
+    def load(self):
+        handle = self.next_handle
+        self.next_handle += 1
+        self.resident.add(handle)
+        return (0, handle, 0)
+
+    def unload(self, handle):
+        if handle in self.resident:
+            self.resident.discard(handle)
+            return 0
+        return -errno.ENOENT
+
+
+class _FakeSock:
+    """Dummy for find_driver_family: cmd_* only call close() on it."""
+    def close(self):
+        pass
+
+
+def _recorded_handles(state):
+    out = set()
+    handle = state.get("handle", 0)
+    if isinstance(handle, int) and not isinstance(handle, bool) and handle:
+        out.add(handle)
+    for prev in lxgr_load.pending_handles(state):
+        out.add(prev)
+    return out
+
+
+class HotswapCrashConsistencyTests(unittest.TestCase):
+    """kill -9 at every line of hotswap: is state always recoverable?
+
+    Method: seed {handle: OLD, prev_handles: [P1]} with a fake driver for
+    whom {OLD, P1} are resident, then run a real cmd_hotswap with the
+    driver/state calls intact except ONE crash injected per run. After
+    each crash, every handle the (fake) driver still has resident must be
+    on disk (current or prev_handles); anything else is an orphan the next
+    hotswap/uninstall can never find.
+
+    Result (pinned by test_crash_points_table): every crash point is
+    recoverable EXCEPT post-load/pre-record, where the just-loaded handle
+    is resident but unrecorded. That window is structural -- the handle
+    only exists after the driver returns, so no pre-load record can name
+    it (no handle-reservation ioctl exists) -- and is documented here, not
+    hidden. Retry semantics after mid-loop crashes are pinned too: the
+    survivor write happens after the loop, so a crash replays the full
+    chain and already-unloaded handles come back as bounded -ENOENT
+    corpses (MAX_PREV_HANDLES caps the chain), never silent leaks.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.join(self.tmp.name, "stage")
+        self.zip_path = os.path.join(self.tmp.name, "demo.zip")
+        make_module_zip(self.zip_path)
+        self.pid = 99
+        self.old, self.p1 = 0x111, 0x222
+
+    def _args(self, **over):
+        import argparse
+
+        base = dict(zip=self.zip_path, root=self.root, pid=self.pid,
+                    abi="arm64-v8a", entry="lxgr_main", su=False,
+                    ephemeral=False, unlink=False)
+        base.update(over)
+        return argparse.Namespace(**base)
+
+    def _seed(self, record):
+        os.makedirs(os.path.join(self.root, "lxgr.demo"), exist_ok=True)
+        lxgr_load.write_state(self.root, "lxgr.demo", self.pid, record)
+
+    def _patched(self, driver, crash_at=None):
+        """mock helpers; crash_at is a zero-arg hook run at the crash line."""
+        import unittest.mock as mock
+
+        state = {"writes": 0, "unloads": 0}
+
+        def fake_load(sock, pid, path, entry, su, ephemeral):
+            return driver.load()
+
+        def fake_unload(sock, pid, handle):
+            state["unloads"] += 1
+            if crash_at == "pre-first-unload" and state["unloads"] == 1:
+                raise _SimCrash("kill -9 before first unload")
+            result = driver.unload(handle)
+            if crash_at == "mid-loop" and state["unloads"] == 1:
+                raise _SimCrash("kill -9 mid unload loop")
+            return result
+
+        real_write = lxgr_load.write_state
+
+        def fake_write(root, module_id, pid, record):
+            state["writes"] += 1
+            if crash_at == "pre-record" and state["writes"] == 1:
+                raise _SimCrash("kill -9 post-load pre-record")
+            if crash_at == "pre-survivor-write" and state["writes"] == 2:
+                raise _SimCrash("kill -9 post-loop pre-survivor-write")
+            return real_write(root, module_id, pid, record)
+
+        return (mock.patch.object(lxgr_load, "ioctl_load", side_effect=fake_load),
+                mock.patch.object(lxgr_load, "ioctl_unload", side_effect=fake_unload),
+                mock.patch.object(lxgr_load, "write_state", side_effect=fake_write),
+                mock.patch.object(lxgr_load, "find_driver_family",
+                                return_value=_FakeSock()),
+                state)
+
+    def _run_hotswap_crash(self, driver, crash_at):
+        loaders = self._patched(driver, crash_at)
+        with loaders[0], loaders[1], loaders[2], loaders[3]:
+            if crash_at == "during-stage":
+                import unittest.mock as mock
+                with mock.patch.object(
+                        lxgr_load, "stage_module",
+                        side_effect=_SimCrash("kill -9 during stage")):
+                    with self.assertRaises(_SimCrash):
+                        lxgr_load.cmd_hotswap(self._args())
+                return
+            with self.assertRaises(_SimCrash):
+                lxgr_load.cmd_hotswap(self._args())
+
+    def test_crash_points_table(self):
+        # (crash point, expect_orphans) -- only pre-record orphans.
+        for crash_at, expect_orphan in [
+            ("during-stage", set()),
+            ("pre-record", None),  # handled separately: exactly {NEW}
+            ("pre-first-unload", set()),
+            ("mid-loop", set()),
+            ("pre-survivor-write", set()),
+        ]:
+            driver = _FakeDriver()
+            driver.resident = {self.old, self.p1}
+            self._seed({"id": "lxgr.demo", "version": "2",
+                        "handle": self.old, "prev_handles": [self.p1]})
+            if crash_at == "pre-record":
+                loaders = self._patched(driver, crash_at)
+                with loaders[0], loaders[1], loaders[2], loaders[3]:
+                    with self.assertRaises(_SimCrash):
+                        lxgr_load.cmd_hotswap(self._args())
+                recorded = _recorded_handles(
+                    lxgr_load.read_state(self.root, "lxgr.demo", self.pid))
+                orphans = set(driver.resident) - recorded
+                # THE window: exactly the just-loaded handle is orphaned.
+                self.assertEqual(len(orphans), 1, crash_at)
+                self.assertEqual(recorded, {self.old, self.p1}, crash_at)
+                continue
+            self._run_hotswap_crash(driver, crash_at)
+            recorded = _recorded_handles(
+                lxgr_load.read_state(self.root, "lxgr.demo", self.pid))
+            orphans = set(driver.resident) - recorded
+            self.assertEqual(orphans, expect_orphan,
+                             "crash@%s orphans %s" % (crash_at, orphans))
+
+    def test_retry_after_midloop_crash_drains(self):
+        """Crash mid-loop, then a clean hotswap must not leak: the driver
+        ends with exactly the newest handle, on record.
+
+        Pinned wart: the handle the crashed run DID unload (OLD) is still
+        in the on-disk chain (survivor write happens after the loop), so
+        the retry's unload of OLD fails -ENOENT (double-dlclose) and OLD
+        stays as a bounded corpse entry. rc is therefore -ENOENT, not 0,
+        and prev_handles == [OLD]. Corpses never silently leak a resident
+        library (driver holds only the newest), and the chain stays capped
+        at MAX_PREV_HANDLES -- but nothing auto-drops them today."""
+        import unittest.mock as mock
+
+        driver = _FakeDriver()
+        driver.resident = {self.old, self.p1}
+        self._seed({"id": "lxgr.demo", "version": "2",
+                    "handle": self.old, "prev_handles": [self.p1]})
+        self._run_hotswap_crash(driver, "mid-loop")
+        with mock.patch.object(lxgr_load, "ioctl_load",
+                               side_effect=lambda *a: driver.load()), \
+             mock.patch.object(lxgr_load, "ioctl_unload",
+                               side_effect=lambda s, p, h: driver.unload(h)), \
+             mock.patch.object(lxgr_load, "find_driver_family",
+                               return_value=_FakeSock()):
+            self.assertEqual(lxgr_load.cmd_hotswap(self._args()),
+                             -errno.ENOENT)
+        state = lxgr_load.read_state(self.root, "lxgr.demo", self.pid)
+        # No leak: the only resident library is the recorded current one.
+        self.assertEqual(driver.resident, {state["handle"]})
+        # The double-unloaded entry is a bounded on-record corpse, not a leak.
+        self.assertEqual(state["prev_handles"], [self.old])
+        self.assertLessEqual(len(state["prev_handles"]),
+                             lxgr_load.MAX_PREV_HANDLES)
+
+    def test_kill_during_replace_keeps_old_record(self):
+        """write_state = tmp + fsync + rename: killing the rename leaves
+        the previous COMPLETE record (never truncated JSON, which
+        read_state would misread as 'no install' and leak live handles)."""
+        import unittest.mock as mock
+
+        self._seed({"id": "lxgr.demo", "version": "2", "handle": self.old})
+        with mock.patch("os.replace",
+                        side_effect=_SimCrash("kill -9 during rename")):
+            with self.assertRaises(_SimCrash):
+                lxgr_load.write_state(self.root, "lxgr.demo", self.pid,
+                                      {"id": "lxgr.demo", "version": "3",
+                                       "handle": 0x999})
+        state = lxgr_load.read_state(self.root, "lxgr.demo", self.pid)
+        self.assertEqual(state["handle"], self.old)
+        # A stray tmp never masquerades as state; the next write reuses
+        # the same tmp path and converges.
+        lxgr_load.write_state(self.root, "lxgr.demo", self.pid,
+                              {"id": "lxgr.demo", "version": "3",
+                               "handle": 0x999})
+        self.assertEqual(
+            lxgr_load.read_state(self.root, "lxgr.demo", self.pid)["handle"],
+            0x999)
 
 
 if __name__ == "__main__":

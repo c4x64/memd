@@ -163,8 +163,8 @@ def fetch_latest_ddk_tags():
                     if kmi not in latest or date > latest[kmi]:
                         latest[kmi] = date
             return {k: f"{k}-{v}" for k, v in latest.items()}
-    except Exception as e:
-        print(f"Failed to fetch DDK tags: {e}", file=sys.stderr)
+    except (OSError, ValueError, re.error, subprocess.SubprocessError) as error:
+        print(f"Failed to fetch DDK tags: {error}", file=sys.stderr)
     return None
 
 def main():

@@ -3,6 +3,7 @@
 #include "memd_common.h"
 #include "memd_utils.h"
 
+#include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/string.h>
@@ -49,6 +50,36 @@ struct memd_trampoline {
 
 static LIST_HEAD(g_trampoline_list);
 static DEFINE_SPINLOCK(g_trampoline_lock);
+
+/* Serializes install/uninstall for the same target. Check-then-patch
+ * must be atomic: two concurrent installs would both pass the
+ * can-hijack test, both write the branch, and orphan one trampoline
+ * (its jump-back still valid, but remove-by-target frees only the
+ * first match). Sleepable lock: create/vmalloc and insn writes sleep,
+ * so a spinlock would be wrong here. Nest order is always
+ * g_install_lock -> g_trampoline_lock. */
+static DEFINE_MUTEX(g_install_lock);
+
+/* Guarded single-word load from a hook target. Plain dereference faults
+ * (oops) on execute-only or unmapped text; the extable guard turns it
+ * into -EFAULT. Version-robust by construction: no page-table layouts,
+ * only the fault handler. Block (huge-page) text is NOT refused here:
+ * word loads work on RX block mappings, and the write itself stays
+ * owned by aarch64_insn_write (splitting a block would need
+ * version-unstable table surgery + per-kernel BBM sequences, so a
+ * refusal policy would just disable hooks on block-mapped kernels
+ * while the arch helper already handles them). */
+static int memd_target_read32(void *target, unsigned long offset, u32 *out)
+ {
+    unsigned int v;
+
+    if (!target || !out)
+        return -EINVAL;
+    if (memd_safe_read32((const char *)target + offset, &v))
+        return -EFAULT;
+    *out = (u32)v;
+    return 0;
+}
 
 /* Best-effort resolution: insn-write/icache helpers exist only where the
  * kernel lets kallsyms resolution succeed. Always returns 0 — callers
@@ -152,11 +183,16 @@ static bool check_instruction_can_hijack(uint32_t instruction)
     return ret;
 }
 
-static int calculate_trampoline_size(void *target, size_t hook_size)
+static int calculate_trampoline_size(void *target, size_t hook_size, size_t *out)
   {
      size_t i;
      size_t size;
-     uint32_t *ptr = target;
+     int type;
+     u32 insn;
+     int ret;
+
+     if (!target || !out)
+         return -EINVAL;
 
      /* Copied prologue plus the fixed jump-back epilogue (MOVZ + 3x
       * MOVK + BR = 20 bytes, full 64-bit, no literal pool). The old
@@ -164,7 +200,10 @@ static int calculate_trampoline_size(void *target, size_t hook_size)
       * allocation by 8 bytes on every hook. */
      size = hook_size + 20;
      for (i = 0; i < hook_size; i += INSTRUCTION_SIZE) {
-         int type = get_instruction_type(ptr[i / 4]);
+         ret = memd_target_read32(target, (unsigned long)i, &insn);
+         if (ret)
+             return ret;
+         type = get_instruction_type((uint32_t)insn);
 
         if (type == INST_B || type == INST_BL || type == INST_B_COND ||
             type == INST_CBZ_CBNZ || type == INST_TBZ_TBNZ ||
@@ -173,17 +212,24 @@ static int calculate_trampoline_size(void *target, size_t hook_size)
         }
     }
 
-    return ALIGN(size, 16);
+    *out = ALIGN(size, 16);
+    return 0;
 }
 
 struct memd_trampoline *memd_create_trampoline(void *target, void *handler, size_t hook_size)
  {
     struct memd_trampoline *tramp;
     void *tramp_code;
-    size_t tramp_size;
+    size_t tramp_size = 0;
+    size_t i;
+    u32 insn;
     int ret;
 
-    tramp_size = calculate_trampoline_size(target, hook_size);
+    if (!target || !hook_size)
+        return NULL;
+    ret = calculate_trampoline_size(target, hook_size, &tramp_size);
+    if (ret)
+        return NULL;
 
     tramp = kzalloc(sizeof(*tramp), GFP_KERNEL);
     if (!tramp)
@@ -200,7 +246,19 @@ struct memd_trampoline *memd_create_trampoline(void *target, void *handler, size
     tramp->target = target;
     tramp->handler = handler;
 
-    memcpy(tramp_code, target, hook_size);
+    /* Guarded prologue copy: plain memcpy faults (oops) on
+     * execute-only or unmapped text and on a huge-page boundary whose
+     * neighbour is not readable. Per-word extable reads fail closed;
+     * partial copies are unwound below (one free per alloc). */
+    for (i = 0; i < hook_size; i += INSTRUCTION_SIZE) {
+        ret = memd_target_read32(target, (unsigned long)i, &insn);
+        if (ret) {
+            vfree(tramp_code);
+            kfree(tramp);
+            return NULL;
+        }
+        memcpy((char *)tramp_code + i, &insn, INSTRUCTION_SIZE);
+    }
 
     /* Jump back to target + hook_size (past the patched B). The old
      * code jumped to target itself (infinite handler loop), used X0
@@ -251,9 +309,18 @@ void memd_destroy_trampoline(struct memd_trampoline *tramp)
 
 bool check_target_can_hijack(void *target)
  {
-    int offset = 0;
-    for (; offset < HOOK_TARGET_OFFSET + HIJACK_SIZE; offset += INSTRUCTION_SIZE) {
-        if (!check_instruction_can_hijack(*(uint32_t *)((char *)target + offset)))
+    int offset;
+    u32 insn;
+
+    /* Unaligned text cannot hold AArch64 insns; NULL faults below.
+     * Guarded reads (not direct dereference): XO/unmapped/huge-edge
+     * text fails closed instead of oopsing. */
+    if (!target || ((uintptr_t)target & (INSTRUCTION_SIZE - 1)))
+        return false;
+    for (offset = 0; offset < HOOK_TARGET_OFFSET + HIJACK_SIZE; offset += INSTRUCTION_SIZE) {
+        if (memd_target_read32(target, (unsigned long)offset, &insn))
+            return false;
+        if (!check_instruction_can_hijack((uint32_t)insn))
             return false;
     }
     return true;
@@ -267,33 +334,52 @@ int memd_install_inline_hook(void *target, void *handler, void **orig)
      u32 branch_insn;
      int ret;
 
-     if (!check_target_can_hijack(target))
+     if (!target || !handler)
          return -EINVAL;
+     if (((uintptr_t)target & 3UL) || ((uintptr_t)handler & 3UL))
+         return -EINVAL;
+
+     mutex_lock(&g_install_lock);
+
+     if (!check_target_can_hijack(target)) {
+         mutex_unlock(&g_install_lock);
+         return -EINVAL;
+     }
 
      /* B carries a signed 26-bit word offset (+-128MB). Mask the
       * immediate and refuse out-of-range handlers instead of writing
       * a truncated branch (vmalloc and kernel text are often
-      * farther apart than that). */
+      * farther apart than that). PC base is the branch word itself
+      * (target): AArch64 has no Thumb state and the patched word sits
+      * at offset 0 of the overwritten range, so no page alignment is
+      * applied. Bounds are [-128MB, +128MB-4]: imm26 spans
+      * [-2^25, 2^25-1] words. */
      delta = (long)(uintptr_t)handler - (long)(uintptr_t)target;
-     if ((delta & 3L) || delta < -(128L << 20) || delta > ((128L << 20) - 4L))
+     if ((delta & 3L) || delta < -(128L << 20) || delta > ((128L << 20) - 4L)) {
+         mutex_unlock(&g_install_lock);
          return -ERANGE;
+     }
      branch_insn = (u32)0x14000000UL | (u32)(((unsigned long)delta >> 2) & 0x03FFFFFFUL);
 
      tramp = memd_create_trampoline(target, handler, hook_size);
-     if (!tramp)
+     if (!tramp) {
+         mutex_unlock(&g_install_lock);
          return -ENOMEM;
+     }
 
      ret = hook_write_range(target, &branch_insn, INSTRUCTION_SIZE);
      if (ret) {
          /* Never leave an orphan trampoline for a hook that did not
           * land (its jump-back would target the unpatched code). */
          memd_destroy_trampoline(tramp);
+         mutex_unlock(&g_install_lock);
          return ret;
      }
 
      if (orig)
          *orig = tramp->code;
 
+     mutex_unlock(&g_install_lock);
      return 0;
  }
 
@@ -309,29 +395,51 @@ void memd_remove_inline_hook(void *target, void *orig)
       * Fail closed (hook stays, no crash). */
      if (!target || !orig)
          return;
-     ret = hook_write_range(target, orig, HIJACK_SIZE);
-     if (ret)
-         return;
 
-     /* Unlink under the lock, then free without holding it:
-      * memd_destroy_trampoline takes the same lock, so calling it
-      * inside list_for_each_entry_safe deadlocked. Only drop the
-      * trampoline when the restore above succeeded (otherwise orig
-      * callers would jump into freed exec memory). */
+     mutex_lock(&g_install_lock);
+
+     /* Lookup BEFORE any write, and only restore when orig is the live
+      * trampoline code for this target. A second remove with a stale
+      * (vfree'd) orig finds no entry or fails the equality check, so
+      * the dangling pointer is never dereferenced (no UAF read). A
+      * recycled target with a fresh hook can never match a stale orig
+      * either, so cross-wiring text with garbage is refused. */
      spin_lock(&g_trampoline_lock);
      list_for_each_entry_safe(tramp, tmp, &g_trampoline_list, list) {
          if (tramp->target == target) {
-             list_del(&tramp->list);
              found = tramp;
              break;
          }
      }
+     if (!found || found->code != orig) {
+         spin_unlock(&g_trampoline_lock);
+         mutex_unlock(&g_install_lock);
+         return;
+     }
+     /* Unlink under the lock, then patch and free without holding it:
+      * memd_destroy_trampoline takes the same lock, so calling it
+      * inside list_for_each_entry_safe deadlocked. The entry stays
+      * allocated until the free below, so the restore reads live
+      * memory (orig == found->code by the check above). */
+     list_del(&found->list);
      spin_unlock(&g_trampoline_lock);
 
-     if (found) {
-         if (found->code)
-             vfree(found->code);
-         kfree(found);
+     ret = hook_write_range(target, orig, HIJACK_SIZE);
+     if (ret) {
+         /* Restore failed: the branch still points at the handler, so
+          * re-link the entry instead of freeing a live trampoline out
+          * from under it (next remove retries; nothing leaks, the
+          * entry is still reachable from the list). */
+         spin_lock(&g_trampoline_lock);
+         list_add(&found->list, &g_trampoline_list);
+         spin_unlock(&g_trampoline_lock);
+         mutex_unlock(&g_install_lock);
+         return;
      }
+
+     if (found->code)
+         vfree(found->code);
+     kfree(found);
+     mutex_unlock(&g_install_lock);
  }
 /* kmod/memd/inlinehook/hijack_arm64.c[∂] */

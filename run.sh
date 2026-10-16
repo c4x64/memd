@@ -3,7 +3,7 @@
 #
 # One runtime-adapting .ko (rwbridge-universal.ko, 5.10-baseline build: no
 # kprobe imports, no version-conditional behavior) loads on 5.10–6.12; the
-# eight DDK-built per-KMI artifacts stay as fallback. Two things that used
+# eleven DDK-built per-KMI artifacts stay as fallback. Two things that used
 # to be compile-time are resolved here, at runtime:
 #   1. vermagic — the baked placeholder is patched in a temp copy to match
 #      the running kernel (dmesg-feedback retry if extras differ), then
@@ -77,16 +77,16 @@ fi
 if [ -n "$1" ] && [ -f "$1" ]; then
     KO="$1"
 else
-    for c in "${SCRIPT_DIR}/rwbridge-universal.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge-universal.ko"; do
+    for c in "${SCRIPT_DIR}/rwbridge-universal.ko" "${SCRIPT_DIR}/kmod/rwbridge-universal.ko" "${SCRIPT_DIR}/dl/kmod/rwbridge-universal.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge-universal.ko"; do
         if [ -f "$c" ]; then KO="$c"; break; fi
     done
     if [ -z "$KO" ]; then
-        for c in "${SCRIPT_DIR}/rwbridge.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge.ko"; do
+        for c in "${SCRIPT_DIR}/rwbridge.ko" "${SCRIPT_DIR}/kmod/rwbridge.ko" "${SCRIPT_DIR}/dl/kmod/rwbridge.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge.ko"; do
             if [ -f "$c" ]; then KO="$c"; break; fi
         done
     fi
 fi
-[ -n "$KO" ] || die "rwbridge.ko not found (pass path as \$1 or place next to run.sh)"
+[ -n "$KO" ] || die "rwbridge-universal.ko not found (pass path as \$1 or place next to run.sh)"
 KVER=$(uname -r 2>/dev/null)
 log "kernel: $KVER"
 # NOTE: per-KMI auto-selection used to live here (exact kver+generation,
@@ -99,7 +99,7 @@ log "artifact selected: $KO"
 # finit-force helper (version-magic override via raw finit_module: device
 # insmods have no -f). Side by side with this script when bundled.
 FFORCE=""
-for f in "${SCRIPT_DIR}/finit-force" "${SCRIPT_DIR}/kmod_bin/finit-force"; do
+for f in "${SCRIPT_DIR}/finit-force" "${SCRIPT_DIR}/kmod/finit-force" "${SCRIPT_DIR}/dl/kmod/finit-force" "${SCRIPT_DIR}/kmod_bin/finit-force"; do
     if [ -x "$f" ]; then FFORCE="$f"; break; fi
 done
 

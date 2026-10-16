@@ -37,6 +37,11 @@ static bool touch_initialized = false;
 static bool gyro_is_virtual = false;
 static bool touch_is_virtual = false;
 
+/* Forward decls (defined below): cleanup calls them before their
+ * definitions. C89 block-start decls; no new includes. */
+static void memd_gyro_release_locked(void);
+static void memd_touch_release_locked(void);
+
 static LIST_HEAD(virtual_inputs);
 static DEFINE_MUTEX(virtual_input_lock);
 

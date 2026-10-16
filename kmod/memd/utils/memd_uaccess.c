@@ -243,10 +243,21 @@ int memd_copy_from_user_iovec(void *dst, const struct iovec *iov,
 
     kdst = (char *)dst;
 
+    /* Clamp invariant: total_copied <= len holds on entry and after
+     * every round (copied <= seg_len <= len - total_copied), so
+     * (len - total_copied) never underflows and
+     * total_copied + seg_len <= len never wraps. Fail closed if the
+     * invariant ever breaks (defensive: aborts instead of copying
+     * gigabytes on wrap). */
     for (i = 0; i < nr_segs; i++) {
         unsigned long seg_len = iov[i].iov_len;
         unsigned long remaining;
         unsigned long copied;
+        if (total_copied > len) {
+            if (bytes_copied)
+                *bytes_copied = total_copied;
+            return -EFAULT;
+        }
         /* Subtraction form: total_copied + seg_len can wrap to a small
          * value and dodge the clamp, copying gigabytes. */
         if (seg_len > len - total_copied)
@@ -289,10 +300,20 @@ int memd_copy_to_user_iovec(void *dst, const struct iovec *iov,
 
     kdst = (const char *)dst;
 
+    /* Clamp invariant: total_copied <= len holds on entry and after
+     * every round (copied <= seg_len <= len - total_copied), so
+     * (len - total_copied) never underflows and
+     * total_copied + seg_len <= len never wraps. Fail closed if the
+     * invariant ever breaks. */
     for (i = 0; i < nr_segs; i++) {
         unsigned long seg_len = iov[i].iov_len;
         unsigned long remaining;
         unsigned long copied;
+        if (total_copied > len) {
+            if (bytes_copied)
+                *bytes_copied = total_copied;
+            return -EFAULT;
+        }
         /* See above: never add before comparing. */
         if (seg_len > len - total_copied)
             seg_len = len - total_copied;
