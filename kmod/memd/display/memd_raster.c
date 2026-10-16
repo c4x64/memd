@@ -1,6 +1,8 @@
 /* CPU rasterizer for the kernel display facility (numeric ops only). */
 #include "memd_raster.h"
 
+#include <linux/overflow.h>
+
 /* 8x8 bitmap, printable ASCII 32..126. Generic glyph shapes. */
 static const unsigned char memd_font[95][8] = {
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* space */
@@ -104,12 +106,16 @@ static inline void put(__u32 *fb, __u32 w, __u32 h,
                        __u32 x, __u32 y, __u32 c)
  {
     if (x < w && y < h)
-        fb[y * w + x] = c;
+        fb[(size_t)y * (size_t)w + (size_t)x] = c;
 }
 
 void memd_raster_clear(__u32 *fb, __u32 w, __u32 h, __u32 color)
  {
-    __u32 i, n = w * h;
+    size_t n = 0, i;
+    if (!fb || !w || !h)
+        return;
+    if (check_mul_overflow((size_t)w, (size_t)h, &n) || !n)
+        return;
     for (i = 0; i < n; i++)
         fb[i] = color;
 }
@@ -118,22 +124,22 @@ void memd_raster_rect(__u32 *fb, __u32 w, __u32 h,
                       __u32 x, __u32 y, __u32 rw, __u32 rh, __u32 color)
  {
     __u32 ix, iy;
-    if (!rw || !rh || x >= w || y >= h)
+    if (!fb || !rw || !rh || x >= w || y >= h)
         return;
-    if (x + rw > w)
+    if (rw > w - x)
         rw = w - x;
-    if (y + rh > h)
+    if (rh > h - y)
         rh = h - y;
     for (iy = 0; iy < rh; iy++)
         for (ix = 0; ix < rw; ix++)
-            fb[(y + iy) * w + (x + ix)] = color;
+            fb[(size_t)(y + iy) * (size_t)w + (size_t)(x + ix)] = color;
 }
 
 void memd_raster_line(__u32 *fb, __u32 w, __u32 h,
                       __u32 x0, __u32 y0, __u32 x1, __u32 y1, __u32 color)
  {
     long dx, dy, sx, sy, err, e2, x, y;
-    if (!w || !h)
+    if (!fb || !w || !h)
         return;
     dx = (x1 > x0) ? (long)(x1 - x0) : (long)(x0 - x1);
     dy = (y1 > y0) ? (long)(y1 - y0) : (long)(y0 - y1);
@@ -163,13 +169,19 @@ void memd_raster_glyph(__u32 *fb, __u32 w, __u32 h,
                        __u32 x, __u32 y, __u32 glyph, __u32 color)
  {
     unsigned row, col;
-    if (glyph < 32 || glyph > 126 || x >= w || y >= h)
+    if (!fb || glyph < 32 || glyph > 126 || x >= w || y >= h)
         return;
     for (row = 0; row < 8; row++) {
         unsigned char bits = memd_font[glyph - 32][row];
+        __u32 py = y + (row & 0xFFu);
+        if (py < y)
+            continue;
         for (col = 0; col < 8; col++) {
+            __u32 px = x + (col & 0xFFu);
+            if (px < x)
+                continue;
             if (bits & (0x80u >> col))
-                put(fb, w, h, x + col, y + row, color);
+                put(fb, w, h, px, py, color);
         }
     }
 }
@@ -192,65 +204,101 @@ static inline __u32 alpha_blend(__u32 src, __u32 dst)
     if (sa == 255)
         return src;
 
-    /* Porter-Duff over operator */
-    __u16 a = sa + da * (255 - sa) / 255;
-    if (a == 0)
-        return 0;
-
-    __u16 r = (sr * sa + dr * da * (255 - sa) / 255) / a * 255;
-    __u16 g = (sg * sa + dg * da * (255 - sa) / 255) / a * 255;
-    __u16 b = (sb * sa + db * da * (255 - sa) / 255) / a * 255;
-
-    return (a << 24) | ((r / 255) << 16) | ((g / 255) << 8) | (b / 255);
+    /* Porter-Duff over operator (multiply before divide; __u32
+     * intermediates: products stay below 255*255*255 < 2^24). */
+    {
+        __u32 inv = (unsigned int)255 - (unsigned int)sa;
+        __u32 a = (unsigned int)sa +
+            (unsigned int)da * inv / (unsigned int)255;
+        __u32 r, g, b;
+        if (a == 0)
+            return 0;
+        r = ((unsigned int)sr * (unsigned int)sa +
+             (unsigned int)dr * (unsigned int)da * inv / (unsigned int)255) /
+            a;
+        g = ((unsigned int)sg * (unsigned int)sa +
+             (unsigned int)dg * (unsigned int)da * inv / (unsigned int)255) /
+            a;
+        b = ((unsigned int)sb * (unsigned int)sa +
+             (unsigned int)db * (unsigned int)da * inv / (unsigned int)255) /
+            a;
+        if (r > 255)
+            r = 255;
+        if (g > 255)
+            g = 255;
+        if (b > 255)
+            b = 255;
+        return (a << 24) | (r << 16) | (g << 8) | b;
+    }
 }
 
 void memd_raster_composite_layers(__u32 *fb, __u32 w, __u32 h,
                                    struct memd_disp_layer *layers, __u32 layer_count)
  {
-    int i, j;
-    if (!fb || !layers || layer_count == 0)
+    unsigned int order[8];
+    unsigned int n;
+    unsigned int i, j, k;
+    if (!fb || !w || !h || !layers || layer_count == 0)
         return;
+    if (layer_count > 8)
+        layer_count = 8;
 
-    /* Sort layers by z_order (simple bubble sort for small count) */
-    for (i = 0; i < layer_count - 1; i++) {
-        for (j = 0; j < layer_count - i - 1; j++) {
-            if (layers[j].z_order > layers[j + 1].z_order) {
-                struct memd_disp_layer tmp = layers[j];
-                layers[j] = layers[j + 1];
-                layers[j + 1] = tmp;
+    /* Order by z_order without mutating the caller's array (core
+     * remove/update rely on stable indices). */
+    n = layer_count;
+    for (i = 0; i < n; i++)
+        order[i] = i;
+    for (i = 0; i + 1 < n; i++) {
+        for (j = 0; j + 1 < n - i; j++) {
+            if (layers[order[j]].z_order > layers[order[j + 1]].z_order) {
+                unsigned int t = order[j];
+                order[j] = order[j + 1];
+                order[j + 1] = t;
             }
         }
     }
 
-    for (i = 0; i < layer_count; i++) {
-        struct memd_disp_layer *layer = &layers[i];
+    for (k = 0; k < n; k++) {
+        struct memd_disp_layer *layer;
+        __u32 lx, ly, lw, lh, x, y;
+        unsigned int alpha;
+        layer = &layers[order[k]];
         if (!layer->visible || !layer->buffer)
             continue;
+        if (!layer->w || !layer->h)
+            continue;
 
-        __u32 lx = layer->x;
-        __u32 ly = layer->y;
-        __u32 lw = layer->w;
-        __u32 lh = layer->h;
-        __u8 alpha = layer->alpha;
+        lx = layer->x;
+        ly = layer->y;
+        lw = layer->w;
+        lh = layer->h;
+        alpha = layer->alpha;
 
-        /* Clipping */
+        /* Clipping (wrap-safe: lx < w already, so w - lx is valid). */
         if (lx >= w || ly >= h)
             continue;
-        if (lx + lw > w)
+        if (lw > w - lx)
             lw = w - lx;
-        if (ly + lh > h)
+        if (lh > h - ly)
             lh = h - ly;
 
-        for (__u32 y = 0; y < lh; y++) {
-            for (__u32 x = 0; x < lw; x++) {
-                __u32 src = layer->buffer[y * layer->w + x];
-                __u32 *dst = &fb[(ly + y) * w + (lx + x)];
+        for (y = 0; y < lh; y++) {
+            for (x = 0; x < lw; x++) {
+                __u32 src = layer->buffer[(size_t)y * (size_t)layer->w + (size_t)x];
+                __u32 *dst = &fb[(size_t)(ly + y) * (size_t)w + (size_t)(lx + x)];
 
-                /* Apply layer alpha */
+                /* Apply layer alpha per channel (packed multiply
+                 * would overflow __u32 and bleed channels). */
                 if (alpha != 255) {
-                    __u8 sa = alpha;
-                    src = (((src & 0xFF00FF00) * sa / 255) & 0xFF00FF00) |
-                          (((src & 0x00FF00FF) * sa / 255) & 0x00FF00FF);
+                    __u32 a0 = (src >> 24) & 255u;
+                    __u32 r0 = (src >> 16) & 255u;
+                    __u32 g0 = (src >> 8) & 255u;
+                    __u32 b0 = src & 255u;
+                    a0 = a0 * alpha / 255u;
+                    r0 = r0 * alpha / 255u;
+                    g0 = g0 * alpha / 255u;
+                    b0 = b0 * alpha / 255u;
+                    src = (a0 << 24) | (r0 << 16) | (g0 << 8) | b0;
                 }
 
                 *dst = alpha_blend(src, *dst);
@@ -263,25 +311,32 @@ void memd_raster_composite_cursor(__u32 *fb, __u32 w, __u32 h,
                                   const __u32 *cursor_fb, __u32 cw, __u32 ch,
                                   __u32 x, __u32 y)
  {
+    __u32 stride, dw, dh, cy, cx;
     if (!fb || !cursor_fb || cw == 0 || ch == 0)
         return;
+    if (!w || !h)
+        return;
 
-    /* Clipping */
+    /* Clipping (keep the original row stride for source rows). */
     if (x >= w || y >= h)
         return;
-    if (x + cw > w)
-        cw = w - x;
-    if (y + ch > h)
-        ch = h - y;
+    stride = cw;
+    dw = cw;
+    dh = ch;
+    if (dw > w - x)
+        dw = w - x;
+    if (dh > h - y)
+        dh = h - y;
 
-    for (__u32 cy = 0; cy < ch; cy++) {
-        for (__u32 cx = 0; cx < cw; cx++) {
-            __u32 src = cursor_fb[cy * cw + cx];
-            __u8 sa = (src >> 24) & 0xFF;
+    for (cy = 0; cy < dh; cy++) {
+        for (cx = 0; cx < dw; cx++) {
+            __u32 src = cursor_fb[(size_t)cy * (size_t)stride + (size_t)cx];
+            __u32 sa = (src >> 24) & 255u;
+            __u32 *dst;
             if (sa == 0)
                 continue;
 
-            __u32 *dst = &fb[(y + cy) * w + (x + cx)];
+            dst = &fb[(size_t)(y + cy) * (size_t)w + (size_t)(x + cx)];
             *dst = alpha_blend(src, *dst);
         }
     }
@@ -291,25 +346,29 @@ void memd_raster_apply_gamma(__u32 *fb, __u32 w, __u32 h,
                              const __u32 *lut_r, const __u32 *lut_g, const __u32 *lut_b,
                              __u32 size)
  {
-    if (!fb || !lut_r || !lut_g || !lut_b || size == 0)
+    size_t n = 0, i;
+    __u32 denom;
+    if (!fb || !w || !h || !lut_r || !lut_g || !lut_b || size == 0)
+        return;
+    if (size > 256)
+        size = 256;
+    if (check_mul_overflow((size_t)w, (size_t)h, &n) || !n)
         return;
 
-    __u32 n = w * h;
-    for (__u32 i = 0; i < n; i++) {
+    denom = size - 1;
+    for (i = 0; i < n; i++) {
         __u32 pixel = fb[i];
-        __u8 r = (pixel >> 16) & 0xFF;
-        __u8 g = (pixel >> 8) & 0xFF;
-        __u8 b = pixel & 0xFF;
+        __u32 r = (pixel >> 16) & 255u;
+        __u32 g = (pixel >> 8) & 255u;
+        __u32 b = pixel & 255u;
+        __u32 idx_r = (r * denom) / 255u;
+        __u32 idx_g = (g * denom) / 255u;
+        __u32 idx_b = (b * denom) / 255u;
+        __u32 nr = (lut_r[idx_r] >> 8) & 255u;
+        __u32 ng = (lut_g[idx_g] >> 8) & 255u;
+        __u32 nb = (lut_b[idx_b] >> 8) & 255u;
 
-        __u16 idx_r = (r * (size - 1)) / 255;
-        __u16 idx_g = (g * (size - 1)) / 255;
-        __u16 idx_b = (b * (size - 1)) / 255;
-
-        __u8 nr = (lut_r[idx_r] >> 8) & 0xFF;
-        __u8 ng = (lut_g[idx_g] >> 8) & 0xFF;
-        __u8 nb = (lut_b[idx_b] >> 8) & 0xFF;
-
-        fb[i] = (pixel & 0xFF000000) | ((__u32)nr << 16) | ((__u32)ng << 8) | nb;
+        fb[i] = (pixel & 0xFF000000u) | (nr << 16) | (ng << 8) | nb;
     }
 }
 /* kmod/memd/display/memd_raster.c[∂] */

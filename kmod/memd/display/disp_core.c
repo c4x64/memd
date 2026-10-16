@@ -131,12 +131,15 @@ static void memd_dirty_add(__u32 x, __u32 y, __u32 w, __u32 h)
     __u32 x1, y1;
     if (!w || !h || x >= g_core.w || y >= g_core.h)
         return;
-    x1 = x + w;
-    y1 = y + h;
-    if (x1 > g_core.w)
+    /* Saturating add (x < g_core.w, so g_core.w - x is valid). */
+    if (w > g_core.w - x)
         x1 = g_core.w;
-    if (y1 > g_core.h)
+    else
+        x1 = x + w;
+    if (h > g_core.h - y)
         y1 = g_core.h;
+    else
+        y1 = y + h;
     if (!g_core.dirty.valid) {
         g_core.dirty.x0 = x;
         g_core.dirty.y0 = y;
@@ -157,7 +160,9 @@ static void memd_dirty_add(__u32 x, __u32 y, __u32 w, __u32 h)
 
 static int64_t memd_get_time_ns(void)
  {
-    return ktime_get_real_ns();
+    /* Monotonic: wall clock jumps (NTP/settimeofday) must not skew
+     * vsync targets. */
+    return ktime_get_ns();
 }
 
 static void memd_vsync_init(void)
@@ -172,36 +177,56 @@ static void memd_vsync_init(void)
     atomic_set(&g_core.vsync.frame_pending, 0);
 }
 
+/* Lock-free sleep: shared fields are snapshotted/updated under
+ * g_core_mu; the wait itself holds no mutex (callers may or may not
+ * hold it). */
 static int memd_vsync_wait_internal(int64_t timeout_ns)
  {
-    int64_t start = memd_get_time_ns();
-    int64_t target = g_core.vsync.next_vsync_ns;
-    int64_t deadline = start + timeout_ns;
+    int64_t target, interval;
+    int enabled;
+    int64_t remaining;
+    int ret;
+    int64_t now;
+    if (timeout_ns < 0)
+        timeout_ns = 0;
 
-    if (!g_core.vsync.enabled)
+    mutex_lock(&g_core_mu);
+    enabled = g_core.vsync.enabled ? 1 : 0;
+    target = g_core.vsync.next_vsync_ns;
+    interval = g_core.vsync.frame_interval_ns;
+    mutex_unlock(&g_core_mu);
+    if (!enabled)
         return 0;
+    if (interval <= 0)
+        interval = 16666666;
 
     atomic_inc(&g_core.vsync.frame_pending);
 
-    while (memd_get_time_ns() < target) {
-        int64_t remaining = target - memd_get_time_ns();
+    while ((now = memd_get_time_ns()) < target) {
+        remaining = target - now;
         if (remaining > timeout_ns)
             remaining = timeout_ns;
         if (remaining <= 0)
             break;
 
-        int ret = wait_event_interruptible_timeout(g_core.vsync.wq,
+        ret = wait_event_interruptible_timeout(g_core.vsync.wq,
             memd_get_time_ns() >= target || kthread_should_stop(),
-            msecs_to_jiffies(remaining / 1000000 + 1));
+            msecs_to_jiffies((unsigned long)(remaining / 1000000) + 1));
         if (ret == -ERESTARTSYS || kthread_should_stop())
+            break;
+        if (timeout_ns == 0)
             break;
     }
 
     atomic_dec(&g_core.vsync.frame_pending);
 
-    int64_t now = memd_get_time_ns();
+    now = memd_get_time_ns();
+    mutex_lock(&g_core_mu);
     g_core.last_flip_ns = now;
+    if (g_core.vsync.frame_interval_ns <= 0)
+        g_core.vsync.frame_interval_ns = interval;
     g_core.vsync.next_vsync_ns = now + g_core.vsync.frame_interval_ns;
+    mutex_unlock(&g_core_mu);
     atomic_inc(&g_core.frame_count);
 
     return 0;
@@ -214,12 +239,17 @@ static void memd_vsync_notify(void)
 
 static void memd_flip_work(struct work_struct *work)
  {
+    int rc = -ENODEV;
     (void)work;
     mutex_lock(&g_core_mu);
-    if (g_core.be && g_core.be->present && g_core.front && g_core.be->present) {
-        g_core.be->present(g_core.front, g_core.w, g_core.h, &g_core.dirty);
+    if (g_core.be && g_core.be->present && g_core.front &&
+        g_core.dirty.valid) {
+        rc = g_core.be->present(g_core.front, g_core.w, g_core.h,
+                                &g_core.dirty);
     }
-    g_core.dirty.valid = false;
+    /* Keep the region on failure so the next frame retries it. */
+    if (!rc)
+        g_core.dirty.valid = false;
     mutex_unlock(&g_core_mu);
 
     memd_vsync_notify();
@@ -232,6 +262,19 @@ static int memd_schedule_flip(void)
     if (!g_flip_wq)
         return -ENODEV;
     return queue_work(g_flip_wq, &g_flip_work) ? 0 : -EBUSY;
+}
+
+/* Saturated span for LINE dirty (|a - b| + 8, never wraps). */
+static __u32 memd_span8(__u32 a, __u32 b)
+ {
+    __u64 d;
+    if (a < b)
+        d = (__u64)b - (__u64)a + (__u64)8;
+    else
+        d = (__u64)a - (__u64)b + (__u64)8;
+    if (d > (__u64)4294967295u)
+        d = (__u64)4294967295u;
+    return (__u32)d;
 }
 
 static const struct memd_disp_backend *memd_find_be(__u32 id)
@@ -292,6 +335,28 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
     g_core.h = 0;
     g_core.be = NULL;
     g_core.dirty.valid = false;
+    /* Drop queued flips before reusing buffers (worker needs the
+     * mutex, so flush without holding it). */
+    if (g_flip_wq) {
+        mutex_unlock(&g_core_mu);
+        flush_workqueue(g_flip_wq);
+        mutex_lock(&g_core_mu);
+    }
+    /* Free core-owned overlays (leaked before: memset discarded them). */
+    if (g_core.cursor_fb) {
+        kfree(g_core.cursor_fb);
+        g_core.cursor_fb = NULL;
+    }
+    for (i = 0; i < g_core.layer_count && i < MEMD_DISP_MAX_LAYERS; i++) {
+        if (g_core.layers[i].buffer) {
+            kfree(g_core.layers[i].buffer);
+            g_core.layers[i].buffer = NULL;
+        }
+    }
+    /* Wake stale waiters before recycling the waitqueue (guarded:
+     * the queue is only valid after a prior init). */
+    if (g_core.vsync.frame_interval_ns)
+        wake_up_all(&g_core.vsync.wq);
 
     /* Initialize new features */
     memset(&g_core.vsync, 0, sizeof(g_core.vsync));
@@ -413,6 +478,7 @@ fail_open:
 int memd_core_uninstall(void)
  {
     struct task_struct *t;
+    unsigned long i;
     mutex_lock(&g_core_mu);
     if (!g_core.be) {
         mutex_unlock(&g_core_mu);
@@ -426,6 +492,8 @@ int memd_core_uninstall(void)
 #ifdef MEMD_DISP_TEST
     memd_vnc_stop();
 #endif
+    if (g_flip_wq)
+        flush_workqueue(g_flip_wq);
     mutex_lock(&g_core_mu);
     if (g_core.be && g_core.be->close)
         g_core.be->close();
@@ -437,6 +505,22 @@ int memd_core_uninstall(void)
     g_core.w = g_core.h = 0;
     g_core.be = NULL;
     g_core.dirty.valid = false;
+    if (g_core.cursor_fb) {
+        kfree(g_core.cursor_fb);
+        g_core.cursor_fb = NULL;
+    }
+    g_core.cursor_w = g_core.cursor_h = 0;
+    g_core.cursor_x = g_core.cursor_y = 0;
+    g_core.cursor_visible = false;
+    for (i = 0; i < g_core.layer_count && i < MEMD_DISP_MAX_LAYERS; i++) {
+        if (g_core.layers[i].buffer) {
+            kfree(g_core.layers[i].buffer);
+            g_core.layers[i].buffer = NULL;
+        }
+    }
+    memset(g_core.layers, 0, sizeof(g_core.layers));
+    g_core.layer_count = 0;
+    wake_up_all(&g_core.vsync.wq);
     mutex_unlock(&g_core_mu);
     return 0;
 }
@@ -509,10 +593,8 @@ int memd_core_frame(const struct memd_disp_op *ops, __u32 count)
                              ops[i].color);
             memd_dirty_add(ops[i].x < ops[i].w ? ops[i].x : ops[i].w,
                           ops[i].y < ops[i].h ? ops[i].y : ops[i].h,
-                          ops[i].x < ops[i].w ? ops[i].w - ops[i].x + 8 :
-                                                  ops[i].x - ops[i].w + 8,
-                          ops[i].y < ops[i].h ? ops[i].h - ops[i].y + 8 :
-                                                  ops[i].y - ops[i].h + 8);
+                          memd_span8(ops[i].x, ops[i].w),
+                          memd_span8(ops[i].y, ops[i].h));
             break;
         case MEMD_DISP_GLYPH:
             memd_raster_glyph(g_core.back, g_core.w, g_core.h,
@@ -551,28 +633,38 @@ int memd_core_frame(const struct memd_disp_op *ops, __u32 count)
                                      g_core.cursor_x, g_core.cursor_y);
     }
 
+    /* Exactly one present per frame: async flip owns dirty when
+     * queued; otherwise synchronous fallback (also covers !tear_free).
+     * Dirty clears only on success so failures retry next frame. */
     if (g_core.tear_free) {
-        /* Schedule async flip with vsync */
-        memd_schedule_flip();
-        if (g_core.vsync.enabled) {
+        int q = memd_schedule_flip();
+        int want_wait = g_core.vsync.enabled ? 1 : 0;
+        int64_t wait_ns = g_core.vsync.frame_interval_ns * 2;
+        if (!q) {
             mutex_unlock(&g_core_mu);
-            memd_vsync_wait_internal(g_core.vsync.frame_interval_ns * 2);
-            mutex_lock(&g_core_mu);
+            if (want_wait)
+                memd_vsync_wait_internal(wait_ns);
+            return 0;
         }
+        /* Queue busy/missing: fall through to synchronous present. */
     }
 
     if (g_core.be->present) {
         rc = g_core.be->present(g_core.front, g_core.w, g_core.h,
                                 &g_core.dirty);
     }
-    g_core.dirty.valid = false;
-    mutex_unlock(&g_core_mu);
+    if (!rc)
+        g_core.dirty.valid = false;
+    {
+        int want_wait = g_core.vsync.enabled ? 1 : 0;
+        int64_t wait_ns = g_core.vsync.frame_interval_ns;
+        mutex_unlock(&g_core_mu);
 
-    if (!g_core.tear_free) {
-        memd_vsync_wait_internal(g_core.vsync.frame_interval_ns);
+        if (want_wait)
+            memd_vsync_wait_internal(wait_ns);
+
+        return rc;
     }
-
-    return rc;
 }
 
 #ifdef MEMD_DISP_TEST
@@ -638,6 +730,12 @@ int memd_core_set_mode(const struct memd_disp_mode *mode)
 
     if (!mode)
         return -EINVAL;
+    if (!mode->w || !mode->h || !mode->refresh_rate)
+        return -EINVAL;
+    if (mode->w > MEMD_DISP_MAX_W || mode->h > MEMD_DISP_MAX_H)
+        return -EINVAL;
+    if (mode->refresh_rate > 1000)
+        return -EINVAL;
 
     mutex_lock(&g_core_mu);
     if (!g_core.be) {
@@ -649,7 +747,7 @@ int memd_core_set_mode(const struct memd_disp_mode *mode)
         rc = g_core.be->set_mode(mode);
         if (!rc) {
             g_core.current_mode = *mode;
-            g_core.frame_interval_ns = 1000000000LL / mode->refresh_rate;
+            g_core.frame_interval_ns = 1000000000LL / (int64_t)mode->refresh_rate;
             g_core.vsync.frame_interval_ns = g_core.frame_interval_ns;
         }
     } else {
@@ -737,17 +835,23 @@ int memd_core_dpms(int mode)
 
 int memd_core_vsync_wait(int64_t timeout_ns)
  {
-    if (!g_core.vsync.enabled)
-        return 0;
-
+    /* Internal snapshots enabled/interval under lock; no unlocked
+     * access here. */
     return memd_vsync_wait_internal(timeout_ns);
 }
 
 int memd_core_cursor_set(const __u32 *cursor_fb, __u32 w, __u32 h, __u32 x, __u32 y)
  {
     int rc = 0;
+    size_t px = 0, bytes = 0;
+    __u32 *fresh = NULL;
 
     if (!cursor_fb || w == 0 || h == 0)
+        return -EINVAL;
+    if (w > MEMD_DISP_MAX_W || h > MEMD_DISP_MAX_H)
+        return -EINVAL;
+    if (check_mul_overflow((size_t)w, (size_t)h, &px) ||
+        check_mul_overflow(px, (size_t)4, &bytes) || !bytes)
         return -EINVAL;
 
     mutex_lock(&g_core_mu);
@@ -758,78 +862,104 @@ int memd_core_cursor_set(const __u32 *cursor_fb, __u32 w, __u32 h, __u32 x, __u3
 
     if (g_core.be->cursor_set) {
         rc = g_core.be->cursor_set(cursor_fb, w, h, x, y);
-    }
-
-    if (!rc) {
-        if (g_core.cursor_fb)
-            vfree(g_core.cursor_fb);
-        g_core.cursor_fb = kmalloc(w * h * 4, GFP_KERNEL);
-        if (g_core.cursor_fb)
-            memcpy(g_core.cursor_fb, cursor_fb, w * h * 4);
-        g_core.cursor_w = w;
-        g_core.cursor_h = h;
-        g_core.cursor_x = x;
-        g_core.cursor_y = y;
-        g_core.cursor_visible = true;
-    }
-
-    mutex_unlock(&g_core_mu);
-    return rc;
-}
-
-int memd_core_cursor_move(__u32 x, __u32 y)
- {
-    mutex_lock(&g_core_mu);
-    g_core.cursor_x = x;
-    g_core.cursor_y = y;
-    mutex_unlock(&g_core_mu);
-
-    if (g_core.be && g_core.be->cursor_move)
-        return g_core.be->cursor_move(x, y);
-    return 0;
-}
-
-int memd_core_cursor_show(bool show)
- {
-    mutex_lock(&g_core_mu);
-    g_core.cursor_visible = show;
-    mutex_unlock(&g_core_mu);
-
-    if (g_core.be && g_core.be->cursor_show)
-        return g_core.be->cursor_show(show);
-    return 0;
-}
-
-int memd_core_layer_add(struct memd_disp_layer *layer)
- {
-    if (!layer || layer->w == 0 || layer->h == 0)
-        return -EINVAL;
-
-    mutex_lock(&g_core_mu);
-    if (!g_core.be) {
-        mutex_unlock(&g_core_mu);
-        return -ENODEV;
-    }
-
-    if (g_core.layer_count >= MEMD_DISP_MAX_LAYERS) {
-        mutex_unlock(&g_core_mu);
-        return -ENOSPC;
-    }
-
-    if (g_core.be->layer_add) {
-        int rc = g_core.be->layer_add(layer);
         if (rc) {
             mutex_unlock(&g_core_mu);
             return rc;
         }
     }
 
-    layer->buffer = kmalloc(layer->w * layer->h * 4, GFP_KERNEL);
-    if (!layer->buffer) {
+    fresh = kmalloc(bytes, GFP_KERNEL);
+    if (!fresh) {
         mutex_unlock(&g_core_mu);
         return -ENOMEM;
     }
+    memcpy(fresh, cursor_fb, bytes);
+    if (g_core.cursor_fb)
+        kfree(g_core.cursor_fb);
+    g_core.cursor_fb = fresh;
+    g_core.cursor_w = w;
+    g_core.cursor_h = h;
+    g_core.cursor_x = x;
+    g_core.cursor_y = y;
+    g_core.cursor_visible = true;
 
+    mutex_unlock(&g_core_mu);
+    return 0;
+}
+
+int memd_core_cursor_move(__u32 x, __u32 y)
+ {
+    int rc = 0;
+    mutex_lock(&g_core_mu);
+    g_core.cursor_x = x;
+    g_core.cursor_y = y;
+    if (g_core.be && g_core.be->cursor_move)
+        rc = g_core.be->cursor_move(x, y);
+    mutex_unlock(&g_core_mu);
+
+    return rc;
+}
+
+int memd_core_cursor_show(bool show)
+ {
+    int rc = 0;
+    mutex_lock(&g_core_mu);
+    g_core.cursor_visible = show;
+    if (g_core.be && g_core.be->cursor_show)
+        rc = g_core.be->cursor_show(show);
+    mutex_unlock(&g_core_mu);
+
+    return rc;
+}
+
+int memd_core_layer_add(struct memd_disp_layer *layer)
+ {
+    size_t px = 0, bytes = 0;
+    __u32 *fresh = NULL;
+    __u32 *src = NULL;
+    int rc = 0;
+    if (!layer || layer->w == 0 || layer->h == 0)
+        return -EINVAL;
+    if (layer->w > MEMD_DISP_MAX_W || layer->h > MEMD_DISP_MAX_H)
+        return -EINVAL;
+    if (check_mul_overflow((size_t)layer->w, (size_t)layer->h, &px) ||
+        check_mul_overflow(px, (size_t)4, &bytes) || !bytes)
+        return -EINVAL;
+
+    /* Allocate first so a backend add is never left dangling on
+     * allocation failure. */
+    fresh = kmalloc(bytes, GFP_KERNEL);
+    if (!fresh)
+        return -ENOMEM;
+    src = layer->buffer;
+    if (src)
+        memcpy(fresh, src, bytes);
+    else
+        memset(fresh, 0, bytes);
+
+    mutex_lock(&g_core_mu);
+    if (!g_core.be) {
+        mutex_unlock(&g_core_mu);
+        kfree(fresh);
+        return -ENODEV;
+    }
+
+    if (g_core.layer_count >= MEMD_DISP_MAX_LAYERS) {
+        mutex_unlock(&g_core_mu);
+        kfree(fresh);
+        return -ENOSPC;
+    }
+
+    if (g_core.be->layer_add) {
+        rc = g_core.be->layer_add(layer);
+        if (rc) {
+            mutex_unlock(&g_core_mu);
+            kfree(fresh);
+            return rc;
+        }
+    }
+
+    layer->buffer = fresh;
     g_core.layers[g_core.layer_count++] = *layer;
     mutex_unlock(&g_core_mu);
     return 0;
@@ -837,6 +967,7 @@ int memd_core_layer_add(struct memd_disp_layer *layer)
 
 int memd_core_layer_remove(struct memd_disp_layer *layer)
  {
+    unsigned long i;
     if (!layer)
         return -EINVAL;
 
@@ -846,17 +977,26 @@ int memd_core_layer_remove(struct memd_disp_layer *layer)
         return -ENODEV;
     }
 
-    for (int i = 0; i < g_core.layer_count; i++) {
-        if (&g_core.layers[i] == layer) {
+    /* Core stores a copy on add, so the caller's pointer never equals
+     * an array element: match by the core-owned buffer instead. */
+    for (i = 0; i < g_core.layer_count; i++) {
+        if (g_core.layers[i].buffer && layer->buffer &&
+            g_core.layers[i].buffer == layer->buffer) {
             if (g_core.be->layer_remove)
-                g_core.be->layer_remove(layer);
+                g_core.be->layer_remove(&g_core.layers[i]);
 
-            if (g_core.layers[i].buffer)
-                kfree(g_core.layers[i].buffer);
+            kfree(g_core.layers[i].buffer);
 
-            memmove(&g_core.layers[i], &g_core.layers[i + 1],
-                    (g_core.layer_count - i - 1) * sizeof(struct memd_disp_layer));
+            if (i + 1 < g_core.layer_count) {
+                memmove(&g_core.layers[i], &g_core.layers[i + 1],
+                        (g_core.layer_count - i - 1) *
+                        sizeof(struct memd_disp_layer));
+            } else {
+                memset(&g_core.layers[i], 0,
+                       sizeof(struct memd_disp_layer));
+            }
             g_core.layer_count--;
+            layer->buffer = NULL;
             mutex_unlock(&g_core_mu);
             return 0;
         }
@@ -877,13 +1017,28 @@ int memd_core_layer_update(struct memd_disp_layer *layer)
         return -ENODEV;
     }
 
-    for (int i = 0; i < g_core.layer_count; i++) {
-        if (&g_core.layers[i] == layer) {
-            if (g_core.be->layer_update)
-                g_core.be->layer_update(layer);
-            g_core.layers[i] = *layer;
-            mutex_unlock(&g_core_mu);
-            return 0;
+    {
+        unsigned long i;
+        for (i = 0; i < g_core.layer_count; i++) {
+            if (g_core.layers[i].buffer && layer->buffer &&
+                g_core.layers[i].buffer == layer->buffer) {
+                /* Buffer is core-owned: resize needs remove+add
+                 * (avoids leaking or aliasing the old buffer). */
+                if (layer->w != g_core.layers[i].w ||
+                    layer->h != g_core.layers[i].h) {
+                    mutex_unlock(&g_core_mu);
+                    return -EINVAL;
+                }
+                if (g_core.be->layer_update)
+                    g_core.be->layer_update(&g_core.layers[i]);
+                g_core.layers[i].x = layer->x;
+                g_core.layers[i].y = layer->y;
+                g_core.layers[i].alpha = layer->alpha;
+                g_core.layers[i].visible = layer->visible;
+                g_core.layers[i].z_order = layer->z_order;
+                mutex_unlock(&g_core_mu);
+                return 0;
+            }
         }
     }
 
@@ -906,10 +1061,13 @@ int memd_core_gamma_set(const __u16 *r, const __u16 *g, const __u16 *b, __u32 si
         g_core.gamma_size = size;
     }
 
-    for (int i = 0; i < size; i++) {
-        g_core.gamma_lut_r[i] = (__u32)r[i] << 8;
-        g_core.gamma_lut_g[i] = (__u32)g[i] << 8;
-        g_core.gamma_lut_b[i] = (__u32)b[i] << 8;
+    {
+        unsigned long i;
+        for (i = 0; i < size; i++) {
+            g_core.gamma_lut_r[i] = (__u32)r[i] << 8;
+            g_core.gamma_lut_g[i] = (__u32)g[i] << 8;
+            g_core.gamma_lut_b[i] = (__u32)b[i] << 8;
+        }
     }
 
     g_core.gamma_dirty = true;

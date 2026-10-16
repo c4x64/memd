@@ -66,7 +66,7 @@ int memd_net_gen(void)
             continue;
         maj = 0;
         j = i;
-        while (j < 64 && rel[j] >= '0' && rel[j] <= '9') {
+        while (j < 64 && rel[j] >= '0' && rel[j] <= '9' && maj < 10000) {
             maj = maj * 10 + (rel[j] - '0');
             j++;
         }
@@ -76,7 +76,7 @@ int memd_net_gen(void)
         if (j >= 64 || rel[j] < '0' || rel[j] > '9')
             continue;
         min = 0;
-        while (j < 64 && rel[j] >= '0' && rel[j] <= '9') {
+        while (j < 64 && rel[j] >= '0' && rel[j] <= '9' && min < 10000) {
             min = min * 10 + (rel[j] - '0');
             j++;
         }

@@ -108,13 +108,13 @@ jobs:
           fi
 
       - name: Authenticate to KernelCI BigQuery
-        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' }}
+        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' && secrets.KCIDB_GCP_CREDENTIALS != '' }}
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.KCIDB_GCP_CREDENTIALS }}
 
       - name: Set up BigQuery CLI
-        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' }}
+        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' && secrets.KCIDB_GCP_CREDENTIALS != '' }}
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ fromJSON(secrets.KCIDB_GCP_CREDENTIALS).project_id }}
@@ -130,7 +130,7 @@ jobs:
 
       - name: Query verified KernelCI builds
         id: query
-        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' }}
+        if: ${{ inputs.manifest_run_id == '' && steps.mirror.outputs.ok != 'true' && secrets.KCIDB_GCP_CREDENTIALS != '' }}
         env:
           KCIDB_GCP_PROJECT_ID: ${{ fromJSON(secrets.KCIDB_GCP_CREDENTIALS).project_id }}
         run: |
@@ -295,7 +295,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kernelci-batch-${{ needs.prepare-kcidb-batch.outputs.start_offset }}-worker-${{ matrix.worker }}
+          name: kernelci-batch-worker-${{ matrix.worker }}
           path: batch-results/
           if-no-files-found: warn
           retention-days: 30
@@ -422,7 +422,7 @@ jobs:
             echo 'MODULE_LICENSE("GPL");';
           } > /tmp/memd_offexp-$IMG.c
           mkdir -p /tmp/expmod-$IMG && cp /tmp/memd_offexp-$IMG.c /tmp/expmod-$IMG/ && printf 'obj-m += memd_offexp.o\nCFLAGS_REMOVE_memd_offexp.o += -flto=thin -flto -flto=full -fsplit-lto-unit\nCFLAGS_memd_offexp.o += -fno-lto\n' > /tmp/expmod-$IMG/Makefile
-          cat /tmp/expmod-$IMG/Makefile; ls /tmp/expmod-$IMG/; make -C "$KDIR_RESOLVED" M=/tmp/expmod-$IMG modules 2>&1 | tail -5; echo "MAKE-RC=$?"; ls -la /tmp/expmod-$IMG/ 2>&1 | head -8
+          cat /tmp/expmod-$IMG/Makefile; ls /tmp/expmod-$IMG/; make -C "$KDIR_RESOLVED" M=/tmp/expmod-$IMG modules 2>&1 | tail -5; echo "MAKE-RC=${PIPESTATUS[0]}"; ls -la /tmp/expmod-$IMG/ 2>&1 | head -8
           (NMX=""; for t in llvm-nm aarch64-linux-gnu-nm nm; do command -v $t >/dev/null 2>&1 && { NMX=$t; break; }; done; \
            echo "NM=$NMX"; $NMX /tmp/expmod-$IMG/memd_offexp.o 2>&1 | grep -iE "_w_|no symbols" | head -35) || \
             echo "offexp kbuild unavailable"
@@ -649,5 +649,7 @@ jobs:
             rwbridge-spx
             rwbridge-spx.lz4
             dl/kmod/spx_decompress
-            shell-bundle/*
+            dl/kmod/rwbridge-*.ko
+            dl/kmod/finit-force
+            run.sh
 # .github/workflows/build.yml[∂]

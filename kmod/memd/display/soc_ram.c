@@ -31,6 +31,12 @@ static int memd_ram_open(__u32 w, __u32 h)
     if (check_mul_overflow((size_t)w, (size_t)h, &px) ||
         check_mul_overflow(px, (size_t)4, &bytes) || !bytes)
         return -EINVAL;
+    /* Drop a stale buffer first (re-open without close must not leak). */
+    if (g_ram.fb) {
+        vfree(g_ram.fb);
+        g_ram.fb = NULL;
+        g_ram.w = g_ram.h = 0;
+    }
     g_ram.fb = vmalloc(bytes);
     if (!g_ram.fb)
         return -ENOMEM;

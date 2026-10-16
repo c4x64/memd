@@ -50,12 +50,15 @@ static void print_usage(const char *prog)
 static int verify_module_loaded(const char *module_name)
  {
     FILE *f = fopen("/proc/modules", "r");
+    size_t ml;
     if (!f)
         return -1;
+    ml = strlen(module_name);
 
     char line[512];
     while (fgets(line, sizeof(line), f)) {
-        if (strstr(line, module_name)) {
+        if (!strncmp(line, module_name, ml) &&
+            (line[ml] == ' ' || line[ml] == '\t')) {
             fclose(f);
             return 0;
         }
@@ -120,18 +123,18 @@ int main(int argc, char **argv)
     const char *slash = strrchr(module_path, '/');
     const char *base = slash ? slash + 1 : module_path;
     size_t blen = strlen(base);
-    char *dot;
     if (blen >= sizeof(modname))
         blen = sizeof(modname) - 1;
     memcpy(modname, base, blen);
     modname[blen] = '\0';
     module_name = modname;
-    dot = strrchr(module_name, '.');
-    if (dot) *dot = '\0';
+    blen = strlen(modname);
+    if (blen > 3 && !strcmp(modname + blen - 3, ".ko"))
+        modname[blen - 3] = '\0';
 
     fd = open(module_path, O_RDONLY);
     if (fd < 0) {
-        fprintf(stderr, "rc=-1 open: %s\n", strerror(errno));
+        printf("rc=-1 open: %s\n", strerror(errno));
         return 1;
     }
 
@@ -146,9 +149,9 @@ int main(int argc, char **argv)
         int e = errno;
         close(fd);
         if (e == EKEYREJECTED) {
-            fprintf(stderr, "rc=-%d %s (signature enforcement active)\n", e, strerror(e));
+            printf("rc=-%d %s (signature enforcement active)\n", e, strerror(e));
         } else {
-            fprintf(stderr, "rc=-%d %s\n", e, strerror(e));
+            printf("rc=-%d %s\n", e, strerror(e));
         }
         return 1;
     }
@@ -162,7 +165,7 @@ int main(int argc, char **argv)
                 printf("  module verified in /proc/modules\n");
             printf("rc=0\n");
         } else {
-            fprintf(stderr, "rc=-1 module not found in /proc/modules after load\n");
+            printf("rc=-1 module not found in /proc/modules after load\n");
             return 1;
         }
     } else {

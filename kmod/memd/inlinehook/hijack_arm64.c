@@ -67,13 +67,13 @@ int init_arch(void)
 }
 
 __nocfi int hook_write_range(void *target, void *source, int size)
- {
-    int ret = 0, i;
+  {
+     int ret = 0, i;
 
-    if (!aarch64_insn_write_ptr || !flush_icache_range_ptr)
-        return -ENODEV;
-    for (i = 0; i < size; i = i + INSTRUCTION_SIZE) {
-        ret = aarch64_insn_write_ptr(target + i, *(u32 *)(source + i));
+     if (!aarch64_insn_write_ptr || !flush_icache_range_ptr)
+         return -ENODEV;
+     for (i = 0; i < size; i = i + INSTRUCTION_SIZE) {
+         ret = aarch64_insn_write_ptr((char *)target + i, *(u32 *)((char *)source + i));
         if (ret) {
             goto out;
         }
@@ -153,12 +153,18 @@ static bool check_instruction_can_hijack(uint32_t instruction)
 }
 
 static int calculate_trampoline_size(void *target, size_t hook_size)
- {
-    size_t size = hook_size;
-    uint32_t *ptr = target;
+  {
+     size_t i;
+     size_t size;
+     uint32_t *ptr = target;
 
-    for (size_t i = 0; i < hook_size; i += INSTRUCTION_SIZE) {
-        int type = get_instruction_type(ptr[i / 4]);
+     /* Copied prologue plus the fixed jump-back epilogue (MOVZ + 3x
+      * MOVK + BR = 20 bytes, full 64-bit, no literal pool). The old
+      * code omitted the epilogue and overflowed the 32-byte
+      * allocation by 8 bytes on every hook. */
+     size = hook_size + 20;
+     for (i = 0; i < hook_size; i += INSTRUCTION_SIZE) {
+         int type = get_instruction_type(ptr[i / 4]);
 
         if (type == INST_B || type == INST_BL || type == INST_B_COND ||
             type == INST_CBZ_CBNZ || type == INST_TBZ_TBNZ ||
@@ -196,12 +202,22 @@ struct memd_trampoline *memd_create_trampoline(void *target, void *handler, size
 
     memcpy(tramp_code, target, hook_size);
 
-    ret = hook_write_range(tramp_code + hook_size, (u32[]) {
-        (u32)(0xf0000000 | (((uintptr_t)target >> 0) & 0xfffff)),
-        (u32)(0xf0000000 | (((uintptr_t)target >> 20) & 0xfffff)),
-        (u32)(0xf0000000 | (((uintptr_t)target >> 40) & 0xfffff)),
-        (u32)0xd61f0000,
-    }, 16);
+    /* Jump back to target + hook_size (past the patched B). The old
+     * code jumped to target itself (infinite handler loop), used X0
+     * (clobbers the first argument), used 0xF0000000 bases (not
+     * MOVZ/MOVK) with 20-bit chunks at shifts 0/20/40 (truncates and
+     * overflows the imm16 field), and dropped bits 48+. Full 64-bit
+     * address via X16 (IP1 scratch): MOVZ + 3x MOVK + BR X16. */
+    {
+        unsigned long resume = (unsigned long)target + hook_size;
+        u32 epilogue[5];
+        epilogue[0] = (u32)(0xD2800000UL | (((resume >> 0) & 0xFFFFUL) << 5) | 16UL);
+        epilogue[1] = (u32)(0xF2A00000UL | (((resume >> 16) & 0xFFFFUL) << 5) | 16UL);
+        epilogue[2] = (u32)(0xF2C00000UL | (((resume >> 32) & 0xFFFFUL) << 5) | 16UL);
+        epilogue[3] = (u32)(0xF2E00000UL | (((resume >> 48) & 0xFFFFUL) << 5) | 16UL);
+        epilogue[4] = (u32)0xD61F0200UL;
+        ret = hook_write_range((char *)tramp_code + hook_size, epilogue, 20);
+    }
 
     if (ret) {
         vfree(tramp_code);
@@ -244,41 +260,74 @@ bool check_target_can_hijack(void *target)
 }
 
 int memd_install_inline_hook(void *target, void *handler, void **orig)
- {
-    struct memd_trampoline *tramp;
-    size_t hook_size = HIJACK_SIZE;
-    u32 branch_insn;
+  {
+     struct memd_trampoline *tramp;
+     size_t hook_size = HIJACK_SIZE;
+     long delta;
+     u32 branch_insn;
+     int ret;
 
-    if (!check_target_can_hijack(target))
-        return -EINVAL;
+     if (!check_target_can_hijack(target))
+         return -EINVAL;
 
-    tramp = memd_create_trampoline(target, handler, hook_size);
-    if (!tramp)
-        return -ENOMEM;
+     /* B carries a signed 26-bit word offset (+-128MB). Mask the
+      * immediate and refuse out-of-range handlers instead of writing
+      * a truncated branch (vmalloc and kernel text are often
+      * farther apart than that). */
+     delta = (long)(uintptr_t)handler - (long)(uintptr_t)target - 4L;
+     if ((delta & 3L) || delta < -(128L << 20) || delta > ((128L << 20) - 4L))
+         return -ERANGE;
+     branch_insn = (u32)0x14000000UL | (u32)(((unsigned long)delta >> 2) & 0x03FFFFFFUL);
 
-    if (orig)
-        *orig = tramp->code;
+     tramp = memd_create_trampoline(target, handler, hook_size);
+     if (!tramp)
+         return -ENOMEM;
 
-    branch_insn = 0x14000000 | (((uintptr_t)handler - (uintptr_t)target - 4) >> 2);
+     ret = hook_write_range(target, &branch_insn, INSTRUCTION_SIZE);
+     if (ret) {
+         /* Never leave an orphan trampoline for a hook that did not
+          * land (its jump-back would target the unpatched code). */
+         memd_destroy_trampoline(tramp);
+         return ret;
+     }
 
-    return hook_write_range(target, &branch_insn, INSTRUCTION_SIZE);
-}
+     if (orig)
+         *orig = tramp->code;
+
+     return 0;
+ }
 
 void memd_remove_inline_hook(void *target, void *orig)
- {
-    struct memd_trampoline *tramp, *tmp;
+  {
+     struct memd_trampoline *tramp, *tmp;
+     struct memd_trampoline *found = NULL;
+     int ret = 0;
 
-    if (orig) {
-        hook_write_range(target, orig, HIJACK_SIZE);
-    }
+     if (orig) {
+         ret = hook_write_range(target, orig, HIJACK_SIZE);
+         if (ret)
+             return;
+     }
 
-    spin_lock(&g_trampoline_lock);
-    list_for_each_entry_safe(tramp, tmp, &g_trampoline_list, list) {
-        if (tramp->target == target) {
-            memd_destroy_trampoline(tramp);
-            break;
-        }
-    }
-    spin_unlock(&g_trampoline_lock);
-}
+     /* Unlink under the lock, then free without holding it:
+      * memd_destroy_trampoline takes the same lock, so calling it
+      * inside list_for_each_entry_safe deadlocked. Only drop the
+      * trampoline when the restore above succeeded (otherwise orig
+      * callers would jump into freed exec memory). */
+     spin_lock(&g_trampoline_lock);
+     list_for_each_entry_safe(tramp, tmp, &g_trampoline_list, list) {
+         if (tramp->target == target) {
+             list_del(&tramp->list);
+             found = tramp;
+             break;
+         }
+     }
+     spin_unlock(&g_trampoline_lock);
+
+     if (found) {
+         if (found->code)
+             vfree(found->code);
+         kfree(found);
+     }
+ }
 /* kmod/memd/inlinehook/hijack_arm64.c[∂] */

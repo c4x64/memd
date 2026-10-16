@@ -52,12 +52,22 @@ struct memd_learned_ext memd_learned_ext = {
     .s_dev = -1, .s_blocksize = -1, .s_blocksize_bits = -1, .s_magic = -1,
     .s_type = -1, .s_flags = -1, .s_time_gran = -1, .s_maxbytes = -1,
     .s_op_flags = -1,
+    .t_thread_cpuctx = -1, .t_thread_fpsimd = -1,
+    .t_signal_shared_pending = -1, .t_signal_cred_guard = -1,
+    .t_sighand_action = -1,
+    .t_fs_pwd = -1, .t_fs_root = -1,
+    .t_nsproxy_mnt_ns = -1, .t_nsproxy_pid_ns = -1,
+    .t_cred_cap_eff = -1, .t_cred_cap_perm = -1, .t_cred_cap_inh = -1,
+    .t_cred_uid = -1,
+    .t_sighand_verified = -1,
 };
 
 #define MEMD_LEARN_SCAN 2048
 
-/* File-scope statics (declared before use). */
-static unsigned long (*memd_fv)(struct mm_struct *, unsigned long);
+/* File-scope statics (declared before use). find_vma returns a vma
+ * pointer (the old unsigned-long prototype truncated nothing on LP64
+ * but lied to the compiler); keep the honest type. */
+static struct vm_area_struct *(*memd_fv)(struct mm_struct *, unsigned long);
 static bool memd_fv_probed;
 
 /* Per-generation struct file layout (6.6/6.12 rework file completely).
@@ -69,23 +79,9 @@ static const short memd_fpath_off[] = { 16, 16, 16, 16, 168, 64 };
 
 static int memd_v_file_off = -1;
 
-/* Count 8-byte-aligned u64 matches. */
-static int memd_count_u64(const void *base, size_t len, u64 val,
-                          int *first_off)
- {
-    size_t n = len / 8, i;
-    int hits = 0;
-    for (i = 0; i < n; i++) {
-        u64 v;
-        memcpy(&v, (const char *)base + i * 8, 8);
-        if (v == val) {
-            if (!hits && first_off)
-                *first_off = (int)(i * 8);
-            hits++;
-        }
-    }
-    return hits;
-}
+/* Scan task/mm/file objects for a kernel-pointer target. Exact anchor
+ * match required (unique hit wins); anything else leaves -1 so readers
+ * fall back to compiled offsets or fail closed, never guess. */
 
 static void memd_learn_task(void)
  {
@@ -94,23 +90,28 @@ static void memd_learn_task(void)
     pid_t tgid = task_tgid_vnr(t);
     struct mm_struct *mm;
     char comm[TASK_COMM_LEN];
-    int off = -1, hits, i;
-    /* pid/tgid: adjacent equal u32 pair (loader is single-threaded). */
+    int off = -1, n_pid, i;
+    /* pid/tgid: adjacent u32 pair matching task_pid_vnr/task_tgid_vnr.
+     * Unique hit required (first-hit-wins would mis-learn on a
+     * coincidental value match elsewhere in task_struct). */
+    n_pid = 0;
     for (i = 0; i + 8 <= MEMD_LEARN_SCAN; i += 4) {
         u32 a, b;
         memcpy(&a, (char *)t + i, 4);
         memcpy(&b, (char *)t + i + 4, 4);
         if ((pid_t)a == pid && (pid_t)b == tgid) {
-            off = i;
-            break;
+            if (!n_pid)
+                off = i;
+            n_pid++;
         }
     }
-    if (off >= 0) {
+    if (n_pid == 1 && off >= 0) {
         memd_learned.t_pid = off;
         memd_learned.t_tgid = off + 4;
         memd_info("learn: task pid/tgid at +%d\n", off);
     } else {
-        memd_err("learn: task pid/tgid not found (using compiled)\n");
+        memd_err("learn: task pid/tgid ambiguous (%d hits, using compiled)\n",
+                 n_pid);
     }
     /* comm: get_task_comm value as a string. */
     get_task_comm(comm, t);
@@ -134,33 +135,29 @@ static void memd_learn_task(void)
             memd_err("learn: task comm ambiguous (%d hits)\n", n);
         }
     }
-    /* mm: compiled offset first (fast + self-verifying), then scan.
-     * mm/active_mm are adjacent same-value pointers: first hit wins. */
+    /* mm: get_task_mm anchor scanned as a pointer. Never trust the
+     * compiled t->mm field on a foreign kernel (its value is garbage
+     * there), so always scan. mm/active_mm are adjacent same-value
+     * pointers: one hit, or two hits 8 apart, wins. */
     mm = get_task_mm(t);
     if (mm) {
         int o1 = -1, o2 = -1, n = 0, i2;
-        if (t->mm == mm) {
-            memd_learned.t_mm = (int)((char *)&t->mm - (char *)t);
-            memd_info("learn: task mm compiled+%d confirmed\n",
-                      memd_learned.t_mm);
+        for (i2 = 0; i2 + 8 <= MEMD_LEARN_SCAN; i2 += 8) {
+            u64 v = 0;
+            memcpy(&v, (char *)t + i2, 8);
+            if (v == (u64)mm) {
+                if (!n)
+                    o1 = i2;
+                else if (n == 1)
+                    o2 = i2;
+                n++;
+            }
+        }
+        if (n == 1 || (n == 2 && o2 == o1 + 8)) {
+            memd_learned.t_mm = o1;
+            memd_info("learn: task mm at +%d\n", o1);
         } else {
-            for (i2 = 0; i2 + 8 <= MEMD_LEARN_SCAN; i2 += 8) {
-                u64 v = 0;
-                memcpy(&v, (char *)t + i2, 8);
-                if (v == (u64)mm) {
-                    if (!n)
-                        o1 = i2;
-                    else if (n == 1)
-                        o2 = i2;
-                    n++;
-                }
-            }
-            if (n == 1 || (n == 2 && o2 == o1 + 8)) {
-                memd_learned.t_mm = o1;
-                memd_info("learn: task mm at +%d\n", o1);
-            } else {
-                memd_err("learn: task mm ambiguous (%d)\n", n);
-            }
+            memd_err("learn: task mm ambiguous (%d)\n", n);
         }
         mmput(mm);
     } else {
@@ -200,7 +197,6 @@ static void memd_learn_task(void)
             memd_err("learn: task cred ambiguous (%d)\n", n);
         }
     }
-    (void)hits;
 }
 
 static int memd_pgd_shape_ok(u64 phys);
@@ -215,14 +211,20 @@ static void memd_learn_pgd(void)
         return;
     }
     ttbr = read_sysreg(ttbr0_el1);
-    /* TTBR0 match (non-KPTI fast path): strip ASID, keep phys page. */
+    /* TTBR0 match (non-KPTI fast path): strip ASID, keep phys page.
+     * Even on a value match, shape-check before trusting the compiled
+     * mm->pgd field (garbage on foreign layouts could alias want). */
     want = ttbr & 0x0000fffffffff000ULL;
-    if ((u64)mm->pgd == want) {
-        memd_learned.m_pgd = (int)((char *)&mm->pgd - (char *)mm);
-        memd_info("learn: mm pgd compiled+%d confirmed\n",
-                  memd_learned.m_pgd);
-        mmput(mm);
-        return;
+    if ((u64)(uintptr_t)mm->pgd == want) {
+        u64 pa = (u64)(uintptr_t)virt_to_phys((void *)(uintptr_t)mm->pgd);
+        if (memd_pgd_shape_ok(pa)) {
+            memd_learned.m_pgd = (int)((char *)&mm->pgd - (char *)mm);
+            memd_info("learn: mm pgd compiled+%d confirmed\n",
+                      memd_learned.m_pgd);
+            mmput(mm);
+            return;
+        }
+        memd_err("learn: mm pgd compiled match failed shape, scanning\n");
     }
     /* Shape scan (KPTI-proof): TTBR0 (user tables) need not equal
      * mm->pgd, so find the pgd by table shape instead of value.
@@ -386,12 +388,19 @@ static void memd_learn_vma_flags(struct mm_struct *mm, unsigned long s1,
     static const unsigned long mask = (unsigned long)(VM_READ | VM_WRITE | VM_EXEC | VM_SHARED);
     struct vm_area_struct *v1, *v2;
     int i, found = -1, n = 0;
-    if (!memd_fv || !mm || !s1 || !s2 || p1 == p2)
+    if (!mm || !s1 || !s2)
         return;
+    if (p1 == p2)
+        return;
+    if (!memd_fv)
+        return;
+    MM_READ_LOCK(mm);
     v1 = memd_fv(mm, s1);
     v2 = memd_fv(mm, s2);
-    if (!v1 || !v2)
+    if (!v1 || !v2) {
+        MM_READ_UNLOCK(mm);
         return;
+    }
     for (i = 0; i + 8 <= 256; i += 8) {
         unsigned long w1 = 0, w2 = 0;
         if (memd_safe_read64((char *)v1 + i, &w1) ||
@@ -402,6 +411,7 @@ static void memd_learn_vma_flags(struct mm_struct *mm, unsigned long s1,
             found = i;
         }
     }
+    MM_READ_UNLOCK(mm);
     if (n == 1) {
         memd_learned.v_flags = found;
         memd_info("learn: vma vm_flags at +%d\n", found);
@@ -418,18 +428,21 @@ static int memd_learn_vma_file(struct mm_struct *mm, unsigned long addr,
     struct vm_area_struct *vma;
     size_t bl;
     int i, found = -1, n = 0;
-    if (!base || !base[0])
+    if (!base || !base[0] || !mm)
         return -1;
     bl = strlen(base);
     if (!memd_fv)
         return -1;
+    MM_READ_LOCK(mm);
     vma = memd_fv(mm, addr);
-    if (!vma)
+    if (!vma) {
+        MM_READ_UNLOCK(mm);
         return -1;
+    }
     for (i = 0; i + 8 <= 256; i += 8) {
         unsigned long fp = 0, dp = 0, nm = 0, ln = 0;
         char nb[40];
-        int g, k;
+        int k;
         if (memd_safe_read64((char *)vma + i, &fp) || !fp ||
             (fp & 0xffff000000000000UL) != 0xffff000000000000UL)
             continue;
@@ -437,8 +450,10 @@ static int memd_learn_vma_file(struct mm_struct *mm, unsigned long addr,
         {
             int fg = memd_net_gen();
             unsigned long fpoff;
-            if (fg < 0 || fg >= MEMD_GEN_N)
+            if (fg < 0 || fg >= MEMD_GEN_N) {
+                MM_READ_UNLOCK(mm);
                 return -1;
+            }
             fpoff = (unsigned long)memd_fpath_off[fg];
             if (memd_safe_read64((char *)fp + fpoff + 8, &dp) || !dp ||
                 (dp & 0xffff000000000000UL) != 0xffff000000000000UL)
@@ -468,6 +483,7 @@ static int memd_learn_vma_file(struct mm_struct *mm, unsigned long addr,
         n++;
         found = i;
     }
+    MM_READ_UNLOCK(mm);
     if (n == 1) {
         memd_v_file_off = found;
         memd_info("learn: vma vm_file at +%d\n", found);
@@ -538,23 +554,44 @@ static void memd_learn_vma(void)
     mmput(mm);
 }
 
-/* find_vma by runtime address (dual name), then pair-scan. */
+/* find_vma by runtime address (dual name), then pair-scan. Holds the
+ * mm read lock across lookup+scan so a concurrent munmap cannot free
+ * the vma or tear the start/end pair mid-read (fail-soft -1). */
 static int memd_find_vma_pair(struct mm_struct *mm, unsigned long addr,
                               int *start_off, int *end_off)
  {
     struct vm_area_struct *vma;
+    struct vm_area_struct *(*fv)(struct mm_struct *, unsigned long);
     int i;
+    if (!mm || !start_off || !end_off)
+        return -1;
     if (!memd_fv_probed) {
-        memd_fv_probed = true;
-        memd_fv = (void *)kallsyms_lookup_name_ex("find_vma");
-        if (!memd_fv)
-            memd_fv = (void *)kallsyms_lookup_name_ex("__find_vma");
+        unsigned long r;
+        spin_lock(&memd_learn_lock);
+        if (!memd_fv_probed) {
+            spin_unlock(&memd_learn_lock);
+            r = kallsyms_lookup_name_ex("find_vma");
+            if (!r)
+                r = kallsyms_lookup_name_ex("__find_vma");
+            spin_lock(&memd_learn_lock);
+            if (!memd_fv_probed) {
+                memd_fv = (void *)(uintptr_t)r;
+                memd_fv_probed = true;
+            }
+            spin_unlock(&memd_learn_lock);
+        } else {
+            spin_unlock(&memd_learn_lock);
+        }
     }
     if (!memd_fv)
         return -1;
-    vma = memd_fv(mm, addr);
-    if (!vma)
+    fv = memd_fv;
+    MM_READ_LOCK(mm);
+    vma = fv(mm, addr);
+    if (!vma) {
+        MM_READ_UNLOCK(mm);
         return -1;
+    }
     /* adjacent u64 pair (a, b): a<=addr<b, sane span, page-aligned a */
     for (i = 0; i + 16 <= 512; i += 8) {
         u64 x, y;
@@ -576,11 +613,14 @@ static int memd_find_vma_pair(struct mm_struct *mm, unsigned long addr,
             if (hits == 1) {
                 *start_off = jo;
                 *end_off = jo + 8;
+                MM_READ_UNLOCK(mm);
                 return 0;
             }
+            MM_READ_UNLOCK(mm);
             return -1;
         }
     }
+    MM_READ_UNLOCK(mm);
     return -1;
 }
 
@@ -591,13 +631,23 @@ int memd_learn(void)
     return 0;
 }
 
-/* Lazy vma learning on first get_module_base (target task context). */
+/* Lazy vma learning on first get_module_base (target task context).
+ * Claim-once under the learn lock so concurrent callers cannot run the
+ * maps parse twice; a loser skips (fail-soft compiled fallback). */
 void memd_learn_vma_once(void)
  {
-    static bool done = false;
-    if (done)
+    bool skip = false;
+    spin_lock(&memd_learn_lock);
+    {
+        static bool done = false;
+        if (done)
+            skip = true;
+        else
+            done = true;
+    }
+    spin_unlock(&memd_learn_lock);
+    if (skip)
         return;
-    done = true;
     memd_learn_vma();
 }
 
@@ -664,6 +714,9 @@ static void memd_learn_task_stack(void)
     n = 0;
     found_size = 0;
     found_foff = -1;
+    /* If sp is 64K-aligned both masks yield the same base and the same
+     * cell counts twice (n == 2): that is genuinely ambiguous between
+     * 16K and 64K thread sizes, so keep the abort (fail closed). */
     for (si = 0; si < 2; si++) {
         base = sp & ~(sizes[si] - 1);
         for (foff = 0; foff <= 64; foff += 8) {
@@ -702,13 +755,22 @@ static void memd_learn_task_stack(void)
               off, found_size, found_foff);
 }
 
-/* Lazy stack learning on first inject (caller process context). */
+/* Lazy stack learning on first inject (caller process context).
+ * Same claim-once discipline as the vma learner. */
 void memd_learn_task_stack_once(void)
  {
-    static bool done = false;
-    if (done)
+    bool skip = false;
+    spin_lock(&memd_learn_lock);
+    {
+        static bool done = false;
+        if (done)
+            skip = true;
+        else
+            done = true;
+    }
+    spin_unlock(&memd_learn_lock);
+    if (skip)
         return;
-    done = true;
     memd_learn_task_stack();
 }
 
@@ -727,8 +789,8 @@ void memd_t_comm(struct task_struct *t, char *buf, size_t cap)
         char tmp[TASK_COMM_LEN];
         size_t n = cap - 1;
         get_task_comm(tmp, t);
-        if (n > sizeof(tmp))
-            n = sizeof(tmp);
+        if (n >= sizeof(tmp))
+            n = sizeof(tmp) - 1;
         memcpy(buf, tmp, n);
         buf[n] = '\0';
     }
@@ -871,13 +933,16 @@ static void memd_learn_task_extended(void)
     struct files_struct *files = t->files;
     struct signal_struct *signal = t->signal;
     struct sighand_struct *sighand = t->sighand;
-    struct mm_struct *mm = t->mm;
     struct task_struct *real_parent = t->real_parent;
     struct nsproxy *nsproxy = t->nsproxy;
     struct fs_struct *fs = t->fs;
-    int i, n, found;
+    int n, found;
 
-    if (files) {
+    /* Anchors come from compiled field reads, so they are garbage on
+     * foreign layouts. Refuse to learn from a non-kernel anchor value
+     * (fail closed) instead of scanning for garbage and locking in a
+     * wrong offset. Uniqueness (n == 1) is still required below. */
+    if (files && ((u64)files & 0xffff000000000000UL) == 0xffff000000000000UL) {
         n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, files, &found);
         if (n == 1) {
             memd_learned_ext.t_files = found;
@@ -885,9 +950,11 @@ static void memd_learn_task_extended(void)
         } else {
             memd_err("learn: task files ambiguous (%d)\n", n);
         }
+    } else if (files) {
+        memd_err("learn: task files anchor insane, skipping\n");
     }
 
-    if (signal) {
+    if (signal && ((u64)signal & 0xffff000000000000UL) == 0xffff000000000000UL) {
         n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, signal, &found);
         if (n == 1) {
             memd_learned_ext.t_signal = found;
@@ -895,9 +962,11 @@ static void memd_learn_task_extended(void)
         } else {
             memd_err("learn: task signal ambiguous (%d)\n", n);
         }
+    } else if (signal) {
+        memd_err("learn: task signal anchor insane, skipping\n");
     }
 
-    if (sighand) {
+    if (sighand && ((u64)sighand & 0xffff000000000000UL) == 0xffff000000000000UL) {
         n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, sighand, &found);
         if (n == 1) {
             memd_learned_ext.t_sighand = found;
@@ -905,9 +974,12 @@ static void memd_learn_task_extended(void)
         } else {
             memd_err("learn: task sighand ambiguous (%d)\n", n);
         }
+    } else if (sighand) {
+        memd_err("learn: task sighand anchor insane, skipping\n");
     }
 
-    if (real_parent) {
+    if (real_parent &&
+        ((u64)real_parent & 0xffff000000000000UL) == 0xffff000000000000UL) {
         n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, real_parent, &found);
         if (n == 1) {
             memd_learned_ext.t_real_parent = found;
@@ -915,9 +987,11 @@ static void memd_learn_task_extended(void)
         } else {
             memd_err("learn: task real_parent ambiguous (%d)\n", n);
         }
+    } else if (real_parent) {
+        memd_err("learn: task real_parent anchor insane, skipping\n");
     }
 
-    if (nsproxy) {
+    if (nsproxy && ((u64)nsproxy & 0xffff000000000000UL) == 0xffff000000000000UL) {
         n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, nsproxy, &found);
         if (n == 1) {
             memd_learned_ext.t_nsproxy = found;
@@ -925,9 +999,11 @@ static void memd_learn_task_extended(void)
         } else {
             memd_err("learn: task nsproxy ambiguous (%d)\n", n);
         }
+    } else if (nsproxy) {
+        memd_err("learn: task nsproxy anchor insane, skipping\n");
     }
 
-    if (fs) {
+    if (fs && ((u64)fs & 0xffff000000000000UL) == 0xffff000000000000UL) {
         n = memd_scan_for_ptr(t, MEMD_LEARN_SCAN, fs, &found);
         if (n == 1) {
             memd_learned_ext.t_fs = found;
@@ -935,6 +1011,8 @@ static void memd_learn_task_extended(void)
         } else {
             memd_err("learn: task fs ambiguous (%d)\n", n);
         }
+    } else if (fs) {
+        memd_err("learn: task fs anchor insane, skipping\n");
     }
 }
 
@@ -950,7 +1028,8 @@ static void memd_learn_mm_extended(void)
      * there on newer targets (m_mmap stays -1, fail-soft). */
     {
     struct vm_area_struct *mmap = mm->mmap;
-    if (mmap) {
+    if (mmap &&
+        ((u64)mmap & 0xffff000000000000UL) == 0xffff000000000000UL) {
         int found = -1, n = 0, i;
         for (i = 0; i + 8 <= 512; i += 8) {
             u64 v = 0;
@@ -981,50 +1060,61 @@ static void memd_learn_file_extended(void)
     struct file *f;
     struct path path;
     struct dentry *dentry;
+    struct vfsmount *mnt;
     struct inode *inode;
     struct super_block *sb;
-    int found, n;
-
+    int found, n, mnt_off;
     if (memd_filp_open("/proc/self/exe", O_RDONLY, 0, &f) != 0)
         return;
     if (IS_ERR(f))
         return;
-
     path = memd_f_path(f);
     dentry = path.dentry;
-    if (dentry) {
-        inode = dentry->d_inode;
-        if (inode) {
-            sb = inode->i_sb;
-
-            n = memd_scan_for_ptr(f, 512, &path, &found);
-            if (n == 1) {
-                memd_learned_ext.f_fpath = found;
-                memd_info("learn: file f_path at +%d\n", found);
-            }
-
+    mnt = path.mnt;
+    /* f_path is struct path = { mnt, dentry } inline: learn it from the
+     * two-pointer adjacency (dentry hit must sit 8 past an mnt hit).
+     * The old code scanned for &path (a stack address: never matches,
+     * dead) and stored a struct file hit into d_parent (a struct
+     * dentry field: cross-struct pollution). Both are removed. */
+    if (mnt && dentry &&
+        ((u64)mnt & 0xffff000000000000UL) == 0xffff000000000000UL &&
+        ((u64)dentry & 0xffff000000000000UL) == 0xffff000000000000UL) {
+        n = memd_scan_for_ptr(f, 512, mnt, &mnt_off);
+        if (n == 1) {
             n = memd_scan_for_ptr(f, 512, dentry, &found);
-            if (n == 1) {
-                memd_learned_ext.d_parent = found;
-                memd_info("learn: dentry d_parent at +%d\n", found);
+            if (n == 1 && found == mnt_off + 8) {
+                memd_learned_ext.f_fpath = mnt_off;
+                memd_info("learn: file f_path at +%d\n", mnt_off);
+            } else {
+                memd_err("learn: file f_path unconfirmed (%d)\n", n);
             }
-
+        } else {
+            memd_err("learn: file f_path mnt ambiguous (%d)\n", n);
+        }
+    }
+    if (dentry &&
+        ((u64)dentry & 0xffff000000000000UL) == 0xffff000000000000UL) {
+        inode = dentry->d_inode;
+        if (inode &&
+            ((u64)inode & 0xffff000000000000UL) == 0xffff000000000000UL) {
+            sb = inode->i_sb;
             n = memd_scan_for_ptr(dentry, 256, inode, &found);
             if (n == 1) {
                 memd_learned_ext.d_inode = found;
                 memd_info("learn: dentry d_inode at +%d\n", found);
             }
-
-            n = memd_scan_for_ptr(dentry, 256, sb, &found);
-            if (n == 1) {
-                memd_learned_ext.d_sb = found;
-                memd_info("learn: dentry d_sb at +%d\n", found);
-            }
-
-            n = memd_scan_for_ptr(inode, 512, sb, &found);
-            if (n == 1) {
-                memd_learned_ext.i_sb = found;
-                memd_info("learn: inode i_sb at +%d\n", found);
+            if (sb &&
+                ((u64)sb & 0xffff000000000000UL) == 0xffff000000000000UL) {
+                n = memd_scan_for_ptr(dentry, 256, sb, &found);
+                if (n == 1) {
+                    memd_learned_ext.d_sb = found;
+                    memd_info("learn: dentry d_sb at +%d\n", found);
+                }
+                n = memd_scan_for_ptr(inode, 512, sb, &found);
+                if (n == 1) {
+                    memd_learned_ext.i_sb = found;
+                    memd_info("learn: inode i_sb at +%d\n", found);
+                }
             }
         }
     }
@@ -1069,60 +1159,40 @@ void memd_f_private_set(struct file *f, void *v)
         f->private_data = v;
 }
 
+/* thread_struct is embedded in task_struct (no pointer to scan for):
+ * the old code computed &t->thread with the compiled offset and then
+ * scanned task for that value, which is circular (wrong answer on any
+ * foreign layout, and zero hits even when headers match, since no
+ * word in task points at its own inline thread). Fail closed: leave
+ * t_thread at -1. Sub-field learners below are likewise confined to
+ * self-consistency checks with range guards. */
 static void memd_learn_thread_struct(void)
  {
-    struct task_struct *t = current;
-    struct thread_struct *thread = &t->thread;
-    int found = -1, n = 0, i;
-
-    for (i = 0; i + 8 <= MEMD_LEARN_SCAN; i += 8) {
-        u64 v = 0;
-        memcpy(&v, (char *)t + i, 8);
-        if (v == (u64)thread) {
-            if (!n)
-                found = i;
-            n++;
-        }
-    }
-    if (n == 1) {
-        memd_learned_ext.t_thread = found;
-        memd_info("learn: task thread at +%d\n", found);
-    } else {
-        memd_err("learn: task thread ambiguous (%d)\n", n);
-    }
-
-    /* Learn thread_struct fields */
-    if (found >= 0) {
-        struct thread_struct *ts = thread;
-
-        n = memd_scan_for_ptr(thread, 512, &ts->cpu_context, &found);
-        if (n == 1) {
-            memd_learned_ext.t_thread_cpuctx = found;
-            memd_info("learn: thread cpu_context at +%d\n", found);
-        }
-
-        /* fpsimd lives in the anonymous uw{} wrapper on every matrix DDK
-         * (5.10 through 6.12, CI-dumped); never top-level. */
-        n = memd_scan_for_ptr(thread, 512, &ts->uw.fpsimd_state, &found);
-        if (n == 1) {
-            memd_learned_ext.t_thread_fpsimd = found;
-            memd_info("learn: thread fpsimd_state at +%d\n", found);
-        }
-    }
+    return;
 }
 
 static void memd_learn_signal_struct(void)
  {
     struct task_struct *t = current;
-    struct signal_struct *sig = t->signal;
+    struct signal_struct *sig;
+    void *a1, *a2;
+    int found = -1, n = 0, i;
+    sig = t->signal;
     if (!sig)
         return;
-
-    int found = -1, n = 0, i;
+    /* Interior anchors come from compiled offsets: if the foreign
+     * layout differs they point outside the object, so refuse to scan
+     * (fail closed) instead of learning a garbage offset. */
+    a1 = (void *)&sig->shared_pending;
+    a2 = (void *)&sig->cred_guard_mutex;
+    if ((char *)a1 < (char *)sig || (char *)a1 >= (char *)sig + 512)
+        return;
+    if ((char *)a2 < (char *)sig || (char *)a2 >= (char *)sig + 512)
+        return;
     for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)sig + i, 8);
-        if (v == (u64)&sig->shared_pending) {
+        if (v == (u64)a1) {
             if (!n)
                 found = i;
             n++;
@@ -1137,7 +1207,7 @@ static void memd_learn_signal_struct(void)
     for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)sig + i, 8);
-        if (v == (u64)&sig->cred_guard_mutex) {
+        if (v == (u64)a2) {
             if (!n)
                 found = i;
             n++;
@@ -1152,15 +1222,19 @@ static void memd_learn_signal_struct(void)
 static void memd_learn_sighand_struct(void)
  {
     struct task_struct *t = current;
-    struct sighand_struct *sh = t->sighand;
+    struct sighand_struct *sh;
+    void *a;
+    int found = -1, n = 0, i;
+    sh = t->sighand;
     if (!sh)
         return;
-
-    int found = -1, n = 0, i;
+    a = (void *)&sh->action;
+    if ((char *)a < (char *)sh || (char *)a >= (char *)sh + 512)
+        return;
     for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)sh + i, 8);
-        if (v == (u64)&sh->action) {
+        if (v == (u64)a) {
             if (!n)
                 found = i;
             n++;
@@ -1177,15 +1251,22 @@ static void memd_learn_sighand_struct(void)
 static void memd_learn_fs_struct(void)
  {
     struct task_struct *t = current;
-    struct fs_struct *fs = t->fs;
+    struct fs_struct *fs;
+    void *a1, *a2;
+    int found = -1, n = 0, i;
+    fs = t->fs;
     if (!fs)
         return;
-
-    int found = -1, n = 0, i;
+    a1 = (void *)&fs->pwd;
+    a2 = (void *)&fs->root;
+    if ((char *)a1 < (char *)fs || (char *)a1 >= (char *)fs + 512)
+        return;
+    if ((char *)a2 < (char *)fs || (char *)a2 >= (char *)fs + 512)
+        return;
     for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)fs + i, 8);
-        if (v == (u64)&fs->pwd) {
+        if (v == (u64)a1) {
             if (!n)
                 found = i;
             n++;
@@ -1200,7 +1281,7 @@ static void memd_learn_fs_struct(void)
     for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)fs + i, 8);
-        if (v == (u64)&fs->root) {
+        if (v == (u64)a2) {
             if (!n)
                 found = i;
             n++;
@@ -1215,15 +1296,22 @@ static void memd_learn_fs_struct(void)
 static void memd_learn_nsproxy_struct(void)
  {
     struct task_struct *t = current;
-    struct nsproxy *nsp = t->nsproxy;
+    struct nsproxy *nsp;
+    void *a1, *a2;
+    int found = -1, n = 0, i;
+    nsp = t->nsproxy;
     if (!nsp)
         return;
-
-    int found = -1, n = 0, i;
+    a1 = (void *)&nsp->mnt_ns;
+    a2 = (void *)&nsp->pid_ns_for_children;
+    if ((char *)a1 < (char *)nsp || (char *)a1 >= (char *)nsp + 512)
+        return;
+    if ((char *)a2 < (char *)nsp || (char *)a2 >= (char *)nsp + 512)
+        return;
     for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)nsp + i, 8);
-        if (v == (u64)&nsp->mnt_ns) {
+        if (v == (u64)a1) {
             if (!n)
                 found = i;
             n++;
@@ -1238,7 +1326,7 @@ static void memd_learn_nsproxy_struct(void)
     for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (char *)nsp + i, 8);
-        if (v == (u64)&nsp->pid_ns_for_children) {
+        if (v == (u64)a2) {
             if (!n)
                 found = i;
             n++;
@@ -1253,15 +1341,32 @@ static void memd_learn_nsproxy_struct(void)
 static void memd_learn_cred_struct(void)
  {
     struct task_struct *t = current;
-    const struct cred *c = t->cred;
+    const struct cred *c;
+    void *a_eff, *a_prm, *a_inh, *a_uid;
+    int found = -1, n = 0, i;
+    c = t->cred;
     if (!c)
         return;
-
-    int found = -1, n = 0, i;
+    a_eff = (void *)&c->cap_effective;
+    a_prm = (void *)&c->cap_permitted;
+    a_inh = (void *)&c->cap_inheritable;
+    a_uid = (void *)&c->uid;
+    if ((const char *)a_eff < (const char *)c ||
+        (const char *)a_eff >= (const char *)c + 512)
+        return;
+    if ((const char *)a_prm < (const char *)c ||
+        (const char *)a_prm >= (const char *)c + 512)
+        return;
+    if ((const char *)a_inh < (const char *)c ||
+        (const char *)a_inh >= (const char *)c + 512)
+        return;
+    if ((const char *)a_uid < (const char *)c ||
+        (const char *)a_uid >= (const char *)c + 512)
+        return;
     for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (const char *)c + i, 8);
-        if (v == (u64)&c->cap_effective) {
+        if (v == (u64)a_eff) {
             if (!n)
                 found = i;
             n++;
@@ -1276,7 +1381,7 @@ static void memd_learn_cred_struct(void)
     for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (const char *)c + i, 8);
-        if (v == (u64)&c->cap_permitted) {
+        if (v == (u64)a_prm) {
             if (!n)
                 found = i;
             n++;
@@ -1291,7 +1396,7 @@ static void memd_learn_cred_struct(void)
     for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (const char *)c + i, 8);
-        if (v == (u64)&c->cap_inheritable) {
+        if (v == (u64)a_inh) {
             if (!n)
                 found = i;
             n++;
@@ -1306,7 +1411,7 @@ static void memd_learn_cred_struct(void)
     for (i = 0; i + 8 <= 512; i += 8) {
         u64 v = 0;
         memcpy(&v, (const char *)c + i, 8);
-        if (v == (u64)&c->uid) {
+        if (v == (u64)a_uid) {
             if (!n)
                 found = i;
             n++;
@@ -1403,7 +1508,7 @@ static int memd_verify_all_offsets(void)
 int memd_learn_comprehensive(void)
  {
     int ret = 0;
-
+    int errors = 0;
     spin_lock(&memd_learn_lock);
     if (memd_learn_initialized) {
         spin_unlock(&memd_learn_lock);
@@ -1426,7 +1531,7 @@ int memd_learn_comprehensive(void)
 
     memd_learn_sighand_verify();
 
-    int errors = memd_verify_all_offsets();
+    errors = memd_verify_all_offsets();
     if (errors > 0) {
         memd_warn("learn: %d offsets failed verification\n", errors);
     }

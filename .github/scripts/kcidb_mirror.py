@@ -55,10 +55,11 @@ DEFAULT_TREE = "android"
 
 
 def require_https(url, field):
+    if not isinstance(url, str):
+        raise ValueError(f"{field} must be an HTTPS URL without credentials")
     parsed = urllib.parse.urlparse(url)
     if (
-        not isinstance(url, str)
-        or parsed.scheme != "https"
+        parsed.scheme != "https"
         or not parsed.hostname
         or parsed.username
         or parsed.password

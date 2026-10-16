@@ -48,6 +48,13 @@ UNLOAD_SIZE = struct.calcsize(UNLOAD_FMT)
 
 LOADSO_EPHEMERAL = 1
 
+# Zip/CLI input caps: fail closed instead of staging unbounded bytes.
+MAX_PROP_BYTES = 65536
+MAX_SO_BYTES = 64 * 1024 * 1024
+MAX_ZIP_ENTRIES = 4096
+MAX_PID = (1 << 31) - 1  # struct "<i" range; real pids are far smaller
+MAX_HANDLE = (1 << 64) - 1  # struct "<Q" range
+
 
 def iowr(nr, size):
     return _IOC_READ | (size << 16) | (_IOC_TYPE << 8) | nr
@@ -144,8 +151,16 @@ def find_driver_family():
 def ioctl_load(sock, pid, path, entry, su, ephemeral):
     import fcntl
 
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid > MAX_PID:
+        raise ValueError("pid must be a positive 32-bit integer")
+    if not isinstance(path, str):
+        raise ValueError("path must be a string")
+    if entry is not None and not isinstance(entry, str):
+        raise ValueError("entry must be a string")
     path_bytes = path.encode()
     entry_bytes = (entry or "").encode()
+    if b"\x00" in path_bytes or b"\x00" in entry_bytes:
+        raise ValueError("path and entry must not contain NUL bytes")
     # Never silently truncate: the kernel rejects over-long inputs, so
     # fail here with the same meaning instead of loading the wrong file.
     if len(path_bytes) > 255 or path_bytes[:1] != b"/":
@@ -175,6 +190,15 @@ def ioctl_load(sock, pid, path, entry, su, ephemeral):
 def ioctl_unload(sock, pid, handle):
     import fcntl
 
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid > MAX_PID:
+        raise ValueError("pid must be a positive 32-bit integer")
+    if (
+        isinstance(handle, bool)
+        or not isinstance(handle, int)
+        or handle <= 0
+        or handle > MAX_HANDLE
+    ):
+        raise ValueError("handle must be a nonzero 64-bit integer")
     cmd = iowr(NR_LOADSO_UNLOAD, UNLOAD_SIZE)
     buf = bytearray(struct.pack(UNLOAD_FMT, pid, handle, 0))
     fcntl.ioctl(sock.fileno(), cmd, buf)
@@ -184,23 +208,54 @@ def ioctl_unload(sock, pid, handle):
 
 def stage_module(zip_path, root, abi):
     """Validate + extract; returns (module_id, staged_path, version_code)."""
-    with zipfile.ZipFile(zip_path) as archive:
+    try:
+        archive = zipfile.ZipFile(zip_path)
+    except zipfile.BadZipFile as error:
+        raise ValueError("invalid module zip: %s" % error)
+    with archive:
         names = archive.namelist()
+        if len(names) > MAX_ZIP_ENTRIES:
+            raise ValueError("module zip lists too many entries")
+        try:
+            prop_info = archive.getinfo("module.prop")
+        except KeyError:
+            raise ValueError("module zip has no module.prop")
+        if prop_info.file_size > MAX_PROP_BYTES:
+            raise ValueError("module.prop is too large")
         try:
             prop_text = archive.read("module.prop").decode("utf-8", "replace")
         except KeyError:
             raise ValueError("module zip has no module.prop")
         props = parse_module_prop(prop_text)
         lib = pick_abi_lib(names, abi)
+        if archive.getinfo(lib).file_size > MAX_SO_BYTES:
+            raise ValueError("payload %s is too large" % lib)
         module_id = props["id"]
         staged = staging_path(root, module_id)
         os.makedirs(os.path.dirname(staged), exist_ok=True)
-        with archive.open(lib) as src, open(staged, "wb") as dst:
-            while True:
-                chunk = src.read(65536)
-                if not chunk:
-                    break
-                dst.write(chunk)
+        # Extract to a temp name and rename: a failed/capped extract must
+        # never leave a truncated payload.so behind as if it were staged.
+        tmp = staged + ".tmp"
+        try:
+            with archive.open(lib) as src, open(tmp, "wb") as dst:
+                remaining = MAX_SO_BYTES
+                while True:
+                    chunk = src.read(65536)
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    if remaining < 0:
+                        raise ValueError(
+                            "payload %s exceeds %d bytes" % (lib, MAX_SO_BYTES)
+                        )
+                    dst.write(chunk)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        os.replace(tmp, staged)
     return module_id, staged, props.get("versionCode", "")
 
 
@@ -293,13 +348,16 @@ def cmd_uninstall(args):
         return errno.EINVAL
     path = state_path(args.root, args.id, args.pid)
     try:
-        with open(path) as stream:
+        with open(path, encoding="utf-8") as stream:
             state = json.load(stream)
     except (OSError, ValueError):
         print("no recorded install for %s pid %d" % (args.id, args.pid))
         return errno.ENOENT
+    if not isinstance(state, dict):
+        print("recorded install for %s pid %d is corrupt" % (args.id, args.pid))
+        return errno.EINVAL
     handle = state.get("handle", 0)
-    if not handle:
+    if isinstance(handle, bool) or not isinstance(handle, int) or not handle:
         print("recorded handle is empty")
         return errno.EINVAL
     sock = find_driver_family()
@@ -351,7 +409,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         return args.func(args) or 0
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, zipfile.BadZipFile, struct.error) as error:
         print("error: %s" % error, file=sys.stderr)
         return 1
 

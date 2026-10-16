@@ -10,7 +10,14 @@ def emit(name, path):
     L.append('const unsigned long %s_len = %d;' % (sym, len(d)))
     return '\n'.join(L)
 
+if len(sys.argv) < 4:
+    sys.exit('usage: gen_blobs.py <rwbridge-KMI.ko>... <run.sh> <out.c>')
 *kos, sh, out = sys.argv[1:]
+if not kos:
+    sys.exit('gen_blobs: no .ko inputs (refusing to pack run.sh alone)')
+for k in kos:
+    if 'rwbridge-' not in k or not k.endswith('.ko'):
+        sys.exit('gen_blobs: expected rwbridge-<kmi>.ko, got %r' % k)
 short = {}
 for k in kos:
     base = k.split('rwbridge-')[1].rsplit('.ko', 1)[0]

@@ -138,9 +138,13 @@ check-universal: all
 	@echo "== versions/imports via check_universal.py =="
 	@NM_BIN="$(NM)"; [ -n "$$NM_BIN" ] || NM_BIN="$(CROSS_COMPILE)nm"; \
 	OD_BIN="$(OBJDUMP)"; [ -n "$$OD_BIN" ] || OD_BIN="$(CROSS_COMPILE)objdump"; \
-	$$NM_BIN -u rwbridge.ko | awk '{print $$2}' | sort -u | tee /tmp/rwbridge.undef || \
+	$$NM_BIN -u rwbridge.ko > /tmp/rwbridge.nm || \
 		{ echo "FAIL: nm undef dump failed"; exit 1; }; \
-	python3 check_universal.py rwbridge.ko /tmp/rwbridge.undef $(KMI) $(KDIR)/System.map || exit 1; \
+	awk '{print $$2}' /tmp/rwbridge.nm | sort -u | tee /tmp/rwbridge.undef || \
+		{ echo "FAIL: nm undef dump failed"; exit 1; }; \
+	[ -s /tmp/rwbridge.undef ] || \
+		{ echo "FAIL: empty undef list (nm produced no symbols)"; exit 1; }; \
+	python3 check_universal.py rwbridge.ko /tmp/rwbridge.undef "$(KMI)" "$(KDIR)/System.map" || exit 1; \
 	echo "== BTI landing pads present =="; \
 	$$OD_BIN -d rwbridge.ko | grep -qiE 'bti([[:space:]]|$$)|hint[[:space:]]' || \
 		{ echo "FAIL: no BTI pads (BTI kernels fault on entry -> reboot)"; exit 1; }; \

@@ -95,6 +95,10 @@ class HTTPSRedirectHandler(HTTPRedirectHandler):
 
 
 def require_https(url, field):
+    if not isinstance(url, str):
+        raise ValueError(
+            f"{field} must be an HTTPS URL and must not contain embedded credentials."
+        )
     parsed = urlparse(url)
     if (
         parsed.scheme != "https"
@@ -169,7 +173,7 @@ def select_toolchain(record, config_path):
 
 def ensure_source(repo_url, commit, source_cache):
     require_https(repo_url, "git_repository_url")
-    if not re.fullmatch(r"[0-9a-fA-F]{40,64}", commit):
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40,64}", commit):
         raise ValueError(
             "kernel_hash must be a complete 40- or 64-character commit identifier."
         )
@@ -228,7 +232,7 @@ def build(record, target_key, cache_root, workspace):
     run(["git", "-C", source, "checkout", "--detach", record["kernel_hash"]])
 
     output = os.path.join(workspace, "output")
-    os.makedirs(output)
+    os.makedirs(output, exist_ok=True)
     shutil.copyfile(
         os.path.join(workspace, "kernel.config"),
         os.path.join(output, ".config"),
@@ -319,7 +323,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
         print(f"KernelCI module build failed: {error}", file=sys.stderr)
         sys.exit(1)
 # .github/scripts/build_kcidb_record.py[∂]

@@ -205,7 +205,8 @@ static inline int recv_fd(int sock) {
     if (recvmsg(sock, &msg, 0) != 1)
         return -1;
     struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    if (!cmsg || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS)
+    if (!cmsg || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS ||
+        cmsg->cmsg_len < CMSG_LEN(sizeof(int)))
         return -1;
     int fd = -1;
     memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
@@ -297,16 +298,40 @@ static inline int serve(const char *module_id, client_handler_fn handler, void *
         return -1;
     }
     char want[160];
-    snprintf(want, sizeof(want), "%s%s\n", kHelloPrefix, module_id);
+    int wn = snprintf(want, sizeof(want), "%s%s\n", kHelloPrefix, module_id);
+    if (wn <= 0 || (size_t)wn >= sizeof(want)) {
+        close(listener);
+        return -1;
+    }
     for (;;) {
         int client = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
-        if (client < 0)
+        if (client < 0) {
+            if (errno == EINTR)
+                continue;
             return -1;
+        }
+        // Stream sockets may split the short hello across reads;
+        // accumulate until the newline, EOF, or a full buffer.
         char line[160];
-        ssize_t r = read(client, line, sizeof(line) - 1);
-        bool ok = r > 0;
+        size_t used = 0;
+        for (;;) {
+            if (used >= sizeof(line) - 1)
+                break;
+            ssize_t r = read(client, line + used, sizeof(line) - 1 - used);
+            if (r < 0) {
+                if (errno == EINTR)
+                    continue;
+                break;
+            }
+            if (r == 0)
+                break;
+            used += (size_t)r;
+            if (memchr(line, '\n', used))
+                break;
+        }
+        bool ok = used > 0;
         if (ok) {
-            line[r] = '\0';
+            line[used] = '\0';
             ok = strcmp(line, want) == 0;
         }
         if (ok)
@@ -512,6 +537,14 @@ static inline bool rule_excluded(const char *lib, const char *sym) {
     return false;
 }
 
+// GOT slots are mprotect'd per patched entry: use the running kernel's
+// page size (arm64 allows 4K/16K/64K), never a hardcoded 4K, or the
+// mprotect fails with EINVAL on large-page devices and hooks misfire.
+static inline long plt_pagesize() {
+    long ps = sysconf(_SC_PAGESIZE);
+    return ps > 0 ? ps : 4096;
+}
+
 #if defined(__linux__) || defined(__ANDROID__)
 static inline int patch_one_plt(struct dl_phdr_info *info, const PltRule &rule) {
     const ElfW(Phdr) *dynamic = nullptr;
@@ -578,14 +611,15 @@ static inline int patch_one_plt(struct dl_phdr_info *info, const PltRule &rule) 
             if (strcmp(name, rule.sym.c_str()) != 0)
                 continue;
             uintptr_t target = (uintptr_t)rel->r_offset + bias;
-            uintptr_t page = target & ~(uintptr_t)(4096 - 1);
-            if (mprotect((void *)page, 4096, PROT_READ | PROT_WRITE) != 0)
+            long psize = plt_pagesize();
+            uintptr_t page = target & ~((uintptr_t)psize - 1);
+            if (mprotect((void *)page, (size_t)psize, PROT_READ | PROT_WRITE) != 0)
                 continue;
             if (rule.out_old)
                 *rule.out_old = *(void *const *)target;
             *(void **)target = rule.replacement;
-            __builtin___clear_cache((char *)page, (char *)page + 4096);
-            mprotect((void *)page, 4096, PROT_READ);
+            __builtin___clear_cache((char *)page, (char *)page + psize);
+            mprotect((void *)page, (size_t)psize, PROT_READ);
             patched++;
         }
     } else {
@@ -600,12 +634,14 @@ static inline int patch_one_plt(struct dl_phdr_info *info, const PltRule &rule) 
             if (strcmp(name, rule.sym.c_str()) != 0)
                 continue;
             uintptr_t target = (uintptr_t)rel->r_offset + bias;
-            uintptr_t page = target & ~(uintptr_t)(4096 - 1);
-            if (mprotect((void *)page, 4096, PROT_READ | PROT_WRITE) != 0)
+            long psize = plt_pagesize();
+            uintptr_t page = target & ~((uintptr_t)psize - 1);
+            if (mprotect((void *)page, (size_t)psize, PROT_READ | PROT_WRITE) != 0)
                 continue;
             if (rule.out_old)
                 *rule.out_old = *(void *const *)target;
             *(void **)target = rule.replacement;
+            mprotect((void *)page, (size_t)psize, PROT_READ);
             patched++;
         }
     }
@@ -784,6 +820,8 @@ static inline int boot_module(uintptr_t /*dlopen_handle*/) {
         close(fd);
         if (n <= 0)
             procname[0] = '\0';
+        else
+            procname[(size_t)n] = '\0';
     }
     bool server = strstr(procname, "zygote") != nullptr ||
                   strstr(procname, "system_server") != nullptr;

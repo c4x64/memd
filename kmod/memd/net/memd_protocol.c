@@ -190,13 +190,13 @@ struct net_proto_family memd_family_ops = {
 };
 
 static int register_free_family(void) {
-    int err = 0, i = 0;
+    int err = 0, i = 0, family = 0;
 
     for (i = 0; i < ARRAY_SIZE(ioctl_handlers); i++) {
         memd_info("registered ioctl command: %u\n", ioctl_handlers[i].cmd);
     }
 
-    for (int family = free_family; family < NPROTO; family++) {
+    for (family = free_family; family < NPROTO; family++) {
         memd_family_ops.family = family;
         err = sock_register(&memd_family_ops);
         if (err)
@@ -212,6 +212,9 @@ static int register_free_family(void) {
 }
 
 static int memd_sock_create(struct net* net, struct socket* sock, int protocol, int kern) {
+    struct sock* sk;
+    struct memd_sock* ws;
+    struct karray_list* pages;
     /* memd_dbg("create type=%d", sock->type); */
     /* Universal privilege checks (no build-header cred offsets):
      * learned cred + stable cred layout. Fail closed. */
@@ -228,10 +231,18 @@ static int memd_sock_create(struct net* net, struct socket* sock, int protocol, 
         return -ENOKEY;
     }
 
+    /* Preallocate before sk_alloc: a failure here needs no sk
+     * teardown, and the socket never goes live with NULL pages. */
+    pages = arraylist_create(4);
+    if (!pages) {
+        return -ENOMEM;
+    }
+
     sock->state = SS_UNCONNECTED;
-    struct sock* sk = sk_alloc(net, PF_INET, GFP_KERNEL, memd_proto_ptr(), kern);
+    sk = sk_alloc(net, PF_INET, GFP_KERNEL, memd_proto_ptr(), kern);
     if (!sk) {
         memd_warn("sk_alloc failed!\n");
+        arraylist_destroy(pages);
         return -ENOBUFS;
     }
 
@@ -239,10 +250,10 @@ static int memd_sock_create(struct net* net, struct socket* sock, int protocol, 
     sock->ops = memd_ops_ptr();
     sock_init_data(sock, sk);
 
-    struct memd_sock* ws = (struct memd_sock*)sk;
+    ws = (struct memd_sock*)sk;
     ws->version = 1;
     ws->session = memd_t_pid(current);
-    ws->used_pages = arraylist_create(4);
+    ws->used_pages = pages;
 
     /* Track socket for stats and cleanup */
     spin_lock(&g_sock_list_lock);
@@ -257,6 +268,10 @@ static int memd_sock_create(struct net* net, struct socket* sock, int protocol, 
 static void memd_sock_destruct(struct sock *sk)
  {
     struct memd_sock *ws = (struct memd_sock *)sk;
+    struct karray_list *pages;
+    struct page *page;
+    size_t n;
+    size_t i;
 
     spin_lock(&g_sock_list_lock);
     list_del(&ws->list);
@@ -264,20 +279,43 @@ static void memd_sock_destruct(struct sock *sk)
 
     atomic64_inc(&g_sock_stats.rx_packets); /* destruction count */
 
-    if (ws->used_pages) {
-        arraylist_destroy(ws->used_pages);
-        ws->used_pages = NULL;
+    /* Sole list remover (cleanup never force-frees); release already
+     * freed and NULLed the pages on the close path, so this only frees
+     * when release did not. Unpublished either way: never leaks. */
+    pages = ws->used_pages;
+    ws->used_pages = NULL;
+    if (pages) {
+        n = pages->size;
+        for (i = 0; i < n; i++) {
+            page = (struct page *)arraylist_get(pages, i);
+            if (page)
+                __free_page(page);
+        }
+        arraylist_destroy(pages);
     }
 }
 
 int memd_proto_init(void)
  {
     int err;
+    struct proto *proto;
     if (memd_build_proto() || memd_build_ops())
         return -ENODEV;
 
+    /* Publish state before the family is reachable: a concurrent
+     * socket() runs memd_sock_create the moment sock_register
+     * succeeds, and it touches the list, lock and counters. */
+    atomic64_set(&g_sock_stats.rx_bytes, 0);
+    atomic64_set(&g_sock_stats.tx_bytes, 0);
+    atomic64_set(&g_sock_stats.rx_packets, 0);
+    atomic64_set(&g_sock_stats.tx_packets, 0);
+    atomic64_set(&g_sock_stats.errors, 0);
+
+    INIT_LIST_HEAD(&g_sock_list);
+    spin_lock_init(&g_sock_list_lock);
+
     /* Use template for additional fields not in runtime buffer */
-    struct proto *proto = memd_proto_ptr();
+    proto = memd_proto_ptr();
     proto->destroy = memd_sock_destruct;
 
     err = proto_register(proto, 1);
@@ -288,18 +326,8 @@ int memd_proto_init(void)
     if (err)
         goto out_proto;
 
-    atomic64_set(&g_sock_stats.rx_bytes, 0);
-    atomic64_set(&g_sock_stats.tx_bytes, 0);
-    atomic64_set(&g_sock_stats.rx_packets, 0);
-    atomic64_set(&g_sock_stats.tx_packets, 0);
-    atomic64_set(&g_sock_stats.errors, 0);
-
-    INIT_LIST_HEAD(&g_sock_list);
-    spin_lock_init(&g_sock_list_lock);
-
     return 0;
 
-    sock_unregister(free_family);
 out_proto:
     proto_unregister(memd_proto_ptr());
 out:
@@ -308,18 +336,13 @@ out:
 
 void memd_proto_cleanup(void)
  {
-    struct memd_sock *ws, *tmp;
-
+    /* Unregister first: no new sockets after this. Live sockets hold
+     * a module ref via the family owner, so rmmod waits for their
+     * close; release/destruct (the sole list remover) runs then.
+     * Forcibly sock_put()-ing here would drop a ref we do not own,
+     * deadlock (destruct takes the same lock) and double-del. */
     sock_unregister(free_family);
     proto_unregister(memd_proto_ptr());
-
-    /* Cleanup any remaining sockets */
-    spin_lock(&g_sock_list_lock);
-    list_for_each_entry_safe(ws, tmp, &g_sock_list, list) {
-        list_del(&ws->list);
-        sock_put(&ws->sk);
-    }
-    spin_unlock(&g_sock_list_lock);
 }
 
 int memd_get_sock_stats(struct memd_sock_stat *stats)

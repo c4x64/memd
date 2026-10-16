@@ -24,14 +24,19 @@ ERROR_RE = re.compile(
 
 def load_results(results_dir):
     rows = {}
-    for path in glob.glob(os.path.join(results_dir, "worker-*.jsonl")):
+    for path in sorted(glob.glob(os.path.join(results_dir, "worker-*.jsonl"))):
         with open(path, encoding="utf-8", errors="replace") as stream:
-            for line in stream:
+            for lineno, line in enumerate(stream, 1):
                 line = line.strip()
                 if not line:
                     continue
-                row = json.loads(line)
-                rows[int(row["index"])] = row
+                try:
+                    row = json.loads(line)
+                    rows[int(row["index"])] = row
+                except (ValueError, KeyError, TypeError) as error:
+                    raise ValueError(
+                        "%s:%d: bad result row: %s" % (path, lineno, error)
+                    )
     return rows
 
 
@@ -51,6 +56,8 @@ def first_errors(log_path, limit=4):
 def triage(manifest_path, results_dir):
     with open(manifest_path, encoding="utf-8") as stream:
         manifest = json.load(stream)
+    if not isinstance(manifest.get("records"), list):
+        raise ValueError("manifest %s has no records list" % manifest_path)
     records = {i: r for i, r in enumerate(manifest["records"])}
     rows = load_results(results_dir)
 
@@ -102,7 +109,11 @@ def main(argv=None):
     parser.add_argument("--json-out", required=False)
     args = parser.parse_args(argv)
 
-    report = triage(args.manifest, args.results_dir)
+    try:
+        report = triage(args.manifest, args.results_dir)
+    except (OSError, ValueError) as error:
+        print("triage failed: %s" % error, file=sys.stderr)
+        return 1
     total = report["total"]
     passed = report["passed"]
     print("targets: %d, reported: %d, passed: %d" % (total, report["reported"], passed))

@@ -71,8 +71,10 @@ static inline int memd_pte_user(pte_t pte)
 // Function to merge and print contiguous memory regions
 static void print_merged_region(unsigned long* start, unsigned long* end) {
     if (*start != -1UL) {
-        // [start, end) is the format used by /proc/pid/maps
-        memd_info("Found region: 0x%lx - 0x%lx\n", *start, *end + 1);
+        // [start, end) is the format used by /proc/pid/maps.
+        // region_end stores the START of the last page, so the
+        // exclusive end is region_end + PAGE_SIZE (not + 1).
+        memd_info("Found region: 0x%lx - 0x%lx\n", *start, *end + PAGE_SIZE);
     }
     *start = -1UL;
     *end = -1UL;
@@ -83,6 +85,7 @@ static void walk_pte_level(pmd_t* pmd, unsigned long addr, unsigned long end, un
                            unsigned long* region_end, struct page_walk_stats* stats) {
 #if defined(PTE_WALK)
     pte_t *ptep, pte;
+    pte_t *ptep_start;
     unsigned long current_addr;
     unsigned long pte_end;
 
@@ -91,10 +94,10 @@ static void walk_pte_level(pmd_t* pmd, unsigned long addr, unsigned long end, un
         pte_end = end;
 
     ptep = pte_offset_kernel(pmd, addr);
-    ptep = NULL;
     if (!ptep) {
         return;
     }
+    ptep_start = ptep;
 
     for (current_addr = addr; current_addr < pte_end; current_addr += PAGE_SIZE) {
         pte = *ptep;
@@ -121,7 +124,7 @@ static void walk_pte_level(pmd_t* pmd, unsigned long addr, unsigned long end, un
         ptep++;
     }
 
-    pte_unmap(ptep - ((pte_end - addr) >> PAGE_SHIFT));
+    pte_unmap(ptep_start);
 #else
     memd_err("PTE walk not supported on this architecture.\n");
 #endif
@@ -233,7 +236,10 @@ void traverse_page_tables(struct mm_struct* mm, struct page_walk_stats* stats) {
 
     /* no mmap_lock: universal image (offset varies); mm pinned + fail-closed walk */
 
-    pgd = memd_m_pgd(mm);
+    pgd = (pgd_t *)memd_valid_pgd(mm);
+    if (!pgd) {
+        return;
+    }
 
     do {
         next = pgd_addr_end(addr, TASK_SIZE);
@@ -252,37 +258,41 @@ void traverse_page_tables(struct mm_struct* mm, struct page_walk_stats* stats) {
 }
 
 static int walk_pte_level_ctx(pmd_t *pmd, unsigned long addr, unsigned long end,
-                               struct page_walk_context *ctx)
- {
-    pte_t *ptep;
-    unsigned long pte_end;
-    int ret = 0;
+                                struct page_walk_context *ctx)
+  {
+     pte_t *ptep;
+     pte_t *ptep_start;
+     unsigned long pte_end;
+     unsigned long current_addr;
+     pte_t pte;
+     int ret = 0;
 
-    pte_end = (addr + PMD_SIZE) & PMD_MASK;
-    if (end < pte_end)
-        pte_end = end;
+     pte_end = (addr + PMD_SIZE) & PMD_MASK;
+     if (end < pte_end)
+         pte_end = end;
 
-    ptep = pte_offset_kernel(pmd, addr);
-    if (!ptep)
-        return 0;
+     ptep = pte_offset_kernel(pmd, addr);
+     if (!ptep)
+         return 0;
+     ptep_start = ptep;
 
-    for (unsigned long current_addr = addr; current_addr < pte_end; current_addr += PAGE_SIZE) {
-        pte_t pte = *ptep;
+     for (current_addr = addr; current_addr < pte_end; current_addr += PAGE_SIZE) {
+         pte = *ptep;
 
-        if (ctx->stats) {
-            ctx->stats->total_pte_count++;
-        }
+         if (ctx->stats) {
+             ctx->stats->total_pte_count++;
+         }
 
-        if (pte_present(pte)) {
-            if (ctx->stats) {
-                ctx->stats->present_pte_count++;
-            }
+         if (pte_present(pte)) {
+             if (ctx->stats) {
+                 ctx->stats->present_pte_count++;
+             }
 
-            if (ctx->pte_callback) {
-                ret = ctx->pte_callback(ptep, current_addr, pte_end, ctx->data);
-                if (ret)
-                    goto out;
-            }
+             if (ctx->pte_callback) {
+                 ret = ctx->pte_callback(ptep, current_addr, current_addr + PAGE_SIZE, ctx->data);
+                 if (ret)
+                     goto out;
+             }
 
             if (ctx->flags & PAGE_WALK_REGIONS) {
                 if (*ctx->region_start != -1UL && current_addr != *ctx->region_end + PAGE_SIZE) {
@@ -319,23 +329,23 @@ static int walk_pte_level_ctx(pmd_t *pmd, unsigned long addr, unsigned long end,
             if (ctx->stats)
                 ctx->stats->swap_entries++;
 
-            if (ctx->pte_callback) {
-                ret = ctx->pte_callback(ptep, current_addr, pte_end, ctx->data);
-                if (ret)
-                    goto out;
-            }
-        } else {
-            if (ctx->flags & PAGE_WALK_REGIONS) {
-                print_merged_region(ctx->region_start, ctx->region_end);
-            }
-        }
-        ptep++;
-    }
+             if (ctx->pte_callback) {
+                 ret = ctx->pte_callback(ptep, current_addr, current_addr + PAGE_SIZE, ctx->data);
+                 if (ret)
+                     goto out;
+             }
+         } else {
+             if (ctx->flags & PAGE_WALK_REGIONS) {
+                 print_merged_region(ctx->region_start, ctx->region_end);
+             }
+         }
+         ptep++;
+     }
 
-out:
-    pte_unmap(ptep - ((pte_end - addr) >> PAGE_SHIFT));
-    return ret;
-}
+ out:
+     pte_unmap(ptep_start);
+     return ret;
+ }
 
 static int walk_pmd_level_ctx(pud_t *pud, unsigned long addr, unsigned long end,
                                struct page_walk_context *ctx)
@@ -463,14 +473,21 @@ static int walk_p4d_level_ctx(pgd_t *pgd, unsigned long addr, unsigned long end,
 }
 
 static int walk_pgd_level_ctx(struct mm_struct *mm, unsigned long start, unsigned long end,
-                               struct page_walk_context *ctx)
- {
-    pgd_t *pgd;
-    unsigned long addr = start;
-    unsigned long next;
-    int ret = 0;
+                                struct page_walk_context *ctx)
+  {
+     pgd_t *pgd;
+     pgd_t *pgd_base;
+     unsigned long addr = start;
+     unsigned long next;
+     int ret = 0;
 
-    pgd = pgd_offset(mm, start);
+     /* Never trust the build-time mm->pgd offset on foreign kernels:
+      * derive the table base from the runtime-learned, shape-checked
+      * pgd and fail closed when it is unavailable. */
+     pgd_base = (pgd_t *)memd_valid_pgd(mm);
+     if (!pgd_base)
+         return -ENOENT;
+     pgd = pgd_base + pgd_index(start);
 
     do {
         next = pgd_addr_end(addr, end);
@@ -496,42 +513,54 @@ static int walk_pgd_level_ctx(struct mm_struct *mm, unsigned long start, unsigne
 }
 
 int memd_page_walk(struct mm_struct *mm, struct page_walk_context *ctx)
- {
-    if (!mm || !ctx)
-        return -EINVAL;
+  {
+     unsigned long start;
+     unsigned long end;
 
-    if (ctx->stats) {
-        ctx->stats->total_pte_count = 0;
-        ctx->stats->present_pte_count = 0;
-        ctx->stats->pmd_huge_count = 0;
-        ctx->stats->pud_huge_count = 0;
-    }
+     if (!mm || !ctx)
+         return -EINVAL;
 
-    ctx->mm = mm;
-    /* No TASK_SIZE_MIN on matrix DDKs; user range starts at 0. End at
-     * TASK_SIZE_64 (not build-time TASK_SIZE: a 5.10-built image on a
-     * 52-bit-VA 6.x kernel must still reach high mappings; the extra
-     * range is unmapped holes elsewhere and walks fail closed). */
-    unsigned long start = 0;
-    unsigned long end = ctx->include_kernel ? ULONG_MAX : TASK_SIZE_64;
+     if (ctx->stats) {
+         ctx->stats->total_pte_count = 0;
+         ctx->stats->present_pte_count = 0;
+         ctx->stats->pmd_huge_count = 0;
+         ctx->stats->pud_huge_count = 0;
+     }
 
-    return walk_pgd_level_ctx(mm, start, end, ctx);
-}
+     ctx->mm = mm;
+     /* No TASK_SIZE_MIN on matrix DDKs; user range starts at 0. End at
+      * TASK_SIZE_64 (not build-time TASK_SIZE: a 5.10-built image on a
+      * 52-bit-VA 6.x kernel must still reach high mappings; the extra
+      * range is unmapped holes elsewhere and walks fail closed). */
+     start = 0;
+     end = ctx->include_kernel ? ULONG_MAX : TASK_SIZE_64;
+
+     return walk_pgd_level_ctx(mm, start, end, ctx);
+ }
 
 int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_info *info)
- {
-    pte_t *ptep;
-    pmd_t *pmd;
-    pud_t *pud;
-    p4d_t *p4d;
-    pgd_t *pgd;
+  {
+     pte_t *ptep;
+     pmd_t *pmd;
+     pud_t *pud;
+     p4d_t *p4d;
+     pgd_t *pgd;
+     pte_t pte;
 
-    if (!mm || !info)
-        return -EINVAL;
+     if (!mm || !info)
+         return -EINVAL;
 
-    pgd = pgd_offset(mm, addr);
-    if (pgd_none(*pgd) || pgd_bad(*pgd))
-        return -ENOENT;
+     info->present = false;
+     info->swapped = false;
+
+     /* Runtime-learned pgd base (verified); fail closed. The lower
+      * levels are indexed from live table contents, not structs. */
+     pgd = (pgd_t *)memd_valid_pgd(mm);
+     if (!pgd)
+         return -ENOENT;
+     pgd = pgd + pgd_index(addr);
+     if (pgd_none(*pgd) || pgd_bad(*pgd))
+         return -ENOENT;
 
     p4d = p4d_offset(pgd, addr);
     if (p4d_none(*p4d) || p4d_bad(*p4d))
@@ -541,18 +570,15 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
     if (pud_none(*pud) || pud_bad(*pud))
         return -ENOENT;
 
-    if (pud_huge(*pud)) {
-        info->page_size = PUD_SIZE;
-        info->pfn = pud_pfn(*pud);
-        info->present = true;
-        info->huge = true;
-        return 0;
-    }
+     if (pud_huge(*pud)) {
+         info->page_size = PUD_SIZE;
+         info->pfn = pud_pfn(*pud);
+         info->present = true;
+         info->huge = true;
+         return 0;
+     }
 
-    if (pud_bad(*pud))
-        return -ENOENT;
-
-    pmd = pmd_offset(pud, addr);
+     pmd = pmd_offset(pud, addr);
     if (pmd_none(*pmd) || pmd_bad(*pmd))
         return -ENOENT;
 
@@ -564,12 +590,12 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
         return 0;
     }
 
-    ptep = pte_offset_kernel(pmd, addr);
-    if (!ptep)
-        return -ENOENT;
+     ptep = pte_offset_kernel(pmd, addr);
+     if (!ptep)
+         return -ENOENT;
 
-    pte_t pte = *ptep;
-    if (!pte_present(pte)) {
+     pte = *ptep;
+     if (!pte_present(pte)) {
         if (memd_is_swap_pte(pte)) {
             info->swapped = true;
             info->swap_offset = memd_pte_swp_offset(pte);
@@ -595,16 +621,21 @@ int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_inf
 int memd_walk_page_range(struct mm_struct *mm, unsigned long start, unsigned long end,
                           int (*callback)(pte_t *pte, unsigned long addr, unsigned long end, void *data),
                           void *data)
- {
-    struct page_walk_context ctx = {
-        .mm = mm,
-        .region_start = (unsigned long[]) {-1UL},
-        .region_end = (unsigned long[]) {-1UL},
-        .pte_callback = callback,
-        .data = data,
-        .flags = PAGE_WALK_REGIONS,
-    };
+  {
+     struct page_walk_context ctx = {
+         .mm = mm,
+         .region_start = (unsigned long[]) {-1UL},
+         .region_end = (unsigned long[]) {-1UL},
+         .pte_callback = callback,
+         .data = data,
+         .flags = PAGE_WALK_REGIONS,
+     };
 
-    return memd_page_walk(mm, &ctx);
-}
+     if (!mm || !callback || start >= end)
+         return -EINVAL;
+
+     /* Honor the caller's range (the old code ignored start/end and
+      * always walked the whole address space). */
+     return walk_pgd_level_ctx(mm, start, end, &ctx);
+ }
 /* kmod/memd/mm/memd_page_walk.c[∂] */

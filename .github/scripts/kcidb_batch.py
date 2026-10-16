@@ -74,7 +74,9 @@ def load_snapshot(path):
         if not isinstance(record, dict):
             raise ValueError(f"Row {index}: a JSON object was expected.")
         for field in REQUIRED_FIELDS:
-            _required_text(record, field, index)
+            # Store the stripped form: identities and target keys must
+            # not depend on surrounding whitespace in the source rows.
+            record[field] = _required_text(record, field, index)
         if record["device_class"] not in {"ranchu", "oem_consumer", "maestro"}:
             raise ValueError(
                 f"Row {index}: unsupported device_class "
@@ -208,7 +210,14 @@ def main():
     if args.target_key_for_index is not None:
         with open(args.manifest, encoding="utf-8") as stream:
             manifest = json.load(stream)
-        print(target_key(manifest["records"][args.target_key_for_index]))
+        records = manifest["records"]
+        index = args.target_key_for_index
+        if index < 0 or index >= len(records):
+            raise ValueError(
+                "target index %d is outside the manifest (0..%d)"
+                % (index, len(records) - 1)
+            )
+        print(target_key(records[index]))
         return
 
     if not args.input or not args.matrix_output:
@@ -261,7 +270,8 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
+    except (OSError, ValueError, KeyError, IndexError, TypeError,
+            json.JSONDecodeError) as error:
         print(f"KCIDB batch preparation failed: {error}", file=sys.stderr)
         sys.exit(1)
 # .github/scripts/kcidb_batch.py[∂]

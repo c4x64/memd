@@ -28,8 +28,16 @@ KERN_FILES = [
     "kmod/memd/utils/memd_sigforce.h",
     "kmod/memd/utils/memd_inject.h",
     "kmod/memd/display/memd_display.h",
+    "kmod/memd/mm/memd_bindproc.c",
 ]
 CLIENT = "client.h"
+
+# Bindproc structs live under short names in kmod (bp_*) but are exposed
+# to userspace with the memd_ prefix; layouts are identical.
+STRUCT_ALIAS = {
+    "bp_read_memory_cmd": "memd_bp_read_memory_cmd",
+    "bp_write_memory_cmd": "memd_bp_write_memory_cmd",
+}
 
 # Deliberately product-absent (gate asserts they stay out of client.h).
 EXCLUDED_OPS = {"MEMD_IOCTL_DMA_BUF_CREATE", "MEMD_IOCTL_DISP_READBACK"}
@@ -89,13 +97,20 @@ def extract_structs(src):
 
 
 def extract_ops(src):
-    """op-name -> (nr, struct-or-int)."""
+    """op-name -> (code-key, struct-or-int).
+
+    code-key folds the ioctl type char ('W' vs 'B') into the number so
+    the socket ('W') and bindproc ('B') namespaces never alias each
+    other; struct names pass through STRUCT_ALIAS so the kmod bp_*
+    short names compare against client.h's memd_bp_* mirrors."""
     ops = {}
     for m in re.finditer(
             r"#define\s+(MEMD_IOCTL_\w+|MEMD_BP_IOCTL_\w+)\s+"
-            r"_IO[WR]*\(\s*'W'\s*,\s*(\d+)\s*,\s*(?:struct\s+(\w+)|(int))\s*\)",
+            r"_IO[WR]*\(\s*'([WB])'\s*,\s*(\d+)\s*,\s*(?:struct\s+(\w+)|(int))\s*\)",
             src):
-        ops[m.group(1)] = (m.group(2), m.group(3) or m.group(4))
+        struct = m.group(4) or m.group(5)
+        ops[m.group(1)] = (m.group(2) + m.group(3),
+                            STRUCT_ALIAS.get(struct, struct))
     return ops
 
 
@@ -128,18 +143,40 @@ def main():
             errors.append("client.h has unknown op: %s" % name)
 
     kstructs, cstructs = extract_structs(ksrc), extract_structs(csrc)
+    # Kernel short names compare under their client.h aliases.
+    knorm = {STRUCT_ALIAS.get(n, n): b for n, b in kstructs.items()}
     # Structs referenced only by deliberately excluded ops stay out too.
     excluded_structs = {s for n, (nr, s) in kops.items()
                         if n in EXCLUDED_OPS}
     needed = sorted(set(s for _, s in kops.values()) - {"int"}
                     - excluded_structs)
     for name in needed:
-        if name not in kstructs:
+        if name not in knorm:
             errors.append("kernel struct not found: %s" % name)
         elif name not in cstructs:
             errors.append("client.h missing struct: %s" % name)
-        elif cstructs[name] != kstructs[name]:
+        elif cstructs[name] != knorm[name]:
             errors.append("struct drift: %s" % name)
+
+    # Shared (type, nr) pairs are by design (e.g. W21/W22/W23): the size
+    # field inside _IOWR keeps the full codes distinct. Two different op
+    # names with byte-identical struct bodies would still produce
+    # identical codes -- a real dispatch collision -- so fail on that.
+    by_code = {}
+    for name, (code, struct) in sorted(kops.items()):
+        by_code.setdefault(code, []).append((name, struct))
+    for code, members in sorted(by_code.items()):
+        bodies = {}
+        for name, struct in members:
+            body = knorm.get(struct)
+            if body is None:
+                continue
+            if body in bodies:
+                errors.append(
+                    "ioctl code collision on '%s': %s and %s share a body"
+                    % (code, bodies[body], name))
+            else:
+                bodies[body] = name
 
     kconsts = extract_consts("\n".join([
         read("kmod/memd/utils/memd_utils.h"),

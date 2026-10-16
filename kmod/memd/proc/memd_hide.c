@@ -58,15 +58,18 @@ int memd_hide_add(pid_t pid)
  {
     struct memd_hide_entry *entry;
     struct memd_hide_ns_entry *ns_entry;
+    struct memd_hide_ns_entry *found;
     struct pid_namespace *ns;
+    struct task_struct *task;
     unsigned long flags;
     unsigned int hash;
+    unsigned int ns_hash;
 
     if (pid <= 0)
         return -EINVAL;
 
     rcu_read_lock();
-    struct task_struct *task = find_task_by_vpid(pid);
+    task = find_task_by_vpid(pid);
     if (!task) {
         rcu_read_unlock();
         return -ESRCH;
@@ -79,81 +82,30 @@ int memd_hide_add(pid_t pid)
     if (!ns)
         return -ESRCH;
 
+    /* Allocate outside the spinlock (may sleep); freed on dup/full. */
+    entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+    if (!entry) {
+        put_pid_ns(ns);
+        return -ENOMEM;
+    }
+    ns_entry = kmalloc(sizeof(*ns_entry), GFP_KERNEL);
+
     spin_lock_irqsave(&hide_lock, flags);
 
     if (hide_find_entry(pid, ns)) {
         spin_unlock_irqrestore(&hide_lock, flags);
         put_pid_ns(ns);
+        kfree(entry);
+        kfree(ns_entry);
         return 0;
     }
 
     if (hide_total_count >= MEMD_HIDE_MAX) {
         spin_unlock_irqrestore(&hide_lock, flags);
         put_pid_ns(ns);
+        kfree(entry);
+        kfree(ns_entry);
         return -ENOSPC;
-    }
-
-    entry = kmalloc(sizeof(*entry), GFP_ATOMIC);
-    if (!entry) {
-        spin_unlock_irqrestore(&hide_lock, flags);
-        put_pid_ns(ns);
-        return -ENOMEM;
-    }
-
-    entry->pid = pid;
-    entry->ns = ns;
-    entry->pid_struct = find_get_pid(pid);
-    entry->flags = 0;
-
-    hash = hide_hash_fn(pid, ns);
-    hlist_add_head(&entry->node, &hide_hash[hash]);
-    hide_total_count++;
-
-    spin_unlock_irqrestore(&hide_lock, flags);
-
-    spin_lock_irqsave(&hide_ns_lock, flags);
-    ns_entry = hide_find_ns(ns);
-    if (!ns_entry) {
-        ns_entry = kmalloc(sizeof(*ns_entry), GFP_ATOMIC);
-        if (ns_entry) {
-            ns_entry->ns = ns;
-            ns_entry->count = 1;
-            unsigned int ns_hash = hash_long((unsigned long)ns, MEMD_HIDE_HASH_BITS);
-            hlist_add_head(&ns_entry->node, &hide_ns_hash[ns_hash]);
-        }
-    } else {
-        ns_entry->count++;
-    }
-    spin_unlock_irqrestore(&hide_ns_lock, flags);
-
-    return 0;
-}
-
-int memd_hide_add_ns(pid_t pid, struct pid_namespace *ns)
- {
-    struct memd_hide_entry *entry;
-    unsigned long flags;
-    unsigned int hash;
-
-    if (pid <= 0 || !ns)
-        return -EINVAL;
-
-    spin_lock_irqsave(&hide_lock, flags);
-
-    if (hide_find_entry(pid, ns)) {
-        spin_unlock_irqrestore(&hide_lock, flags);
-        return 0;
-    }
-
-    if (hide_total_count >= MEMD_HIDE_MAX) {
-        spin_unlock_irqrestore(&hide_lock, flags);
-        return -ENOSPC;
-    }
-
-    entry = kmalloc(sizeof(*entry), GFP_ATOMIC);
-    if (!entry) {
-        spin_unlock_irqrestore(&hide_lock, flags);
-        return -ENOMEM;
     }
 
     entry->pid = pid;
@@ -166,20 +118,106 @@ int memd_hide_add_ns(pid_t pid, struct pid_namespace *ns)
     hide_total_count++;
 
     spin_unlock_irqrestore(&hide_lock, flags);
+
+    /* Per-ns count is best-effort status; the entry above owns one ns
+     * ref and this path still holds the original, so ns stays alive. */
+    spin_lock_irqsave(&hide_ns_lock, flags);
+    found = hide_find_ns(ns);
+    if (found) {
+        found->count++;
+    } else if (ns_entry) {
+        ns_entry->ns = get_pid_ns(ns);
+        ns_entry->count = 1;
+        ns_hash = hash_long((unsigned long)ns, MEMD_HIDE_HASH_BITS);
+        hlist_add_head(&ns_entry->node, &hide_ns_hash[ns_hash]);
+        ns_entry = NULL;
+    }
+    spin_unlock_irqrestore(&hide_ns_lock, flags);
+    kfree(ns_entry);
+
+    put_pid_ns(ns);
+
+    return 0;
+}
+
+int memd_hide_add_ns(pid_t pid, struct pid_namespace *ns)
+ {
+    struct memd_hide_entry *entry;
+    struct memd_hide_ns_entry *ns_entry;
+    struct memd_hide_ns_entry *found;
+    unsigned long flags;
+    unsigned int hash;
+    unsigned int ns_hash;
+
+    if (pid <= 0 || !ns)
+        return -EINVAL;
+
+    /* Caller must hold a ref on ns for the duration of this call. */
+    entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+    if (!entry)
+        return -ENOMEM;
+    ns_entry = kmalloc(sizeof(*ns_entry), GFP_KERNEL);
+
+    spin_lock_irqsave(&hide_lock, flags);
+
+    if (hide_find_entry(pid, ns)) {
+        spin_unlock_irqrestore(&hide_lock, flags);
+        kfree(entry);
+        kfree(ns_entry);
+        return 0;
+    }
+
+    if (hide_total_count >= MEMD_HIDE_MAX) {
+        spin_unlock_irqrestore(&hide_lock, flags);
+        kfree(entry);
+        kfree(ns_entry);
+        return -ENOSPC;
+    }
+
+    entry->pid = pid;
+    entry->ns = get_pid_ns(ns);
+    entry->pid_struct = find_get_pid(pid);
+    entry->flags = 0;
+
+    hash = hide_hash_fn(pid, ns);
+    hlist_add_head(&entry->node, &hide_hash[hash]);
+    hide_total_count++;
+
+    spin_unlock_irqrestore(&hide_lock, flags);
+
+    spin_lock_irqsave(&hide_ns_lock, flags);
+    found = hide_find_ns(ns);
+    if (found) {
+        found->count++;
+    } else if (ns_entry) {
+        ns_entry->ns = get_pid_ns(ns);
+        ns_entry->count = 1;
+        ns_hash = hash_long((unsigned long)ns, MEMD_HIDE_HASH_BITS);
+        hlist_add_head(&ns_entry->node, &hide_ns_hash[ns_hash]);
+        ns_entry = NULL;
+    }
+    spin_unlock_irqrestore(&hide_ns_lock, flags);
+    kfree(ns_entry);
     return 0;
 }
 
 int memd_hide_del(pid_t pid)
  {
     struct memd_hide_entry *entry;
+    struct memd_hide_ns_entry *ns_entry;
+    struct memd_hide_ns_entry *gone;
     struct pid_namespace *ns;
+    struct task_struct *task;
+    struct pid *pid_struct;
+    struct pid_namespace *entry_ns;
+    struct pid_namespace *gone_ns;
     unsigned long flags;
 
     if (pid <= 0)
         return -EINVAL;
 
     rcu_read_lock();
-    struct task_struct *task = find_task_by_vpid(pid);
+    task = find_task_by_vpid(pid);
     if (!task) {
         rcu_read_unlock();
         return -ESRCH;
@@ -201,28 +239,39 @@ int memd_hide_del(pid_t pid)
         return -ESRCH;
     }
 
+    /* Unlink under the lock; drop refs after unlock (put_pid_ns may
+     * free the namespace and must not run under a spinlock). */
     hlist_del(&entry->node);
     hide_total_count--;
-
-    if (entry->pid_struct)
-        put_pid(entry->pid_struct);
-    put_pid_ns(entry->ns);
-    kfree(entry);
+    pid_struct = entry->pid_struct;
+    entry_ns = entry->ns;
 
     spin_unlock_irqrestore(&hide_lock, flags);
 
+    if (pid_struct)
+        put_pid(pid_struct);
+    put_pid_ns(entry_ns);
+    kfree(entry);
+
+    gone = NULL;
+    gone_ns = NULL;
     spin_lock_irqsave(&hide_ns_lock, flags);
-    struct memd_hide_ns_entry *ns_entry = hide_find_ns(ns);
+    ns_entry = hide_find_ns(ns);
     if (ns_entry) {
         ns_entry->count--;
-        if (ns_entry->count == 0) {
+        if (ns_entry->count <= 0) {
             hlist_del(&ns_entry->node);
-            put_pid_ns(ns_entry->ns);
-            kfree(ns_entry);
+            gone = ns_entry;
+            gone_ns = ns_entry->ns;
         }
     }
-    put_pid_ns(ns);
     spin_unlock_irqrestore(&hide_ns_lock, flags);
+
+    if (gone)
+        kfree(gone);
+    if (gone_ns)
+        put_pid_ns(gone_ns);
+    put_pid_ns(ns);
 
     return 0;
 }
@@ -230,34 +279,54 @@ int memd_hide_del(pid_t pid)
 void memd_hide_clear(void)
  {
     struct memd_hide_entry *entry;
-    struct hlist_node *tmp;
     struct memd_hide_ns_entry *ns_entry;
-    struct hlist_node *ns_tmp;
+    struct pid *pid_struct;
+    struct pid_namespace *entry_ns;
+    struct pid_namespace *gone_ns;
     unsigned long flags;
     int i;
 
-    spin_lock_irqsave(&hide_lock, flags);
+    /* Pop one entry at a time: unlink under the lock, drop refs after
+     * (put_pid/put_pid_ns may free and must not run under a spinlock). */
     for (i = 0; i < MEMD_HIDE_HASH_SIZE; i++) {
-        hlist_for_each_entry_safe(entry, tmp, &hide_hash[i], node) {
+        for (;;) {
+            spin_lock_irqsave(&hide_lock, flags);
+            if (hlist_empty(&hide_hash[i])) {
+                spin_unlock_irqrestore(&hide_lock, flags);
+                break;
+            }
+            entry = hlist_entry(hide_hash[i].first,
+                                struct memd_hide_entry, node);
             hlist_del(&entry->node);
-            if (entry->pid_struct)
-                put_pid(entry->pid_struct);
-            put_pid_ns(entry->ns);
-            kfree(entry);
-        }
-    }
-    hide_total_count = 0;
-    spin_unlock_irqrestore(&hide_lock, flags);
+            hide_total_count--;
+            spin_unlock_irqrestore(&hide_lock, flags);
 
-    spin_lock_irqsave(&hide_ns_lock, flags);
-    for (i = 0; i < MEMD_HIDE_HASH_SIZE; i++) {
-        hlist_for_each_entry_safe(ns_entry, ns_tmp, &hide_ns_hash[i], node) {
-            hlist_del(&ns_entry->node);
-            put_pid_ns(ns_entry->ns);
-            kfree(ns_entry);
+            pid_struct = entry->pid_struct;
+            entry_ns = entry->ns;
+            kfree(entry);
+            if (pid_struct)
+                put_pid(pid_struct);
+            put_pid_ns(entry_ns);
         }
     }
-    spin_unlock_irqrestore(&hide_ns_lock, flags);
+
+    for (i = 0; i < MEMD_HIDE_HASH_SIZE; i++) {
+        for (;;) {
+            spin_lock_irqsave(&hide_ns_lock, flags);
+            if (hlist_empty(&hide_ns_hash[i])) {
+                spin_unlock_irqrestore(&hide_ns_lock, flags);
+                break;
+            }
+            ns_entry = hlist_entry(hide_ns_hash[i].first,
+                                   struct memd_hide_ns_entry, node);
+            hlist_del(&ns_entry->node);
+            spin_unlock_irqrestore(&hide_ns_lock, flags);
+
+            gone_ns = ns_entry->ns;
+            kfree(ns_entry);
+            put_pid_ns(gone_ns);
+        }
+    }
 }
 
 int memd_hide_count(void)
@@ -274,11 +343,12 @@ int memd_hide_count(void)
 bool memd_hide_contains(pid_t pid)
  {
     struct pid_namespace *ns;
+    struct task_struct *task;
     bool found = false;
     unsigned long flags;
 
     rcu_read_lock();
-    struct task_struct *task = find_task_by_vpid(pid);
+    task = find_task_by_vpid(pid);
     if (!task) {
         rcu_read_unlock();
         return false;
@@ -362,37 +432,55 @@ int memd_hide_collect_pids(pid_t *buf, size_t buf_size, size_t *count,
     return 0;
 }
 
+/* Unlocked-iteration helpers for debugging only: no in-tree callers.
+ * Traversal is locked, but the returned pointer is NOT pinned (no ref
+ * taken), so it is only valid while the caller guarantees the entry's
+ * lifetime by other means. */
 struct memd_hide_entry *memd_hide_get_first(void)
  {
     int i;
     struct memd_hide_entry *entry;
+    struct memd_hide_entry *found;
+    unsigned long flags;
 
-    for (i = 0; i < MEMD_HIDE_HASH_SIZE; i++) {
+    found = NULL;
+    spin_lock_irqsave(&hide_lock, flags);
+    for (i = 0; i < MEMD_HIDE_HASH_SIZE && !found; i++) {
         hlist_for_each_entry(entry, &hide_hash[i], node) {
-            return entry;
+            found = entry;
+            break;
         }
     }
-    return NULL;
+    spin_unlock_irqrestore(&hide_lock, flags);
+    return found;
 }
 
 struct memd_hide_entry *memd_hide_get_next(struct memd_hide_entry *entry)
  {
     struct memd_hide_entry *next;
+    struct memd_hide_entry *found;
     unsigned int hash;
+    unsigned int i;
+    unsigned long flags;
 
     if (!entry)
         return NULL;
 
+    found = NULL;
+    spin_lock_irqsave(&hide_lock, flags);
     hash = hide_hash_fn(entry->pid, entry->ns);
     next = hlist_entry_safe(entry->node.next, typeof(*entry), node);
-    if (next)
-        return next;
-
-    for (unsigned int i = hash + 1; i < MEMD_HIDE_HASH_SIZE; i++) {
-        hlist_for_each_entry(next, &hide_hash[i], node) {
-            return next;
+    if (next) {
+        found = next;
+    } else {
+        for (i = hash + 1; i < MEMD_HIDE_HASH_SIZE && !found; i++) {
+            hlist_for_each_entry(next, &hide_hash[i], node) {
+                found = next;
+                break;
+            }
         }
     }
-    return NULL;
+    spin_unlock_irqrestore(&hide_lock, flags);
+    return found;
 }
 /* kmod/memd/proc/memd_hide.c[∂] */

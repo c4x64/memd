@@ -83,14 +83,23 @@ static int memd_sigforce_worker(void *data)
 
 int memd_sigforce_init(void)
  {
-    sigforce_initialized = true;
+    struct task_struct *worker;
+    int err;
 
-    sigforce_worker_task = kthread_run(memd_sigforce_worker, NULL, "memd_sigforce");
-    if (IS_ERR(sigforce_worker_task)) {
-        memd_err("sigforce: failed to create worker thread\n");
+    if (sigforce_worker_task || sigforce_initialized)
+        return 0;
+
+    worker = kthread_run(memd_sigforce_worker, NULL, "memd_sigforce");
+    if (IS_ERR(worker)) {
+        err = PTR_ERR(worker);
         sigforce_worker_task = NULL;
-        return PTR_ERR(sigforce_worker_task);
+        sigforce_initialized = false;
+        memd_err("sigforce: failed to create worker thread\n");
+        return err;
     }
+
+    sigforce_worker_task = worker;
+    sigforce_initialized = true;
 
     memd_info("sigforce: initialized with async worker\n");
     return 0;
@@ -99,6 +108,10 @@ int memd_sigforce_init(void)
 void memd_sigforce_cleanup(void)
  {
     struct sigforce_pending *pending, *tmp;
+
+    /* Refuse new queuers first: anything queued after the worker is
+     * gone would wait forever. */
+    sigforce_initialized = false;
 
     if (sigforce_worker_task) {
         kthread_stop(sigforce_worker_task);
@@ -111,9 +124,9 @@ void memd_sigforce_cleanup(void)
         pending->result = -ENODEV;
         complete(&pending->done);
     }
+    atomic_set(&sigforce_pending_count, 0);
     mutex_unlock(&sigforce_pending_lock);
 
-    sigforce_initialized = false;
     memd_info("sigforce: cleaned up\n");
 }
 
@@ -147,7 +160,7 @@ static int memd_sigforce_deliver_sync(struct task_struct *task, int sig, int for
         struct sighand_struct *sighand = memd_t_sighand(task);
         if (sighand) {
             spin_lock(&sighand->siglock);
-            if (!(task->flags & PF_KTHREAD)) {
+            if (!(task->flags & PF_KTHREAD) && task->signal) {
                 task->signal->flags &= ~SIGNAL_GROUP_EXIT;
                 task->flags &= ~PF_EXITING;
                 task->signal->group_exit_code = 0;
@@ -203,6 +216,11 @@ static int memd_sigforce_deliver_async(struct task_struct *task, int sig, int fo
     init_completion(&pending->done);
     pending->result = 0;
 
+    /* Pin the target across the queue: without a ref the worker could
+     * dereference a reaped task_struct. The waiter drops it after the
+     * worker (or the cleanup drain) completes this entry. */
+    get_task_struct(task);
+
     mutex_lock(&sigforce_pending_lock);
     list_add_tail(&pending->list, &sigforce_pending_list);
     atomic_inc(&sigforce_pending_count);
@@ -212,6 +230,7 @@ static int memd_sigforce_deliver_async(struct task_struct *task, int sig, int fo
 
     wait_for_completion(&pending->done);
     ret = pending->result;
+    put_task_struct(task);
     kfree(pending);
 
     return ret;

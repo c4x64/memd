@@ -222,6 +222,8 @@ void memd_hwbp_cleanup(void)
 
 int memd_hwbp_get_info(struct memd_hwbp_info_cmd *info)
  {
+    if (!info)
+        return -EINVAL;
     if (!hwbp_supported) {
         info->num_brps = 0;
         info->num_wrps = 0;
@@ -283,20 +285,22 @@ int memd_hwbp_set(struct task_struct *task, struct memd_hwbp_set_cmd *cmd)
     if (!hwbp_supported)
         return -ENODEV;
 
-    if (!task || !task->thread.debug_monitors)
+    if (!task || !cmd || !task->thread.debug_monitors)
         return -EINVAL;
 
     if (cmd->addr >= TASK_SIZE)
+        return -EINVAL;
+
+    /* Length first: the alignment mask below (len - 1) underflows for
+     * len == 0 and is meaningless for non-pow2 lengths. */
+    len_enc = hwbp_encode_len(cmd->len);
+    if (len_enc < 0)
         return -EINVAL;
 
     if (cmd->type != MEMD_HWBP_TYPE_BREAKPOINT) {
         if (cmd->addr & (cmd->len - 1))
             return -EINVAL;
     }
-
-    len_enc = hwbp_encode_len(cmd->len);
-    if (len_enc < 0)
-        return -EINVAL;
 
     if (hwbp_encode_type(cmd->type, len_enc, &dbgwcr, &dbgbcr) < 0)
         return -EINVAL;
@@ -317,6 +321,18 @@ int memd_hwbp_set(struct task_struct *task, struct memd_hwbp_set_cmd *cmd)
     }
 
     if (slot < 0) {
+        spin_unlock_irqrestore(&hwbp_lock, flags);
+        return -ENOSPC;
+    }
+
+    /* dms bvr/bcr and wvr/wcr arrays are sized by the hardware caps,
+     * not by the 16-entry shared table: indexing past them corrupts. */
+    if (cmd->type == MEMD_HWBP_TYPE_BREAKPOINT) {
+        if (slot >= max_brps) {
+            spin_unlock_irqrestore(&hwbp_lock, flags);
+            return -ENOSPC;
+        }
+    } else if (slot >= max_wrps) {
         spin_unlock_irqrestore(&hwbp_lock, flags);
         return -ENOSPC;
     }
@@ -342,8 +358,7 @@ int memd_hwbp_set(struct task_struct *task, struct memd_hwbp_set_cmd *cmd)
     hwbp_table[slot].condition_value = 0;
     hwbp_table[slot].is_conditional = false;
 
-    if (hwbp_count == 0)
-        hwbp_count = 16;
+    hwbp_count++;
 
     spin_unlock_irqrestore(&hwbp_lock, flags);
 
@@ -356,16 +371,18 @@ int memd_hwbp_set(struct task_struct *task, struct memd_hwbp_set_cmd *cmd)
 
 int memd_hwbp_remove(struct task_struct *task, u32 hwbp_id)
  {
-    int slot = hwbp_id - 1;
+    int slot;
     unsigned long flags;
     struct debug_monitor_state *dms;
 
-    if (!hwbp_supported || slot < 0 || slot >= 16)
+    /* hwbp_id == 0 wraps (slot = -1) via unsigned arithmetic; reject. */
+    if (!hwbp_supported || hwbp_id == 0 || hwbp_id > 16)
         return -EINVAL;
 
     if (!task || !task->thread.debug_monitors)
         return -EINVAL;
 
+    slot = (int)hwbp_id - 1;
     spin_lock_irqsave(&hwbp_lock, flags);
 
     if (!hwbp_table[slot].enabled) {
@@ -391,6 +408,8 @@ int memd_hwbp_remove(struct task_struct *task, u32 hwbp_id)
     hwbp_table[slot].enabled = 0;
     hwbp_table[slot].dms = NULL;
     hwbp_table[slot].task = NULL;
+    if (hwbp_count > 0)
+        hwbp_count--;
 
     spin_unlock_irqrestore(&hwbp_lock, flags);
 
@@ -404,7 +423,7 @@ int memd_hwbp_list(struct task_struct *task, struct memd_hwbp_list_cmd *cmd)
     unsigned long flags;
     struct debug_monitor_state *dms;
 
-    if (!task || !task->thread.debug_monitors)
+    if (!task || !cmd || !task->thread.debug_monitors)
         return -EINVAL;
 
     dms = task->thread.debug_monitors;

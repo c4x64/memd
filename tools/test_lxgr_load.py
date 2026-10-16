@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import struct
@@ -137,6 +138,81 @@ class StructTests(unittest.TestCase):
 
         args = argparse.Namespace(ephemeral=True)
         self.assertEqual(lxgr_load.cmd_hotswap(args), 22)  # EINVAL
+
+
+class ValidationTests(unittest.TestCase):
+    def test_load_rejects_nul_bytes(self):
+        with self.assertRaisesRegex(ValueError, "NUL"):
+            lxgr_load.ioctl_load(None, 1, "/x\x00evil", "", False, False)
+        with self.assertRaisesRegex(ValueError, "NUL"):
+            lxgr_load.ioctl_load(None, 1, "/x", "e\x00vil", False, False)
+
+    def test_load_rejects_bad_pid(self):
+        for bad in (0, -1, True, 1 << 31, "123", None):
+            with self.assertRaisesRegex(ValueError, "pid", msg=repr(bad)):
+                lxgr_load.ioctl_load(None, bad, "/x", "", False, False)
+
+    def test_unload_rejects_bad_pid_and_handle(self):
+        for bad_pid in (0, -1, True, 1 << 31):
+            with self.assertRaisesRegex(ValueError, "pid", msg=repr(bad_pid)):
+                lxgr_load.ioctl_unload(None, bad_pid, 1)
+        for bad_handle in (0, -5, True, 1 << 64, "123", None):
+            with self.assertRaisesRegex(ValueError, "handle", msg=repr(bad_handle)):
+                lxgr_load.ioctl_unload(None, 1, bad_handle)
+
+    def test_stage_rejects_bad_zip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = os.path.join(tmp, "bad.zip")
+            with open(bad, "wb") as stream:
+                stream.write(b"not a zip")
+            with self.assertRaisesRegex(ValueError, "invalid module zip"):
+                lxgr_load.stage_module(bad, os.path.join(tmp, "s"), "arm64-v8a")
+
+    def test_stage_rejects_oversize_prop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            big = os.path.join(tmp, "big.zip")
+            with zipfile.ZipFile(big, "w") as archive:
+                archive.writestr(
+                    "module.prop", "id=x\nversionCode=1\n" + "k=v\n" * 20000
+                )
+                archive.writestr("zygisk/arm64-v8a.so", b"\x7fELF")
+            with self.assertRaisesRegex(ValueError, "too large"):
+                lxgr_load.stage_module(big, os.path.join(tmp, "s"), "arm64-v8a")
+
+    def test_stage_rejects_oversize_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            big = os.path.join(tmp, "big.zip")
+            with zipfile.ZipFile(big, "w") as archive:
+                archive.writestr("module.prop", PROP)
+                archive.writestr("zygisk/arm64-v8a.so", b"\x7fELF-too-big")
+            old_cap, lxgr_load.MAX_SO_BYTES = lxgr_load.MAX_SO_BYTES, 4
+            try:
+                with self.assertRaisesRegex(ValueError, "too large"):
+                    lxgr_load.stage_module(big, os.path.join(tmp, "s"), "arm64-v8a")
+            finally:
+                lxgr_load.MAX_SO_BYTES = old_cap
+
+    def test_pick_rejects_unknown_abi(self):
+        with self.assertRaisesRegex(ValueError, "unsupported abi"):
+            lxgr_load.pick_abi_lib(["module.prop"], "mips")
+
+    def test_uninstall_rejects_nondict_state(self):
+        import argparse
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "stage")
+            os.makedirs(os.path.join(root, "lxgr.demo"))
+            with open(os.path.join(root, "lxgr.demo", "pid-7.json"), "w") as stream:
+                stream.write("[1, 2]")
+            args = argparse.Namespace(id="lxgr.demo", root=root, pid=7)
+            self.assertEqual(lxgr_load.cmd_uninstall(args), errno.EINVAL)
+
+    def test_uninstall_missing_state(self):
+        import argparse
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(id="lxgr.demo", root=tmp, pid=4242)
+            self.assertEqual(lxgr_load.cmd_uninstall(args), errno.ENOENT)
 
 
 if __name__ == "__main__":

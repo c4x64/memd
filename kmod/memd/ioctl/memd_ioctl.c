@@ -198,12 +198,12 @@ int do_pte_mapping(struct socket* sock, void* arg) {
         return -EFAULT;
     }
 
-    if (cmd.start_addr < 0 || cmd.start_addr >= TASK_SIZE_64) {
+    if (cmd.start_addr >= TASK_SIZE_64) {
         memd_warn("invalid start address: 0x%lx\n", cmd.start_addr);
         return -EINVAL;
     }
 
-    if (cmd.num_pages <= 0 || cmd.num_pages > (TASK_SIZE_64 - cmd.start_addr) / PAGE_SIZE) {
+    if (cmd.num_pages == 0 || cmd.num_pages > (TASK_SIZE_64 - cmd.start_addr) / PAGE_SIZE) {
         memd_warn("invalid number of pages: %zu\n", cmd.num_pages);
         return -EINVAL;
     }
@@ -333,11 +333,11 @@ int do_pte_mapping(struct socket* sock, void* arg) {
 
     mmput(mm);
 
-    for (int i = 0; i < cmd.num_pages; ++i) {
+    for (i = 0; i < cmd.num_pages; ++i) {
         struct page* p = page_arr[i];
 
         if (!p) {
-            memd_err("page %d is NULL\n", i);
+            memd_err("page %zu is NULL\n", i);
             continue;
         }
 
@@ -360,6 +360,7 @@ int do_pte_mapping(struct socket* sock, void* arg) {
 rollback:
     while (i--)
         __free_page(page_arr[i]);
+    kfree(page_arr);
 out_mm:
     mmput(mm);
     return ret;
@@ -463,7 +464,7 @@ int do_copy_process(struct socket* sock, void* arg) {
         return -ESRCH;
     }
 
-    ret = -1;
+    ret = -ENOSYS;
     // cproc源码无了，这里取消
     // ret = create_remote_thread(task, &p, cmd.child_tid, NULL, cmd.flags);
     put_task_struct(task);
@@ -501,6 +502,15 @@ int do_read_physical_memory(struct socket* sock, void __user* arg) {
         return -EFAULT;
     }
 
+    /* Unbounded size would livelock the chunk loop (and wrap va+off):
+     * cap it. Root-only path, but a garbage size must still fail fast. */
+    if (!cmd.size || cmd.size > CMD_MAX_BYTES)
+        return -EINVAL;
+    /* va+off must not wrap: near-ULONG_MAX bases would alias low memory. */
+    if (cmd.size - 1 > (unsigned long)-1 - cmd.src_va ||
+        cmd.size - 1 > (unsigned long)-1 - cmd.dst_va)
+        return -EINVAL;
+
     /* Phys diagnostic (best-effort walk; 0 when unresolvable, e.g.
      * KPTI user tables — data below does not depend on it). */
     ret = translate_process_vaddr(cmd.pid, cmd.src_va, (uintptr_t*)&cmd.phy_addr);
@@ -511,14 +521,6 @@ int do_read_physical_memory(struct socket* sock, void __user* arg) {
         return -EFAULT;
     }
 
-    /* Unbounded size would livelock the chunk loop (and wrap va+off):
-     * cap it. Root-only path, but a garbage size must still fail fast. */
-    if (!cmd.size || cmd.size > CMD_MAX_BYTES)
-        return -EINVAL;
-    /* va+off must not wrap: near-ULONG_MAX bases would alias low memory. */
-    if (cmd.size - 1 > (unsigned long)-1 - cmd.src_va ||
-        cmd.size - 1 > (unsigned long)-1 - cmd.dst_va)
-        return -EINVAL;
     task = get_target_task(cmd.pid);
     if (!task)
         return -ESRCH;
@@ -600,6 +602,15 @@ int do_write_physical_memory(struct socket* sock, void __user* arg) {
         return -EFAULT;
     }
 
+    /* Same cap as the read path (see above): unbounded size livelocks.
+     * Validated before the diagnostic write-back so garbage size fails
+     * fast without leaking phy_addr. */
+    if (!cmd.size || cmd.size > CMD_MAX_BYTES)
+        return -EINVAL;
+    if (cmd.size - 1 > (unsigned long)-1 - cmd.src_va ||
+        cmd.size - 1 > (unsigned long)-1 - cmd.dst_va)
+        return -EINVAL;
+
     /* Phys diagnostic (best-effort; data below does not depend on it). */
     ret = translate_process_vaddr(cmd.pid, cmd.dst_va, (uintptr_t*)&cmd.phy_addr);
     if (ret < 0)
@@ -609,12 +620,6 @@ int do_write_physical_memory(struct socket* sock, void __user* arg) {
         return -EFAULT;
     }
 
-    /* Same cap as the read path (see above): unbounded size livelocks. */
-    if (!cmd.size || cmd.size > CMD_MAX_BYTES)
-        return -EINVAL;
-    if (cmd.size - 1 > (unsigned long)-1 - cmd.src_va ||
-        cmd.size - 1 > (unsigned long)-1 - cmd.dst_va)
-        return -EINVAL;
     task = get_target_task(cmd.pid);
     if (!task)
         return -ESRCH;
@@ -981,6 +986,14 @@ int do_list_processes(struct socket* sock, void __user* arg) {
         return -EINVAL;
     }
 
+    /* Reject NULL bitmap before the kzalloc: saves up to 1M of
+     * allocator work and reports EINVAL (bad argument) instead of
+     * EFAULT from the later copy. */
+    if (!cmd.bitmap) {
+        memd_warn("NULL bitmap pointer\n");
+        return -EINVAL;
+    }
+
     // Allocate kernel bitmap buffer
     kernel_bitmap = kzalloc(cmd.bitmap_size, GFP_KERNEL);
     if (!kernel_bitmap) {
@@ -1112,11 +1125,18 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
             arg_end = mm->arg_end;
             spin_unlock(&mm->arg_lock);
 
-            len = arg_end - arg_start;
-            if (len > sizeof(cmdline) - 1)
-                len = sizeof(cmdline) - 1;
+            /* arg_end <= arg_start means a torn/empty range: the
+             * subtraction below would wrap unsigned and fabricate a
+             * huge len. Fail to the comm fallback instead. */
+            if (arg_end <= arg_start) {
+                ret = -1;
+            } else {
+                len = arg_end - arg_start;
+                if (len > sizeof(cmdline) - 1)
+                    len = sizeof(cmdline) - 1;
 
-            ret = access_process_vm(task, arg_start, cmdline, len, FOLL_FORCE);
+                ret = access_process_vm(task, arg_start, cmdline, len, FOLL_FORCE);
+            }
             mmput(mm);
         } else {
             ret = -1;

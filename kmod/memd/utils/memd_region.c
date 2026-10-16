@@ -117,29 +117,53 @@ int memd_region_init(void)
 void memd_region_cleanup(void)
  {
     unsigned long flags;
+    struct unsafe_region_tree *tree;
     struct unsafe_region_area *area, *tmp;
 
-    spin_lock_irqsave(&g_region_tree->lock, flags);
-    if (g_region_tree) {
-        list_for_each_entry_safe(area, tmp, &g_region_tree->all_regions, list) {
-            list_del(&area->list);
-            kfree(area);
-        }
-        kfree(g_region_tree);
-        g_region_tree = NULL;
+    /* Single global; init/cleanup run at module load/unload, so a plain
+     * NULL test before taking the in-tree lock is sufficient here. */
+    tree = g_region_tree;
+    if (!tree)
+        return;
+
+    /* Detach everything under the lock, drop the global, unlock, and
+     * only then free: unlocking through freed memory is a UAF. */
+    spin_lock_irqsave(&tree->lock, flags);
+    list_for_each_entry_safe(area, tmp, &tree->all_regions, list) {
+        rb_erase(&area->rb_node, &tree->root);
+        list_del(&area->list);
+        kfree(area);
     }
-    spin_unlock_irqrestore(&g_region_tree->lock, flags);
+    tree->region_count = 0;
+    tree->total_pages = 0;
+    g_region_tree = NULL;
+    spin_unlock_irqrestore(&tree->lock, flags);
+    kfree(tree);
 }
 
 int memd_add_unsafe_region(pid_t session, uid_t uid, uintptr_t start, size_t num_page)
  {
     struct unsafe_region_area *area;
+    struct unsafe_region_area *iter;
     unsigned long flags;
+    unsigned long span;
+    u32 session_count = 0;
 
     if (num_page == 0 || num_page > (1UL << 20))
         return -EINVAL;
     if (start & (PAGE_SIZE - 1))
         return -EINVAL;
+
+    /* Shift must not discard bits, and the span must not wrap: either
+     * would admit an overlapping region or break region_find. */
+    span = num_page << PAGE_SHIFT;
+    if ((span >> PAGE_SHIFT) != num_page)
+        return -EINVAL;
+    if (start + span < start)
+        return -EINVAL;
+
+    if (!g_region_tree)
+        return -ENODEV;
 
     area = kzalloc(sizeof(*area), GFP_KERNEL);
     if (!area) {
@@ -166,8 +190,6 @@ int memd_add_unsafe_region(pid_t session, uid_t uid, uintptr_t start, size_t num
     }
 
     /* Check per-session quota */
-    u32 session_count = 0;
-    struct unsafe_region_area *iter;
     list_for_each_entry(iter, &g_region_tree->all_regions, list) {
         if (iter->session_pid == session)
             session_count++;
@@ -192,7 +214,11 @@ int memd_add_unsafe_region(pid_t session, uid_t uid, uintptr_t start, size_t num
 int memd_del_unsafe_region(pid_t pid)
  {
     unsigned long flags;
+    struct unsafe_region_area *area, *tmp;
     int removed = 0;
+
+    if (!g_region_tree)
+        return -ENODEV;
 
     spin_lock_irqsave(&g_region_tree->lock, flags);
 
@@ -201,7 +227,6 @@ int memd_del_unsafe_region(pid_t pid)
         return -ENODEV;
     }
 
-    struct unsafe_region_area *area, *tmp;
     list_for_each_entry_safe(area, tmp, &g_region_tree->all_regions, list) {
         if (area->session_pid == pid) {
             region_remove(area);
@@ -222,7 +247,14 @@ int memd_find_region(uintptr_t addr, void *out)
     struct unsafe_region_area *area;
     struct unsafe_region_area *o = (struct unsafe_region_area *)out;
 
+    if (!g_region_tree)
+        return -ENODEV;
+
     spin_lock_irqsave(&g_region_tree->lock, flags);
+    if (!g_region_tree) {
+        spin_unlock_irqrestore(&g_region_tree->lock, flags);
+        return -ENODEV;
+    }
     area = region_find(addr);
     if (area) {
         if (o)
@@ -238,11 +270,23 @@ int memd_find_region(uintptr_t addr, void *out)
 int memd_region_iterate(int (*callback)(void *area, void *data), void *data)
  {
     unsigned long flags;
-    struct unsafe_region_area *area;
+    struct unsafe_region_area *area, *tmp;
     int ret = 0;
 
+    if (!callback)
+        return -EINVAL;
+    if (!g_region_tree)
+        return -ENODEV;
+
+    /* Callback runs under the tree spinlock: it must be atomic (no
+     * sleep, no region-tree calls). Safe iteration so a callback that
+     * drops its current entry cannot corrupt the walk. */
     spin_lock_irqsave(&g_region_tree->lock, flags);
-    list_for_each_entry(area, &g_region_tree->all_regions, list) {
+    if (!g_region_tree) {
+        spin_unlock_irqrestore(&g_region_tree->lock, flags);
+        return -ENODEV;
+    }
+    list_for_each_entry_safe(area, tmp, &g_region_tree->all_regions, list) {
         area->access_count++;
         ret = callback(area, data);
         if (ret)
@@ -255,7 +299,14 @@ int memd_region_iterate(int (*callback)(void *area, void *data), void *data)
 int memd_get_region_stats(u64 *total_pages, u32 *region_count)
  {
     unsigned long flags;
+
+    if (!g_region_tree)
+        return -ENODEV;
     spin_lock_irqsave(&g_region_tree->lock, flags);
+    if (!g_region_tree) {
+        spin_unlock_irqrestore(&g_region_tree->lock, flags);
+        return -ENODEV;
+    }
     if (total_pages)
         *total_pages = g_region_tree->total_pages;
     if (region_count)
@@ -267,7 +318,19 @@ int memd_get_region_stats(u64 *total_pages, u32 *region_count)
 int memd_set_session_quota(pid_t session, u32 max_regions)
  {
     unsigned long flags;
+
+    (void)session;
+    /* Zero would brick every future add; unbounded quotas invite
+     * exhaustion. Fail closed on both. */
+    if (max_regions == 0 || max_regions > 4096)
+        return -EINVAL;
+    if (!g_region_tree)
+        return -ENODEV;
     spin_lock_irqsave(&g_region_tree->lock, flags);
+    if (!g_region_tree) {
+        spin_unlock_irqrestore(&g_region_tree->lock, flags);
+        return -ENODEV;
+    }
     g_region_tree->max_regions_per_session = max_regions;
     spin_unlock_irqrestore(&g_region_tree->lock, flags);
     return 0;

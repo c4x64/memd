@@ -16,6 +16,7 @@
 #include <linux/pgtable.h>
 #include <linux/printk.h>
 #include <linux/proc_fs.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
 #include "hijack_arm64.h"
@@ -32,6 +33,9 @@
 static int memd_flip_open(const char* filename, int flags, umode_t mode, struct file** f) {
     static struct file* (*reserve_flip_open)(const char* filename, int flags, umode_t mode) = NULL;
 
+    if (!f || !filename) {
+        return -EINVAL;
+    }
     if (reserve_flip_open == NULL) {
         reserve_flip_open =
             (struct file * (*)(const char* filename, int flags, umode_t mode)) kallsyms_lookup_name_ex("filp_open");
@@ -45,22 +49,34 @@ static int memd_flip_open(const char* filename, int flags, umode_t mode, struct 
 }
 
 static int memd_flip_close(struct file** f, fl_owner_t id) {
-    static struct file* (*reserve_flip_close)(struct file** f, fl_owner_t id) = NULL;
+    static void (*reserve_flip_close)(struct file *f, fl_owner_t id) = NULL;
 
+    if (!f) {
+        return -EINVAL;
+    }
     if (reserve_flip_close == NULL) {
-        reserve_flip_close = (struct file * (*)(struct file * *f, fl_owner_t id)) kallsyms_lookup_name_ex("filp_close");
+        reserve_flip_close = (void (*)(struct file *f, fl_owner_t id)) kallsyms_lookup_name_ex("filp_close");
         if (reserve_flip_close == NULL) {
             return -1;
         }
     }
 
-    reserve_flip_close(f, id);
+    if (!*f) {
+        return -EINVAL;
+    }
+    /* filp_close takes the pointer itself (void return); the wrapper
+     * takes its address so the handle dies here, never dangles. */
+    reserve_flip_close(*f, id);
+    *f = NULL;
     return 0;
 }
 
 int memd_filp_open(const char* filename, int flags, umode_t mode, struct file** f) {
     static struct file* (*reserve_flip_open)(const char* filename, int flags, umode_t mode) = NULL;
 
+    if (!f || !filename) {
+        return -EINVAL;
+    }
     if (reserve_flip_open == NULL) {
         reserve_flip_open =
             (struct file * (*)(const char* filename, int flags, umode_t mode)) kallsyms_lookup_name_ex("filp_open");
@@ -74,16 +90,25 @@ int memd_filp_open(const char* filename, int flags, umode_t mode, struct file** 
 }
 
 int memd_filp_close(struct file** f, fl_owner_t id) {
-    static struct file* (*reserve_flip_close)(struct file** f, fl_owner_t id) = NULL;
+    static void (*reserve_flip_close)(struct file *f, fl_owner_t id) = NULL;
 
+    if (!f) {
+        return -EINVAL;
+    }
     if (reserve_flip_close == NULL) {
-        reserve_flip_close = (struct file * (*)(struct file * *f, fl_owner_t id)) kallsyms_lookup_name_ex("filp_close");
+        reserve_flip_close = (void (*)(struct file *f, fl_owner_t id)) kallsyms_lookup_name_ex("filp_close");
         if (reserve_flip_close == NULL) {
             return -1;
         }
     }
 
-    reserve_flip_close(f, id);
+    if (!*f) {
+        return -EINVAL;
+    }
+    /* filp_close takes the pointer itself (void return); the wrapper
+     * takes its address so the handle dies here, never dangles. */
+    reserve_flip_close(*f, id);
+    *f = NULL;
     return 0;
 }
 
@@ -93,26 +118,36 @@ int memd_filp_close(struct file** f, fl_owner_t id) {
 ssize_t memd_kernel_read(struct file *f, void *buf, size_t count, loff_t *pos)
  {
     static ssize_t (*fn)(struct file *, void *, size_t, loff_t *) = NULL;
-    if (!fn) {
-        fn = (void *)kallsyms_lookup_name_ex("kernel_read");
-        if (!fn)
+    ssize_t (*tmp)(struct file *, void *, size_t, loff_t *);
+    if (!f || !buf || !pos)
+        return -EINVAL;
+    /* Publish via a local: concurrent first-use must never call a
+     * half-stored pointer, and a failed lookup retries next call. */
+    tmp = READ_ONCE(fn);
+    if (!tmp) {
+        tmp = (void *)kallsyms_lookup_name_ex("kernel_read");
+        if (!tmp)
             return -ENODEV;
+        WRITE_ONCE(fn, tmp);
     }
-    return fn(f, buf, count, pos);
+    return tmp(f, buf, count, pos);
 }
 
 /* __put_cred without the import (same story). Drop-a-ref only. */
 void memd_put_cred(struct cred *cred)
  {
     static void (*fn)(struct cred *) = NULL;
+    void (*tmp)(struct cred *);
     if (!cred)
         return;
-    if (!fn) {
-        fn = (void *)kallsyms_lookup_name_ex("__put_cred");
-        if (!fn)
+    tmp = READ_ONCE(fn);
+    if (!tmp) {
+        tmp = (void *)kallsyms_lookup_name_ex("__put_cred");
+        if (!tmp)
             return;
+        WRITE_ONCE(fn, tmp);
     }
-    fn(cred);
+    tmp(cred);
 }
 
 /* Signal delivery without the send_signal import (trimmed on some
@@ -126,20 +161,32 @@ int memd_send_signal(int sig, struct siginfo *info,
                           struct task_struct *, enum pid_type) = NULL;
     static int (*fn_do)(int, struct kernel_siginfo *,
                         struct task_struct *, enum pid_type) = NULL;
-    static bool probed = false;
+    int (*tmp_send)(int, struct kernel_siginfo *,
+                    struct task_struct *, enum pid_type);
+    int (*tmp_do)(int, struct kernel_siginfo *,
+                  struct task_struct *, enum pid_type);
     if (!task || !info)
         return -ESRCH;
-    if (!probed) {
-        probed = true;
-        fn_send = (void *)kallsyms_lookup_name_ex("send_signal");
-        fn_do = (void *)kallsyms_lookup_name_ex("do_send_sig_info");
+    /* Each entry resolves on its own (no shared "probed" flag: a racing
+     * caller must never observe probed=true with both still NULL). */
+    tmp_send = READ_ONCE(fn_send);
+    if (!tmp_send) {
+        tmp_send = (void *)kallsyms_lookup_name_ex("send_signal");
+        if (tmp_send)
+            WRITE_ONCE(fn_send, tmp_send);
+    }
+    tmp_do = READ_ONCE(fn_do);
+    if (!tmp_do) {
+        tmp_do = (void *)kallsyms_lookup_name_ex("do_send_sig_info");
+        if (tmp_do)
+            WRITE_ONCE(fn_do, tmp_do);
     }
     /* struct siginfo shares the si_signo/si_errno/si_code prefix the
      * callee reads; same object the direct call always passed. */
-    if (fn_send)
-        return fn_send(sig, (struct kernel_siginfo *)info, task, type);
-    if (fn_do)
-        return fn_do(sig, (struct kernel_siginfo *)info, task, type);
+    if (tmp_send)
+        return tmp_send(sig, (struct kernel_siginfo *)info, task, type);
+    if (tmp_do)
+        return tmp_do(sig, (struct kernel_siginfo *)info, task, type);
     return -ESRCH;
 }
 
@@ -149,20 +196,27 @@ int memd_send_signal(int sig, struct siginfo *info,
 void *memd_vmalloc_exec(unsigned long size)
  {
     static int (*fn_set_x)(unsigned long, int) = NULL;
-    static bool probed = false;
+    int (*tmp_set_x)(unsigned long, int);
+    unsigned long aligned;
     void *p;
     if (!size)
         return NULL;
-    if (!probed) {
-        probed = true;
-        fn_set_x = (void *)kallsyms_lookup_name_ex("set_memory_x");
-    }
-    if (!fn_set_x)
+    /* PAGE_ALIGN wraps to 0 near ULONG_MAX: refuse instead of asking
+     * set_memory_x to remap 0 pages over a huge vmalloc. */
+    aligned = PAGE_ALIGN(size);
+    if (!aligned || aligned < size)
         return NULL;
+    tmp_set_x = READ_ONCE(fn_set_x);
+    if (!tmp_set_x) {
+        tmp_set_x = (void *)kallsyms_lookup_name_ex("set_memory_x");
+        if (!tmp_set_x)
+            return NULL;
+        WRITE_ONCE(fn_set_x, tmp_set_x);
+    }
     p = vmalloc(size);
     if (!p)
         return NULL;
-    if (fn_set_x((unsigned long)p, (int)(PAGE_ALIGN(size) >> PAGE_SHIFT))) {
+    if (tmp_set_x((unsigned long)p, (int)(aligned >> PAGE_SHIFT))) {
         vfree(p);
         return NULL;
     }
@@ -194,17 +248,20 @@ int memd_input_dev_ok(struct input_dev *dev)
 int memd_printk(const char *fmt, ...)
  {
     static int (*fn)(const char *, va_list) = NULL;
+    int (*tmp)(const char *, va_list);
     va_list ap;
     int r;
     if (!fmt)
         return 0;
-    if (!fn) {
-        fn = (void *)kallsyms_lookup_name_ex("vprintk");
-        if (!fn)
+    tmp = READ_ONCE(fn);
+    if (!tmp) {
+        tmp = (void *)kallsyms_lookup_name_ex("vprintk");
+        if (!tmp)
             return 0;
+        WRITE_ONCE(fn, tmp);
     }
     va_start(ap, fmt);
-    r = fn(fmt, ap);
+    r = tmp(fmt, ap);
     va_end(ap);
     return r;
 }
@@ -238,6 +295,9 @@ pte_t* page_from_virt_user(struct mm_struct* mm, uintptr_t va) {
     pte_t* ptep = NULL;
 
     /* no mmap_lock: universal image (offset varies); mm pinned + fail-closed walk */
+    if (!mm) {
+        return NULL;
+    }
 
     pgd = pgd_offset(mm, va);
     if (pgd_none(*pgd) || pgd_bad(*pgd)) {
@@ -359,17 +419,24 @@ static unsigned long *memd_max_pfn_ptr;
 static bool memd_pfn_probed;
 
 int memd_pfn_ok(unsigned long pfn) {
-    if (!memd_pfn_probed) {
-        memd_pfn_probed = true;
-        memd_pfn_valid_fn =
-            (int (*)(unsigned long))memd_kallsyms("pfn_valid");
-        memd_max_pfn_ptr =
-            (unsigned long *)memd_kallsyms("max_pfn");
+    int (*valid_fn)(unsigned long);
+    unsigned long *max_ptr;
+    if (!READ_ONCE(memd_pfn_probed)) {
+        WRITE_ONCE(memd_pfn_valid_fn,
+            (int (*)(unsigned long))memd_kallsyms("pfn_valid"));
+        WRITE_ONCE(memd_max_pfn_ptr,
+            (unsigned long *)memd_kallsyms("max_pfn"));
+        /* Last: a racing caller that observes probed=true is then
+         * guaranteed tear-free pointer loads below. Either fallback
+         * only over-approximates holes, never grants bad access. */
+        WRITE_ONCE(memd_pfn_probed, true);
     }
-    if (memd_pfn_valid_fn)
-        return memd_pfn_valid_fn(pfn);
-    if (memd_max_pfn_ptr)
-        return pfn < READ_ONCE(*memd_max_pfn_ptr);
+    valid_fn = READ_ONCE(memd_pfn_valid_fn);
+    if (valid_fn)
+        return valid_fn(pfn);
+    max_ptr = READ_ONCE(memd_max_pfn_ptr);
+    if (max_ptr)
+        return pfn < READ_ONCE(*max_ptr);
     return pfn < ((64UL << 30) >> PAGE_SHIFT);
 }
 
@@ -390,21 +457,24 @@ struct task_struct* get_target_task(pid_t pid) {
 
 struct vm_area_struct* memd_find_vma(struct mm_struct* mm, unsigned long addr) {
     static struct vm_area_struct* (*vma_find)(struct mm_struct*, unsigned long) = NULL;
-    static bool vma_probed = false;
+    struct vm_area_struct* (*tmp)(struct mm_struct*, unsigned long);
     if (!mm) {
         return NULL;
     }
-    if (!vma_probed) {
-        vma_probed = true;
-        vma_find = (void*)kallsyms_lookup_name_ex("find_vma");
-        if (!vma_find) {
-            vma_find = (void*)kallsyms_lookup_name_ex("__find_vma");
+    /* Resolve on each miss (no "probed" latch): a racing caller must
+     * never observe probed=true with the pointer still NULL. */
+    tmp = READ_ONCE(vma_find);
+    if (!tmp) {
+        tmp = (void*)kallsyms_lookup_name_ex("find_vma");
+        if (!tmp) {
+            tmp = (void*)kallsyms_lookup_name_ex("__find_vma");
         }
+        if (!tmp) {
+            return NULL;
+        }
+        WRITE_ONCE(vma_find, tmp);
     }
-    if (!vma_find) {
-        return NULL;
-    }
-    return vma_find(mm, addr);
+    return tmp(mm, addr);
 }
 
 void compare_pt_regs(struct pt_regs* regs1, struct pt_regs* regs2) {
@@ -934,7 +1004,6 @@ int translate_process_vaddr(pid_t pid, uintptr_t vaddr, uintptr_t* paddr_out) {
         if (!memd_capable(CAP_SYS_ADMIN))
             return -EPERM;
         paddr = kaddr_to_phy_addr(vaddr);
-        memd_info("kread: va=%lx -> pa=%lx\n", vaddr, paddr);
         /* Sanity bounds BEFORE pfn_valid: a garbage walk result used as
          * a pfn array index faults unguarded (oops->panic), and a
          * garbage phys in MMIO space can raise Synchronous External
@@ -944,6 +1013,7 @@ int translate_process_vaddr(pid_t pid, uintptr_t vaddr, uintptr_t* paddr_out) {
          * Anything outside is walk garbage: refuse cleanly. */
         if (!paddr || paddr < 0x40000000UL || paddr >= (64UL << 30))
             return -EFAULT;
+        memd_info("kread: va=%lx -> pa=%lx\n", vaddr, paddr);
         *paddr_out = paddr;
         return 0;
     }
@@ -993,6 +1063,10 @@ uintptr_t get_module_base(pid_t pid, char* name, int vm_flag) {
 
     result = 0;
 
+    if (!name) {
+        memd_err("module name is empty\n");
+        return 0;
+    }
     name_len = strlen(name);
     if (name_len == 0) {
         memd_err("module name is empty\n");
@@ -1082,77 +1156,126 @@ int is_pid_alive(pid_t pid) {
 }
 
 /* Single find_process_by_name: get_cmdline via runtime kallsyms
- * (6.1+ kernels), transparent fallback to get_cmdline_ex below. */
+ * (6.1+ kernels), transparent fallback to get_cmdline_ex below.
+ * Two phases: snapshot pids under RCU using plain pointer reads only,
+ * then run get_cmdline/access_process_vm (both may sleep) on pinned
+ * tasks with no locks held. Sleeping inside rcu_read_lock() would
+ * stall grace periods and trip lockdep; the old single-pass loop did
+ * exactly that. */
 int get_cmdline_ex(struct task_struct *task, char *buffer, int buflen);
 pid_t find_process_by_name(const char* name) {
     struct task_struct* task;
     char cmdline[256];
+    char tcomm[16] = {0};
     char* prog_name;
+    char* space;
+    char* slash;
     size_t name_len;
     int ret;
+    int ntask;
+    int i;
+    pid_t _p;
+    pid_t *pids;
+    int (*get_cmd)(struct task_struct*, char*, int);
+    static int (*my_get_cmdline)(struct task_struct* task, char* buffer, int buflen) = NULL;
 
+    if (!name) {
+        memd_err("process name is empty\n");
+        return -2;
+    }
     name_len = strlen(name);
     if (name_len == 0) {
         memd_err("process name is empty\n");
         return -2;
     }
 
-    static int (*my_get_cmdline)(struct task_struct* task, char* buffer, int buflen) = NULL;
-    if (my_get_cmdline == NULL) {
-        my_get_cmdline = (void*)kallsyms_lookup_name_ex("get_cmdline");
-    }
-    if (my_get_cmdline == NULL) {
-        /* pre-6.1 (or restricted) kernels: read argv the slow way */
-        my_get_cmdline = get_cmdline_ex;
+    get_cmd = READ_ONCE(my_get_cmdline);
+    if (!get_cmd) {
+        get_cmd = (void*)kallsyms_lookup_name_ex("get_cmdline");
+        if (get_cmd) {
+            WRITE_ONCE(my_get_cmdline, get_cmd);
+        } else {
+            /* pre-6.1 (or restricted) kernels: read argv the slow way.
+             * Not cached: a later bootstrap may still resolve it. */
+            get_cmd = get_cmdline_ex;
+        }
     }
 
+    /* Phase 1: snapshot candidate pids (no sleeping calls under RCU). */
+    ntask = 0;
     rcu_read_lock();
     for_each_process(task) {
         if (memd_t_mm_null(task)) {
             continue;
         }
-
-        cmdline[0] = '\0';
-        if (my_get_cmdline != NULL) {
-            ret = my_get_cmdline(task, cmdline, sizeof(cmdline));
-        } else {
-            ret = -1;
+        ntask++;
+    }
+    rcu_read_unlock();
+    if (ntask <= 0) {
+        return 0;
+    }
+    pids = kmalloc((size_t)ntask * sizeof(pid_t), GFP_KERNEL);
+    if (!pids) {
+        return 0;
+    }
+    rcu_read_lock();
+    i = 0;
+    for_each_process(task) {
+        if (memd_t_mm_null(task)) {
+            continue;
         }
+        if (i < ntask) {
+            pids[i] = memd_t_pid(task);
+            i++;
+        }
+    }
+    rcu_read_unlock();
+    ntask = i;
 
+    /* Phase 2: slow reads on pinned tasks (may sleep, no locks held).
+     * Per-task order matches the old loop: cmdline basename first,
+     * task->comm fallback only when the cmdline read fails. Exited
+     * tasks simply resolve to NULL and are skipped. */
+    for (i = 0; i < ntask; i++) {
+        task = get_target_task(pids[i]);
+        if (!task) {
+            continue;
+        }
+        cmdline[0] = '\0';
+        ret = get_cmd(task, cmdline, sizeof(cmdline));
         if (ret < 0) {
             // 回退到task->comm，确保完全匹配
-            {
-                char tcomm[16] = {0};
-                pid_t _p;
-                memd_t_comm(task, tcomm, sizeof(tcomm));
-                if (strlen(tcomm) == name_len && strncmp(tcomm, name, name_len) == 0) {
-                    _p = memd_t_pid(task);
-                    rcu_read_unlock();
-                    return _p;
-                }
+            memd_t_comm(task, tcomm, sizeof(tcomm));
+            if (strlen(tcomm) == name_len && strncmp(tcomm, name, name_len) == 0) {
+                _p = memd_t_pid(task);
+                put_task_struct(task);
+                kfree(pids);
+                return _p;
             }
         } else {
             // 提取程序名（第一个空格之前的部分）
             prog_name = cmdline;
-            char* space = strchr(cmdline, ' ');
+            space = strchr(cmdline, ' ');
             if (space) {
                 *space = '\0';
             }
 
             // 提取路径中的文件名部分
-            char* slash = strrchr(prog_name, '/');
+            slash = strrchr(prog_name, '/');
             if (slash) {
                 prog_name = slash + 1;
             }
 
             if (strlen(prog_name) == name_len && strncmp(prog_name, name, name_len) == 0) {
-                pid_t _p = memd_t_pid(task);
-                rcu_read_unlock();
+                _p = memd_t_pid(task);
+                put_task_struct(task);
+                kfree(pids);
                 return _p;
             }
         }
+        put_task_struct(task);
     }
-    rcu_read_unlock();
+    kfree(pids);
     return 0;
 }
 
@@ -1251,7 +1374,9 @@ int give_root(void) {
     static int (*my_override_creds)(struct cred*) = NULL;
     static void (*my_revert_creds)(void) = NULL;
 
-    if (my_prepare_creds == NULL) {
+    /* Retry until BOTH required entries resolve: caching a partial
+     * result (prepare without commit) would call NULL next time. */
+    if (my_prepare_creds == NULL || my_commit_creds == NULL) {
         my_prepare_creds = (void*)kallsyms_lookup_name_ex("prepare_creds");
         my_commit_creds = (void*)kallsyms_lookup_name_ex("commit_creds");
         my_override_creds = (void*)kallsyms_lookup_name_ex("override_creds");
@@ -1362,11 +1487,17 @@ void __iomem* memd_ioremap_prot(uintptr_t phys_addr, size_t size, pgprot_t prot)
 static int cfi_patch_function(const char *name, unsigned int *patch, int patch_instrs)
  {
     unsigned long addr = kallsyms_lookup_name_ex(name);
+    unsigned long w;
+    unsigned int *p;
     if (!addr)
         return 0;
 
-    unsigned int *p = (unsigned int *)addr;
-    if (*p == patch[0]) {
+    /* Kernel text may sit in an execute-only mapping: probe through the
+     * extable guard instead of faulting on a direct load. */
+    p = (unsigned int *)addr;
+    if (memd_safe_read64(p, &w))
+        return -EFAULT;
+    if ((unsigned int)w == patch[0]) {
         memd_info("cfi: %s already patched\n", name);
         return 0;
     }
@@ -1822,6 +1953,9 @@ static int cfi_bypass_bti(void)
  * Return: 0 on success, negative error code on failure
  */
 int convert_wmt_to_pgprot(int wmt_type, pgprot_t* prot_out) {
+    if (!prot_out) {
+        return -EINVAL;
+    }
     switch (wmt_type) {
         case WMT_NORMAL:
             *prot_out = __pgprot(PROT_NORMAL);
@@ -1869,6 +2003,24 @@ int convert_wmt_to_pgprot(int wmt_type, pgprot_t* prot_out) {
             return 0;
 #else
             memd_warn("PROT_DEVICE_nGnRE not defined on this kernel\n");
+            return -EINVAL;
+#endif
+
+        case WMT_DEVICE_GRE:
+#if defined(PROT_DEVICE_GRE)
+            *prot_out = __pgprot(PROT_DEVICE_GRE);
+            return 0;
+#else
+            memd_warn("PROT_DEVICE_GRE not defined on this kernel\n");
+            return -EINVAL;
+#endif
+
+        case WMT_NORMAL_iNC_oWB:
+#if defined(PROT_NORMAL_iNC_oWB)
+            *prot_out = __pgprot(PROT_NORMAL_iNC_oWB);
+            return 0;
+#else
+            memd_warn("PROT_NORMAL_iNC_oWB not defined on this kernel\n");
             return -EINVAL;
 #endif
 

@@ -9,6 +9,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/string.h>
 
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
@@ -96,6 +97,14 @@ static const char *memd_wanted[] = {
     "send_signal",
     "do_send_sig_info",
     "set_memory_x",
+    /* Display DRM probe (display/soc_drm.c via memd_kallsyms) */
+    "drm_class",
+    "drm_client_init",
+    "drm_client_release",
+    "drm_client_framebuffer_create",
+    "drm_client_buffer_vmap",
+    "drm_client_buffer_vunmap",
+    "drm_client_modeset_commit",
 };
 
 #define MEMD_NWANT (sizeof(memd_wanted) / sizeof(memd_wanted[0]))
@@ -103,6 +112,12 @@ static const char *memd_wanted[] = {
 static unsigned long memd_addrs[sizeof(memd_wanted) / sizeof(memd_wanted[0])];
 static bool memd_parsed;
 static bool memd_unavailable;
+
+/* Publish lock: lookups may run on any CPU/context while the
+ * bootstrap ioctl re-arms on another. Parsing itself uses only a
+ * stack-local table plus file IO (may sleep), so the lock is held
+ * purely for the flag/table flip — never across IO. */
+static DEFINE_SPINLOCK(memd_klock);
 
 /* Bootstrap file access. GKI kernels protect filp_open/kernel_read
  * from unsigned modules, so direct imports would refuse the load.
@@ -112,7 +127,7 @@ static bool memd_unavailable;
  * stays unavailable and every consumer fails closed. */
 static struct file *(*my_filp_open)(const char *, int, umode_t);
 static ssize_t (*my_kernel_read)(struct file *, void *, size_t, loff_t *);
-static int (*my_filp_close)(struct file *, fl_owner_t);
+static void (*my_filp_close)(struct file *, fl_owner_t);
 
 int memd_kallsyms_bootstrap(unsigned long fo, unsigned long kr, unsigned long fc)
  {
@@ -124,9 +139,14 @@ int memd_kallsyms_bootstrap(unsigned long fo, unsigned long kr, unsigned long fc
     my_kernel_read = (void *)kr;
     my_filp_close = (void *)fc;
     /* Re-arm: an earlier attempt may have parsed (and failed) already. */
-    memd_parsed = false;
-    memd_unavailable = false;
-    memset(memd_addrs, 0, sizeof(memd_addrs));
+    {
+        unsigned long flags;
+        spin_lock_irqsave(&memd_klock, flags);
+        memd_parsed = false;
+        memd_unavailable = false;
+        memset(memd_addrs, 0, sizeof(memd_addrs));
+        spin_unlock_irqrestore(&memd_klock, flags);
+    }
     return 0;
 }
 
@@ -141,7 +161,7 @@ static int memd_want_index(const char *name)
 }
 
 /* Parse one "addr type name" line. Returns 1 when it filled an entry. */
-static int memd_parse_line(const char *line, size_t len)
+static int memd_parse_line(const char *line, size_t len, unsigned long *addrs)
  {
     unsigned long addr = 0;
     size_t i = 0, j;
@@ -185,10 +205,30 @@ static int memd_parse_line(const char *line, size_t len)
     memcpy(name, line + i, nlen);
     name[nlen] = '\0';
     idx = memd_want_index(name);
-    if (idx < 0 || memd_addrs[idx] != 0)
+    if (idx < 0 || addrs[idx] != 0)
         return 0;
-    memd_addrs[idx] = addr;
+    addrs[idx] = addr;
     return 1;
+}
+
+/* Publish a fully parsed table: single locked flip so concurrent
+ * lookups never observe a half-zeroed (bootstrap) or half-filled
+ * (double parse) table. */
+static void memd_publish(unsigned long *tmp)
+ {
+    unsigned long flags;
+    unsigned long i;
+    unsigned long nonzero = 0;
+    for (i = 0; i < MEMD_NWANT; i++)
+        nonzero += tmp[i] ? 1 : 0;
+    spin_lock_irqsave(&memd_klock, flags);
+    memcpy(memd_addrs, tmp, sizeof(memd_addrs));
+    memd_parsed = true;
+    /* kptr_restrict renders every address 0: detect and mark so callers
+     * fail soft once instead of per-call. A zero table with successful
+     * reads means hidden, not absent. */
+    memd_unavailable = (nonzero == 0);
+    spin_unlock_irqrestore(&memd_klock, flags);
 }
 
 static void memd_do_parse(void)
@@ -198,32 +238,39 @@ static void memd_do_parse(void)
     loff_t pos = 0;
     ssize_t n;
     size_t carry = 0;
+    size_t req = 0;
     int found = 0;
+    unsigned long tmp[MEMD_NWANT];
 
-    memd_parsed = true;
+    memset(tmp, 0, sizeof(tmp));
     buf = kmalloc(4096, GFP_KERNEL);
     if (!buf) {
-        memd_unavailable = true;
+        memd_publish(tmp);
         return;
     }
     if (!my_filp_open || !my_kernel_read || !my_filp_close) {
         /* No bootstrap table yet (see MEMD_IOCTL_BOOTSTRAP). */
-        memd_unavailable = true;
         kfree(buf);
+        memd_publish(tmp);
         return;
     }
     f = my_filp_open("/proc/kallsyms", O_RDONLY, 0);
     if (IS_ERR(f)) {
-        memd_unavailable = true;
+        memd_publish(tmp);
         kfree(buf);
         return;
     }
-    while (!memd_unavailable) {
+    while (1) {
         size_t avail;
         size_t start = 0, eol;
-        n = my_kernel_read(f, buf + carry, 4096 - carry - 1, &pos);
-        if (n <= 0)
+        req = 4096 - carry - 1;
+        n = my_kernel_read(f, buf + carry, req, &pos);
+        if (n <= 0) {
+            /* Trailing bytes without '\n' still form a line. */
+            if (carry > 0)
+                found += memd_parse_line(buf, carry, tmp);
             break;
+        }
         avail = carry + (size_t)n;
         buf[avail] = '\0';
         /* process complete lines; keep the tail carry */
@@ -233,7 +280,7 @@ static void memd_do_parse(void)
                 eol++;
             if (eol >= avail)
                 break;
-            found += memd_parse_line(buf + start, eol - start);
+            found += memd_parse_line(buf + start, eol - start, tmp);
             start = eol + 1;
             if ((unsigned long)found >= MEMD_NWANT)
                 break;
@@ -244,39 +291,38 @@ static void memd_do_parse(void)
         if (carry >= 2048) {
             /* absurd single line: drop it rather than overflow */
             carry = 0;
-            start = avail;
         } else if (carry > 0 && start > 0) {
             memmove(buf, buf + start, carry);
         }
-        if (n < (ssize_t)(4096 - carry - 1))
+        if (n < (ssize_t)req) {
+            /* EOF: a tail without '\n' is still a line. */
+            if (carry > 0)
+                found += memd_parse_line(buf, carry, tmp);
             break; /* EOF */
+        }
     }
     my_filp_close(f, NULL);
     kfree(buf);
-    /* kptr_restrict renders every address 0: detect and mark so callers
-     * fail soft once instead of per-call. A zero table with successful
-     * reads means hidden, not absent. */
-    {
-        unsigned long i, nonzero = 0;
-        for (i = 0; i < MEMD_NWANT; i++)
-            nonzero += memd_addrs[i] ? 1 : 0;
-        if (!nonzero)
-            memd_unavailable = true;
-    }
+    memd_publish(tmp);
 }
 
 unsigned long memd_kallsyms(const char *name)
  {
     int idx;
+    unsigned long addr;
+    unsigned long flags;
     if (!name)
         return 0;
-    if (!memd_parsed)
+    if (!READ_ONCE(memd_parsed))
         memd_do_parse();
-    if (memd_unavailable)
+    spin_lock_irqsave(&memd_klock, flags);
+    if (memd_unavailable) {
+        spin_unlock_irqrestore(&memd_klock, flags);
         return 0;
+    }
     idx = memd_want_index(name);
-    if (idx < 0)
-        return 0;
-    return memd_addrs[idx];
+    addr = (idx < 0) ? 0 : memd_addrs[idx];
+    spin_unlock_irqrestore(&memd_klock, flags);
+    return addr;
 }
 /* kmod/memd/utils/memd_kallsyms.c[∂] */

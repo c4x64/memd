@@ -156,20 +156,26 @@ int memd_strncpy_from_user(char *dst, const void *src, size_t max_len)
 
 int memd_strncpy_to_user(void *dst, const char *src, size_t max_len)
  {
+    size_t copied = 0;
+    char z = '\0';
+
     if (!dst || !src || max_len == 0)
         return -EINVAL;
 
-    size_t copied = 0;
     while (copied < max_len - 1) {
         unsigned long remaining = memd_copy_to_user((char *)dst + copied, &src[copied], 1);
         if (remaining != 0)
             break;
         if (src[copied] == '\0') {
             copied++;
-            break;
+            return copied;
         }
         copied++;
     }
+    /* Truncated or faulted: always leave dst NUL-terminated when there
+     * is room, matching memd_strncpy_from_user's guarantee. */
+    if (copied < max_len && memd_copy_to_user((char *)dst + copied, &z, 1) == 0)
+        copied++;
     return copied;
 }
 
@@ -217,21 +223,33 @@ int memd_copy_from_user_iovec(void *dst, const struct iovec *iov,
                               unsigned long nr_segs, unsigned long len,
                               unsigned long *bytes_copied)
  {
+    unsigned long total_copied = 0;
+    unsigned long i;
+    char *kdst;
+
+    if (len == 0) {
+        if (bytes_copied)
+            *bytes_copied = 0;
+        return 0;
+    }
     if (!dst || !iov || nr_segs == 0)
         return -EINVAL;
 
-    unsigned long total_copied = 0;
-    char *kdst = (char *)dst;
+    kdst = (char *)dst;
 
-    for (unsigned long i = 0; i < nr_segs; i++) {
+    for (i = 0; i < nr_segs; i++) {
         unsigned long seg_len = iov[i].iov_len;
-        if (total_copied + seg_len > len)
+        unsigned long remaining;
+        unsigned long copied;
+        /* Subtraction form: total_copied + seg_len can wrap to a small
+         * value and dodge the clamp, copying gigabytes. */
+        if (seg_len > len - total_copied)
             seg_len = len - total_copied;
         if (seg_len == 0)
             break;
 
-        unsigned long remaining = memd_copy_from_user(kdst, iov[i].iov_base, seg_len);
-        unsigned long copied = seg_len - remaining;
+        remaining = memd_copy_from_user(kdst, iov[i].iov_base, seg_len);
+        copied = seg_len - remaining;
         total_copied += copied;
         kdst += copied;
 
@@ -251,21 +269,32 @@ int memd_copy_to_user_iovec(void *dst, const struct iovec *iov,
                             unsigned long nr_segs, unsigned long len,
                             unsigned long *bytes_copied)
  {
+    unsigned long total_copied = 0;
+    unsigned long i;
+    const char *kdst;
+
+    if (len == 0) {
+        if (bytes_copied)
+            *bytes_copied = 0;
+        return 0;
+    }
     if (!dst || !iov || nr_segs == 0)
         return -EINVAL;
 
-    unsigned long total_copied = 0;
-    const char *kdst = (const char *)dst;
+    kdst = (const char *)dst;
 
-    for (unsigned long i = 0; i < nr_segs; i++) {
+    for (i = 0; i < nr_segs; i++) {
         unsigned long seg_len = iov[i].iov_len;
-        if (total_copied + seg_len > len)
+        unsigned long remaining;
+        unsigned long copied;
+        /* See above: never add before comparing. */
+        if (seg_len > len - total_copied)
             seg_len = len - total_copied;
         if (seg_len == 0)
             break;
 
-        unsigned long remaining = memd_copy_to_user((void *)iov[i].iov_base, kdst, seg_len);
-        unsigned long copied = seg_len - remaining;
+        remaining = memd_copy_to_user((void *)iov[i].iov_base, kdst, seg_len);
+        copied = seg_len - remaining;
         total_copied += copied;
         kdst += copied;
 

@@ -131,6 +131,11 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
     case MEMD_BP_IOCTL_READ_MEMORY:
         {
             struct bp_read_memory_cmd cmd;
+            uintptr_t va, pa;
+            uintptr_t offset, page_start;
+            void* mapped;
+            size_t bytes_to_read, total_read = 0;
+
             if (memd_copy_from_user(&cmd, (struct bp_read_memory_cmd __user*)arg, sizeof(cmd))) {
                 return -EFAULT;
             }
@@ -140,11 +145,13 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
             if (!cmd.src_va || !cmd.dst_va) {
                 return -EINVAL;
             }
-
-            uintptr_t va, pa;
-            uintptr_t offset, page_start;
-            void* mapped;
-            size_t bytes_to_read, total_read = 0;
+            /* Reject wrapped ranges before va + total_read arithmetic. */
+            if (cmd.src_va + cmd.size < cmd.src_va) {
+                return -EINVAL;
+            }
+            if (cmd.dst_va + cmd.size < cmd.dst_va) {
+                return -EINVAL;
+            }
 
             // Validate size: allow reads up to reasonable limit
             if (cmd.size == 0 || cmd.size > (PAGE_SIZE * 16)) {
@@ -198,7 +205,8 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
                 }
 
                 /* Copy data to userspace */
-                ret = memd_copy_to_user(cmd.dst_va + total_read, mapped + offset, bytes_to_read);
+                ret = memd_copy_to_user((void *)(cmd.dst_va + total_read),
+                                        (char *)mapped + offset, bytes_to_read);
                 if (ret != 0) {
                     memd_err("memd_copy_to_user failed: %d bytes not copied\n", ret);
                     ret = -EFAULT;
@@ -217,6 +225,11 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
     case MEMD_BP_IOCTL_WRITE_MEMORY:
         {
             struct bp_write_memory_cmd cmd;
+            uintptr_t va, pa;
+            uintptr_t offset, page_start;
+            void* mapped;
+            size_t bytes_to_write, total_written = 0;
+
             if (memd_copy_from_user(&cmd, (struct bp_write_memory_cmd __user*)arg, sizeof(cmd))) {
                 return -EFAULT;
             }
@@ -226,11 +239,13 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
             if (!cmd.src_va || !cmd.dst_va) {
                 return -EINVAL;
             }
-
-            uintptr_t va, pa;
-            uintptr_t offset, page_start;
-            void* mapped;
-            size_t bytes_to_write, total_written = 0;
+            /* Reject wrapped ranges before va + total_written arithmetic. */
+            if (cmd.src_va + cmd.size < cmd.src_va) {
+                return -EINVAL;
+            }
+            if (cmd.dst_va + cmd.size < cmd.dst_va) {
+                return -EINVAL;
+            }
 
             // Validate size: allow writes up to reasonable limit
             if (cmd.size == 0 || cmd.size > (PAGE_SIZE * 16)) {
@@ -278,7 +293,8 @@ static long bindproc_ioctl(struct file* f, unsigned int cmd, unsigned long arg) 
                 }
 
                 /* Copy data from userspace to target process memory */
-                ret = memd_copy_from_user(mapped + offset, (void __user*)(cmd.src_va + total_written), bytes_to_write);
+                ret = memd_copy_from_user((char *)mapped + offset,
+                                          (void __user*)(cmd.src_va + total_written), bytes_to_write);
                 if (ret != 0) {
                     memd_err("memd_copy_from_user failed: %d bytes not copied\n", ret);
                     ret = -EFAULT;
@@ -343,6 +359,9 @@ static const struct file_operations bindproc_fops = {
     .read = bindproc_read,
     .write = bindproc_write,
     .unlocked_ioctl = bindproc_ioctl,
+#ifdef CONFIG_COMPAT
+    .compat_ioctl = bindproc_ioctl,
+#endif
     .mmap = bindproc_mmap,
 };
 
@@ -351,6 +370,7 @@ int do_bind_proc(struct socket* sock, void __user* arg) {
     struct memd_bind_proc_cmd cmd;
     struct memd_bindproc_private* private_data = NULL;
     struct file* filp = NULL;
+    struct task_struct* task;
     int fd = -1;
     int ret = 0;
 
@@ -366,7 +386,7 @@ int do_bind_proc(struct socket* sock, void __user* arg) {
     }
 
     /* Verify target process exists */
-    struct task_struct* task = get_target_task(cmd.pid);
+    task = get_target_task(cmd.pid);
     if (!task) {
         memd_err("failed to find task for pid: %d\n", cmd.pid);
         return -ESRCH;

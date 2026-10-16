@@ -44,6 +44,8 @@ static int memd_sfb_open(__u32 w, __u32 h)
     size_t need = 0;
     void *base;
 
+    if (!w || !h)
+        return -ENODEV;
     g_sfb.last_errno = -ENODEV;
     np = of_find_compatible_node(NULL, NULL, "simple-framebuffer");
     if (!np)
@@ -68,6 +70,12 @@ static int memd_sfb_open(__u32 w, __u32 h)
         return -ENODEV;
     }
     if (pw < w || ph < h) {
+        of_node_put(np);
+        return -ENODEV;
+    }
+    /* Row must hold our pixels: a short stride would overflow the
+     * mapped range (y * stride + w * 4 > stride * h). */
+    if ((size_t)stride < (size_t)w * (size_t)4) {
         of_node_put(np);
         return -ENODEV;
     }

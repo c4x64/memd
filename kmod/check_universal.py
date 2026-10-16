@@ -24,8 +24,13 @@ def die(msg):
 
 
 def main():
+    if len(sys.argv) != 5:
+        die("usage: check_universal.py <ko> <undef> <KMI> <System.map>")
     ko_path, undef_path, kmi, sysmap_path = sys.argv[1:5]
-    b = open(ko_path, 'rb').read()
+    try:
+        b = open(ko_path, 'rb').read()
+    except OSError as e:
+        die("cannot read %s: %s" % (ko_path, e))
     if b[0:4] != b"\x7fELF" or b[4] != 2:
         die("not a 64-bit ELF")
     e_shoff, = struct.unpack_from("<Q", b, 0x28)
@@ -34,12 +39,29 @@ def main():
     e_shstrndx, = struct.unpack_from("<H", b, 0x3E)
     if e_shentsize != 64 or e_shnum == 0 or e_shnum > 400:
         die("unexpected section table shape")
+    if e_shstrndx >= e_shnum:
+        die("bad e_shstrndx (%d >= shnum %d)" % (e_shstrndx, e_shnum))
+    if e_shoff <= 0 or e_shoff + e_shnum * 64 > len(b):
+        die("section table out of range")
     s = e_shoff + e_shstrndx * 64
+    if s + 64 > len(b):
+        die("shstr section header out of range")
     st_off, = struct.unpack_from("<Q", b, s + 24)
+    st_size, = struct.unpack_from("<Q", b, s + 32)
+    if st_off <= 0 or st_off + st_size > len(b):
+        die("shstrtab out of range")
 
     def secname(off):
-        j = b.find(b"\x00", st_off + off)
-        return b[st_off + off:j].decode()
+        start = st_off + off
+        if start < 0 or start >= len(b):
+            die("section name offset out of range")
+        j = b.find(b"\x00", start)
+        if j < 0 or j > st_off + st_size:
+            die("unterminated section name")
+        try:
+            return b[start:j].decode()
+        except UnicodeDecodeError:
+            die("bad section name encoding")
 
     for si in range(e_shnum):
         base = e_shoff + si * 64
@@ -55,7 +77,11 @@ def main():
         die("no __versions section (no-FORCE_LOAD kernels refuse)")
 
     exported = set()
-    for line in open(sysmap_path, errors="replace"):
+    try:
+        sysmap_lines = open(sysmap_path, errors="replace").read().splitlines()
+    except OSError as e:
+        die("cannot read %s: %s" % (sysmap_path, e))
+    for line in sysmap_lines:
         m = re.match(r"^[0-9a-fA-F]+ [A-Za-z] (\S+)", line)
         if m:
             exported.add(m.group(1))
@@ -71,13 +97,24 @@ def main():
     i = b.find(b'vermagic=')
     if i < 0:
         die("no vermagic string")
+    k = b.find(b'\x00', i)
+    if k < 0:
+        die("unterminated vermagic string")
     j = b.find(b' ', i)
-    uts = b[i + 9:j if j > 0 else i + 200]
+    if j < 0 or j > k:
+        j = k
+    uts = b[i + 9:j].split(b'\x00')[0]
     if len(uts) < 55:
         die("vermagic UTS too short (%d chars; need >= 55 for target room)" % len(uts))
     print("vermagic room: %d chars" % len(uts))
 
     kmi = sys.argv[3] if len(sys.argv) > 3 else ""
+    try:
+        undef_lines = open(undef_path, errors="replace").read().splitlines()
+    except OSError as e:
+        die("cannot read %s: %s" % (undef_path, e))
+    if not any(l.split() for l in undef_lines):
+        die("empty undef file (nm produced no symbols?)")
     bad = []
     cfi_bad = []
     for line in open(undef_path):

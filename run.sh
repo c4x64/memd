@@ -194,12 +194,12 @@ r64le() {
 }
 w64le() {
     _wf="$1"; _ws="$2"; _wv=$3; _f=""; _k=0
-    while [ $_k -lt 8 ]; do
+    while [ "$_k" -lt 8 ]; do
         _b=$((_wv % 256)); _wv=$((_wv / 256))
         _f="$_f\\$((_b / 64))$(((_b / 8) % 8))$(($_b % 8))"
         _k=$((_k + 1))
     done
-    printf "$_f" | dd of="$_wf" bs=1 seek="$_ws" conv=notrunc 2>/dev/null
+    printf '%b' "$_f" | dd of="$_wf" bs=1 seek="$_ws" conv=notrunc 2>/dev/null
 }
 # extend_vermagic KO V J WANT — splice a longer vermagic in by shifting
 # the file tail and patching the section table + e_shoff. File offsets
@@ -273,7 +273,7 @@ read_cstr() {
               printf "\\%d%d%d", d2, d1, d0
           } }')
     [ -n "$_esc" ] || return 1
-    printf "$_esc"
+    printf '%b' "$_esc"
 }
 # r16le/r32le FILE OFFSET -> print decimal (od-based, fork-light).
 r16le() {
@@ -449,14 +449,14 @@ try_insmod() {
     # must already be on disk for post-reboot forensics (panic = no sync).
     sync 2>/dev/null
     # shellcheck disable=SC2086
-    eval insmod '"$TMPKO"' $INSMOD_OPTS 2>/dev/null
+    insmod "$TMPKO" $INSMOD_OPTS 2>/dev/null
     return $?
 }
 
 jop "insmod" "rc=0, Live"
 if ! try_insmod; then
     jlog "insmod" "rc=0, Live" "FAILED, entering dmesg-feedback retry"
-    WANT=$(dmesg 2>/dev/null | grep -o "should be '[^']*'" | tail -1 | sed "s/^should be '//;s/'\$//")
+    WANT=$(dmesg 2>/dev/null | sed -n "s/.*should be '\([^']*\)'.*/\1/p" | tail -1)
     # dmesg prints the expected string WITHOUT the "vermagic=" tag, but the
     # patch offset points AT the tag — restore the prefix or the tag is
     # destroyed and the retry artifact is malformed (no vermagic at all).
@@ -482,19 +482,19 @@ if ! try_insmod; then
                     fi
                     log "last resort: finit-force (version-magic only)"
                     sync 2>/dev/null
-                    FR=$($FFORCE "$TMPKO" 2>/dev/null)
+                    FR=$("$FFORCE" "$TMPKO" 2>/dev/null)
                     log "finit-force: $FR"
                     case "$FR" in
                         rc=0) ;;
                         *)
                             dump_log "insmod-force"
-                            die "insmod failed even forced ($FR; see dmesg + $LASTLOG)"
+                            die "insmod failed even forced ($FR; see dmesg + $JFILE)"
                             ;;
                     esac
                     ;;
                 *)
                     dump_log "insmod-retry"
-                    die "insmod failed twice (see dmesg + $LASTLOG)"
+                    die "insmod failed twice (see dmesg + $JFILE)"
                     ;;
             esac
         fi
@@ -509,19 +509,19 @@ if ! try_insmod; then
                 fi
                 log "no vermagic hint; last resort: finit-force (version-magic only)"
                 sync 2>/dev/null
-                FR=$($FFORCE "$TMPKO" 2>/dev/null)
+                FR=$("$FFORCE" "$TMPKO" 2>/dev/null)
                 log "finit-force: $FR"
                 case "$FR" in
                     rc=0) ;;
                     *)
                         dump_log "insmod-force"
-                        die "insmod failed even forced ($FR; see dmesg + $LASTLOG)"
+                        die "insmod failed even forced ($FR; see dmesg + $JFILE)"
                         ;;
                 esac
                 ;;
             *)
                 dump_log "insmod"
-                die "insmod failed (see dmesg + $LASTLOG)"
+                die "insmod failed (see dmesg + $JFILE)"
                 ;;
         esac
     fi
@@ -573,7 +573,7 @@ dump_log "install"
 # needs no direct imports. Needs python3 + live proto; warns (never
 # fails the install) when unavailable.
 if command -v python3 >/dev/null 2>&1; then
-    if python3 - "
+    if python3 -c "
 import socket, errno, fcntl, struct
 addrs = {}
 try:

@@ -158,6 +158,9 @@ static int memd_elf_sym(struct task_struct *t, uintptr_t symtab,
     Elf64_Sym sym;
     char name[MEMD_INJ_NAME_MAX];
     unsigned long u;
+    /* Zero so a short tail copy (near end of strsz) cannot leave
+     * uninitialized bytes inside the memcmp window. */
+    memset(name, 0, sizeof(name));
     if (idx > (unsigned long)MEMD_INJ_SYM_WALK_MAX)
         return -1;
     if (memd_task_copy_ok(t, 0, symtab + idx * sizeof(sym), &sym, sizeof(sym)))
@@ -188,6 +191,7 @@ static int memd_elf_lookup(struct task_struct *t, uintptr_t symtab,
     size_t wantlen;
     unsigned long h, i, n, nbucket, nchain, bkt, symoff;
     unsigned long w;
+    u32 w32;
     wantlen = strlen(want);
     if (wantlen == 0 || wantlen + 1 >= MEMD_INJ_NAME_MAX)
         return -ENOENT;
@@ -209,7 +213,8 @@ static int memd_elf_lookup(struct task_struct *t, uintptr_t symtab,
         nbuckets = nbuckets32;
         symoff = symoff32;
         bloom_size = bloom32;
-        if (nbuckets == 0 || nbuckets > 100000 || bloom_size > 1024)
+        if (nbuckets == 0 || nbuckets > 100000 || bloom_size == 0 ||
+            bloom_size > 1024)
             return -ENOENT;
         h = memd_gnu_hash(want);
         if (memd_task_copy_ok(t, 0, gnuhash + 16 + (h / 64 % bloom_size) * 8, &w, 8))
@@ -218,17 +223,20 @@ static int memd_elf_lookup(struct task_struct *t, uintptr_t symtab,
             return -ENOENT;
         if (memd_task_copy_ok(t, 0,
                               gnuhash + 16 + bloom_size * 8 + (h % nbuckets) * 4,
-                              &bkt, 4))
+                              &w32, 4))
             return -EFAULT;
+        bkt = w32;
         if (bkt < symoff)
             return -ENOENT;
         for (i = bkt, n = 0; n < (unsigned long)MEMD_INJ_SYM_WALK_MAX; i++, n++) {
             unsigned long cw;
+            w32 = 0;
             if (memd_task_copy_ok(t, 0,
                                   gnuhash + 16 + bloom_size * 8 +
                                   nbuckets * 4 + (i - symoff) * 4,
-                                  &cw, 4))
+                                  &w32, 4))
                 return -EFAULT;
+            cw = w32;
             if ((cw & ~1UL) == (h & ~1UL)) {
                 if (!memd_elf_sym(t, symtab, strtab, strsz, i, want,
                                   wantlen, bias, out))
@@ -240,16 +248,24 @@ static int memd_elf_lookup(struct task_struct *t, uintptr_t symtab,
         return -ENOENT;
     }
     if (hashtab) {
-        if (memd_task_copy_ok(t, 0, hashtab, &nbucket, 4))
+        /* 4-byte table fields: read into a u32 first so the upper half
+         * of the 8-byte locals cannot retain stack garbage (arm64 LE). */
+        w32 = 0;
+        if (memd_task_copy_ok(t, 0, hashtab, &w32, 4))
             return -EFAULT;
-        if (memd_task_copy_ok(t, 0, hashtab + 4, &nchain, 4))
+        nbucket = w32;
+        w32 = 0;
+        if (memd_task_copy_ok(t, 0, hashtab + 4, &w32, 4))
             return -EFAULT;
+        nchain = w32;
         if (nbucket == 0 || nbucket > 100000 || nchain == 0 ||
             nchain > (unsigned long)MEMD_INJ_SYM_WALK_MAX)
             return -ENOENT;
         h = memd_elf_hash(want);
-        if (memd_task_copy_ok(t, 0, hashtab + 8 + (h % nbucket) * 4, &bkt, 4))
+        w32 = 0;
+        if (memd_task_copy_ok(t, 0, hashtab + 8 + (h % nbucket) * 4, &w32, 4))
             return -EFAULT;
+        bkt = w32;
         for (i = bkt, n = 0;
              i != 0 && n < (unsigned long)MEMD_INJ_SYM_WALK_MAX;
              n++) {
@@ -259,9 +275,11 @@ static int memd_elf_lookup(struct task_struct *t, uintptr_t symtab,
             if (!memd_elf_sym(t, symtab, strtab, strsz, i, want,
                               wantlen, bias, out))
                 return 0;
+            w32 = 0;
             if (memd_task_copy_ok(t, 0,
-                                  hashtab + 8 + nbucket * 4 + i * 4, &nx, 4))
+                                  hashtab + 8 + nbucket * 4 + i * 4, &w32, 4))
                 return -EFAULT;
+            nx = w32;
             i = nx;
         }
         return -ENOENT;
@@ -690,6 +708,10 @@ static int remote_call(struct task_struct *task, struct mm_struct *mm,
     regs[2] = (uint64_t)flag_va;
     regs[MEMD_PT_PC] = (uint64_t)stub_va;
     regs[30] = (uint64_t)(stub_va + 36);
+    /* Run with SP below the scratch: dlopen pushes frames and signal
+     * frames land below SP, so leaving SP above the stub would let the
+     * call clobber stub/path/flags. Restored verbatim afterwards. */
+    regs[MEMD_PT_SP] = (uint64_t)base;
     /* A killed target must not be wiped (stub may be executing) but
      * still gets SIGCONT so the pending SIGKILL is delivered instead
      * of leaking a stopped thread. Callers check *killed_out. */
@@ -700,10 +722,23 @@ static int remote_call(struct task_struct *task, struct mm_struct *mm,
             *killed_out = true;
         return -EFAULT;
     }
+    /* Fail closed: an external SIGCONT between the hijack write and now
+     * would have resumed torn regs; confirm still stopped first. */
+    if (my_wait_task_inactive(task, TASK_STOPPED) <= 0) {
+        memd_err("remote_call: target %d resumed during hijack; killing\n", task->pid);
+        send_task_sig(task, SIGKILL);
+        if (killed_out)
+            *killed_out = true;
+        return -EFAULT;
+    }
     memd_inj_release(task);
     ret = -ETIMEDOUT;
     for (tries = 0; tries * MEMD_INJ_POLL_MS < timeout_ms; tries++) {
         u64 done = 0, out = 0;
+        /* Dead target can never set the flag: stop waiting early and
+         * fall through to the fail-closed recapture path. */
+        if (!is_pid_alive(task->pid))
+            break;
         msleep(MEMD_INJ_POLL_MS);
         if (memd_task_copy_ok(task, 0, flag_va, &done, 8))
             continue;

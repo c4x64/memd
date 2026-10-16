@@ -165,8 +165,6 @@ static int memd_drm_open(__u32 w, __u32 h)
         memd_drm_resolve("drm_client_buffer_vmap");
     p_drm_client_buffer_vunmap =
         memd_drm_resolve("drm_client_buffer_vunmap");
-    p_drm_client_buffer_vunmap =
-        memd_drm_resolve("drm_client_buffer_vunmap");
     p_drm_client_modeset_commit =
         memd_drm_resolve("drm_client_modeset_commit");
     if (!p_drm_client_init || !p_drm_client_release ||
@@ -220,9 +218,12 @@ static int memd_drm_open(__u32 w, __u32 h)
     g_drm.h = h;
     rc = p_drm_client_modeset_commit(g_drm.client);
     if (rc) {
+        if (g_drm.fb && p_drm_client_buffer_vunmap)
+            p_drm_client_buffer_vunmap(g_drm.fb);
         g_drm.vaddr = NULL;
         g_drm.fb = NULL;
         g_drm.w = g_drm.h = 0;
+        g_drm.mapped_new = 0;
         p_drm_client_release(g_drm.client);
         g_drm.client = NULL;
         return rc;
@@ -244,6 +245,7 @@ static void memd_drm_close(void)
     g_drm.fb = NULL;
     g_drm.vaddr = NULL;
     g_drm.w = g_drm.h = 0;
+    g_drm.mapped_new = 0;
     p_drm_client_init = NULL;
     p_drm_client_release = NULL;
     p_drm_client_framebuffer_create = NULL;
@@ -256,10 +258,9 @@ static int memd_drm_present(const __u32 *fb, __u32 w, __u32 h,
                             const struct memd_dirty *dirty)
  {
     __u32 y0, y1, y;
-    (void)h;
     if (!g_drm.client || !g_drm.vaddr || !fb || !dirty || !dirty->valid)
         return -ENODEV;
-    if (w != g_drm.w)
+    if (w != g_drm.w || h != g_drm.h)
         return -EINVAL;
     y0 = dirty->y0;
     y1 = dirty->y1;

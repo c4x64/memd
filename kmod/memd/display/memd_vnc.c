@@ -98,7 +98,7 @@ static int memd_vnc_recv_all(struct socket *s, void *buf, size_t len)
         rc = kernel_recvmsg(s, &msg, &vec, 1, vec.iov_len,
                             MSG_DONTWAIT);
         if (rc == -EAGAIN || rc == -EWOULDBLOCK) {
-            msleep(10);
+            msleep_interruptible(10);
             continue;
         }
         if (rc <= 0)
@@ -286,12 +286,12 @@ static int memd_vnc_fn(void *data)
     while (!kthread_should_stop()) {
         rc = kernel_accept(ls, &cs, O_NONBLOCK);
         if (rc == -EAGAIN || rc == -EWOULDBLOCK) {
-            msleep(100);
+            msleep_interruptible(100);
             continue;
         }
         if (rc) {
             if (!kthread_should_stop())
-                msleep(500);
+                msleep_interruptible(500);
             continue;
         }
         memd_info("vnc: viewer connected\n");

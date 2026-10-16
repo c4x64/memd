@@ -13,6 +13,7 @@
 static int memd_release(struct socket* sock) {
     struct sock* sk;
     struct memd_sock* ws;
+    int i;
     sk = sock->sk;
     if (!sk) {
         return 0;
@@ -27,13 +28,16 @@ static int memd_release(struct socket* sock) {
     }
 
     if (ws->used_pages) {
-        for (int i = 0; i < ws->used_pages->size; ++i) {
+        for (i = 0; i < ws->used_pages->size; ++i) {
             struct page* page = (typeof(page))arraylist_get(ws->used_pages, i);
             if (page) {
                 __free_page(page);
             }
         }
         arraylist_destroy(ws->used_pages);
+        /* Destruct also drops this list; NULL it so the second path
+         * is a no-op instead of a double-destroy. */
+        ws->used_pages = NULL;
     }
     /* TEST: skip sock_orphan (takes sk_callback_lock which panics on
      * foreign layout). Our socket has no callbacks/timers/packets —
@@ -78,7 +82,9 @@ static int memd_setsockopt(struct socket* sock, int level, int optname, sockptr_
 }
 
 static int memd_getsockopt(struct socket* sock, int level, int optname, char __user* optval, int __user* optlen) {
-    return 0;
+    /* No options exported: fail closed instead of reporting success
+     * with nothing copied out. */
+    return -ENOPROTOOPT;
 }
 
 static int memd_bind(struct socket* sock, struct sockaddr* saddr, int len) { return -EOPNOTSUPP; }
@@ -145,6 +151,11 @@ static void memd_put64(int off, unsigned long v)
     memcpy(memd_ops_buf + off, &x, 8);
 }
 
+static int memd_off_ok(int off)
+ {
+    return off >= 0 && off + 8 <= (int)sizeof(memd_ops_buf);
+}
+
 int memd_build_ops(void)
  {
     int g = memd_net_gen();
@@ -152,6 +163,19 @@ int memd_build_ops(void)
     if (g < 0 || g >= MEMD_GEN_N)
         return -1;
     o = &memd_ops_offs[g];
+    /* Fail closed on a corrupt/unknown table: every slot must land
+     * inside the buffer (owner may be a -1 hole). */
+    if (!memd_off_ok(o->release) || !memd_off_ok(o->bind) ||
+        !memd_off_ok(o->connect) || !memd_off_ok(o->socketpair) ||
+        !memd_off_ok(o->accept) || !memd_off_ok(o->getname) ||
+        !memd_off_ok(o->poll) || !memd_off_ok(o->ioctl) ||
+        !memd_off_ok(o->listen) || !memd_off_ok(o->shutdown) ||
+        !memd_off_ok(o->setsockopt) || !memd_off_ok(o->getsockopt) ||
+        !memd_off_ok(o->sendmsg) || !memd_off_ok(o->recvmsg) ||
+        !memd_off_ok(o->mmap))
+        return -1;
+    if (o->owner >= 0 && !memd_off_ok(o->owner))
+        return -1;
     memset(memd_ops_buf, 0, sizeof(memd_ops_buf));
     if (o->owner >= 0)
         memd_put64(o->owner, (unsigned long)THIS_MODULE);

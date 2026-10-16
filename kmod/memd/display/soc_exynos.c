@@ -256,6 +256,8 @@ static int memd_decon_open(__u32 w, __u32 h)
  {
     const struct memd_winmap *map = NULL;
     int rc;
+    if (!w || !h)
+        return -EINVAL;
     (void)w;
     (void)h;
     g_decon.last_errno = 0;

@@ -308,6 +308,22 @@ static void wr64le(unsigned char *p, unsigned long v)
     p[7] = (unsigned char)((v >> 56) & 0xff);
 }
 
+/* bounded string equals: the NUL-terminated string at offset `at`
+ * must fit inside [tab, tab+sz) (and inside [0, n)) and equal `want`.
+ * memcmp-based: never reads OOB even on hostile/truncated images. */
+static int tab_streq(const unsigned char *d, long n, long at,
+                     long tab, long sz, const char *want)
+ {
+    size_t wl = strlen(want);
+    if (at < tab || at < 0 || sz <= 0)
+        return 0;
+    if (at + (long)wl + 1 > tab + sz)
+        return 0;
+    if (at + (long)wl + 1 > n)
+        return 0;
+    return memcmp(d + at, want, wl + 1) == 0;
+}
+
 /* section index by name in a 64-bit LE ELF image; <=0 = absent/invalid.
  * Every read is bounds-checked; garbage in -> not found, never OOB. */
 static int elf_sec(const unsigned char *d, long n, const char *want)
@@ -334,7 +350,7 @@ static int elf_sec(const unsigned char *d, long n, const char *want)
     for (i = 1; i < shnum; i++) {
         long o = shoff + (long)i * 64;
         unsigned nm = rd32le(d + o);
-        if ((long)nm < str_sz && !strcmp((const char *)d + str_off + nm, want))
+        if (tab_streq(d, n, str_off + (long)nm, str_off, str_sz, want))
             return i;
     }
     return 0;
@@ -384,9 +400,7 @@ static int tm_reloc_off(const unsigned char *d, long n, const char *symname,
             continue;
         nm = rd32le(d + so);
         no = str_off + (long)nm;
-        if (no < str_off || no >= str_off + str_sz)
-            continue;
-        if (!strcmp((const char *)d + no, symname)) {
+        if (tab_streq(d, n, no, str_off, str_sz, symname)) {
             *off = r_off;
             return 0;
         }
@@ -480,7 +494,7 @@ static int shift_tm_relocs(unsigned char *d, long n, unsigned long init_off,
     long roff, rsz;
     long e;
     int found = 0;
-    long symoff = 0, stroff = 0;
+    long symoff = 0, stroff = 0, strsz = 0;
     if (n < 64 || memcmp(d, "\x7f" "ELF", 4) || d[4] != 2 || d[5] != 1)
         return -1;
     shoff = (long)rd64le(d + 40);
@@ -513,23 +527,24 @@ static int shift_tm_relocs(unsigned char *d, long n, unsigned long init_off,
         if (stri <= 0 || stri >= shnum)
             return -1;
         stroff = (long)rd64le(d + shoff + stri * 64 + 24);
-        if (stroff <= 0 || stroff > n)
+        strsz = (long)rd64le(d + shoff + stri * 64 + 32);
+        if (stroff <= 0 || strsz <= 0 || stroff + strsz > n)
             return -1;
     }
     for (e = roff; e + 24 <= roff + rsz; e += 24) {
         unsigned long sym = (unsigned long)(rd64le(d + e + 8) >> 32);
         unsigned long noff;
-        const char *name;
+        long at;
         if (sym > 1000000 || symoff + (long)sym * 24 + 24 > n)
             continue;
         noff = (unsigned long)rd32le(d + symoff + (long)sym * 24);
-        if (noff > 1000000 || stroff + (long)noff >= n)
+        if (noff > 1000000)
             continue;
-        name = (const char *)(d + stroff + (long)noff);
-        if (!strcmp(name, "init_module")) {
+        at = stroff + (long)noff;
+        if (tab_streq(d, n, at, stroff, strsz, "init_module")) {
             wr64le(d + e, init_off);
             found++;
-        } else if (!strcmp(name, "cleanup_module")) {
+        } else if (tab_streq(d, n, at, stroff, strsz, "cleanup_module")) {
             wr64le(d + e, exit_off);
             found++;
         }
@@ -658,7 +673,7 @@ static int kernel_is_cfi(void)
 static int proto_live(void)
  {
     int fam, s1, s2;
-    for (fam = PF_DECnet; fam < PF_DECnet + 16; fam++) {
+    for (fam = PF_DECNET; fam < PF_DECNET + 16; fam++) {
         s1 = socket(fam, SOCK_SEQPACKET, 0);
         if (s1 >= 0) {
             close(s1);

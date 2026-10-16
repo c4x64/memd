@@ -23,6 +23,17 @@
 #include "memd_sigforce.h"
 #include "hijack_arm64.h"
 
+/* No header declares these (BUILD_HIDE_SIGNAL-only); forward-declare
+ * locally so enabling the flag cannot regress to an implicit decl. */
+#if defined(BUILD_HIDE_SIGNAL)
+extern int memd_safe_signal_init(void);
+extern void memd_safe_signal_cleanup(void);
+#endif
+
+/* Owned by proc/memd_hide.c; dropped at exit so kmalloc'd entries do
+ * not leak on unload (no new include: single prototype). */
+void memd_hide_clear(void);
+
 static int __init memd_init(void) {
     int ret;
     memd_info("helo!\n");
@@ -53,11 +64,23 @@ static int __init memd_init(void) {
         goto clean_proto;
     }
 
-    memd_hwbp_init();
+    ret = memd_hwbp_init();
+    if (ret) {
+        memd_err("memd_hwbp_init failed: %d\n", ret);
+        goto clean_region;
+    }
 
-    memd_gyro_init();
+    ret = memd_gyro_init();
+    if (ret) {
+        memd_err("memd_gyro_init failed: %d\n", ret);
+        goto clean_hwbp;
+    }
 
-    memd_sigforce_init();
+    ret = memd_sigforce_init();
+    if (ret) {
+        memd_err("memd_sigforce_init failed: %d\n", ret);
+        goto clean_gyro;
+    }
 
     memd_learn_extended();
 
@@ -65,7 +88,7 @@ static int __init memd_init(void) {
     ret = memd_safe_signal_init();
     if (ret) {
         memd_err("memd_safe_signal_init failed: %d\n", ret);
-        goto clean_sig;
+        goto clean_sigforce;
     }
 #endif
 
@@ -80,17 +103,16 @@ static int __init memd_init(void) {
 
     return 0;
 
+clean_sigforce:
+    memd_sigforce_cleanup();
+clean_gyro:
+    memd_gyro_cleanup();
+clean_hwbp:
+    memd_hwbp_cleanup();
+clean_region:
+    memd_region_cleanup();
 clean_proto:
     memd_proto_cleanup();
-
-#if defined(BUILD_HIDE_SIGNAL)
-clean_d0:
-    memd_safe_signal_cleanup();
-
-clean_sig:
-    memd_proto_cleanup();
-#endif
-
 
 out:
     return ret;
@@ -109,14 +131,18 @@ static void __exit memd_exit(void) {
     r = memd_disp_uninstall();
     if (r && r != -ENODEV)
         memd_err("display uninstall at exit failed: %d\n", r);
-    memd_hwbp_cleanup();
-    memd_gyro_cleanup();
-    memd_sigforce_cleanup();
-    memd_region_cleanup();
-    memd_proto_cleanup();
+    /* Drop the hidden-pid set while no reader can be active (hooks are
+     * gone and rmmod fenced in-flight calls): entries are kmalloc'd
+     * and would otherwise leak on unload. */
+    memd_hide_clear();
 #if defined(BUILD_HIDE_SIGNAL)
     memd_safe_signal_cleanup();
 #endif
+    memd_sigforce_cleanup();
+    memd_gyro_cleanup();
+    memd_hwbp_cleanup();
+    memd_region_cleanup();
+    memd_proto_cleanup();
 }
 
 module_init(memd_init);
