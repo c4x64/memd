@@ -202,7 +202,8 @@ struct net_proto_family memd_family_ops = {
 };
 
 static int register_free_family(void) {
-    int err = 0, i = 0, family = 0;
+    int err = 0, family = 0;
+    size_t i = 0;
 
     for (i = 0; i < ARRAY_SIZE(ioctl_handlers); i++) {
         memd_info("registered ioctl command: %u\n", ioctl_handlers[i].cmd);

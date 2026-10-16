@@ -47,6 +47,9 @@ jobs:
       - name: Test module loader tools
         run: python3 -m unittest discover -s tools -p 'test_*.py'
 
+      - name: Run 2-TU gate (direct exit-code contract)
+        run: python3 tools/two_tu_gate.py
+
       - name: Verify client.h matches kernel headers
         run: python3 .github/scripts/check_client_h.py
 

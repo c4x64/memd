@@ -446,7 +446,7 @@ void memd_remove_inline_hook(void *target, void *orig)
          long delta;
          u32 expect;
          u32 livew;
-         delta = (long)(uintptr_t)found->handler - (long)(uintptr_t)target;
+         delta = (long)(uintptr_t)found->handler - (long)(uintptr_t)found->target;
          expect = (u32)0x14000000UL | (u32)(((unsigned long)delta >> 2) & 0x03FFFFFFUL);
          if (memd_target_read32(target, 0, &livew) || livew != expect) {
              spin_unlock(&g_trampoline_lock);

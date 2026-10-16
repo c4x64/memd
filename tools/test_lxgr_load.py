@@ -403,10 +403,10 @@ class MemdHppTwoTuTests(unittest.TestCase):
     payloads spanning translation units would silently lose their module
     and boot with -ENODEV.
 
-    CI gate usage (Linux-only link+run; build.yml is intentionally NOT
-    touched this round): run from tools/ on a Linux host --
+    CI gate usage: compat-check runs tools/two_tu_gate.py directly
+    (exit 0/1/2 contract) plus this unittest on a Linux host --
         python3 -m unittest test_lxgr_load.MemdHppTwoTuTests -v
-    CI-independent runner (manual + future CI): python3 tools/two_tu_gate.py
+    CI-independent runner (manual + the compat-check direct step): python3 tools/two_tu_gate.py
     reports PASS/SKIP/FAIL with exit 0/1/2; the TU_A/TU_B sources below are
     its single source of truth.
     On non-Linux hosts the link+run half SKIPS with a loud reason (the

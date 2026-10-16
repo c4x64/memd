@@ -14,8 +14,8 @@ them. Manual use from the repo root:
 
     python3 tools/two_tu_gate.py
 
-Future CI use: run this script on a Linux builder instead of (or in
-addition to) the unittest; it needs only a C++ compiler and python3.
+CI use: compat-check runs this script directly (exit 0/1/2 contract)
+in addition to the unittest; it needs only a C++ compiler and python3.
 
 Exit codes: 0 PASS (everything ran and passed), 1 FAIL (anything failed
 on a host where it should run -- including a Linux host with no C++

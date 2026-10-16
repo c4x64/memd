@@ -551,6 +551,7 @@ int memd_core_uninstall(void)
  {
     struct task_struct *t;
     const struct memd_disp_backend *dead;
+    struct workqueue_struct *wq;
     unsigned long i;
     mutex_lock(&g_inst_mu);
     mutex_lock(&g_core_mu);
@@ -567,18 +568,22 @@ int memd_core_uninstall(void)
     g_core.be = NULL;
     /* Epoch bump before the unlock: waiters woken below (or already
      * awake) see the mismatch and fail closed without touching the
-     * next session's vsync state. */
+     * next session's vsync state. Quiesce the flip worker while the
+     * NULLs are still under the lock: the pointer is read by frame
+     * under this same lock, so NULLing it outside the lock raced
+     * queue_work against destroy_workqueue. */
     g_core.vsync_gen++;
+    wq = g_flip_wq;
+    g_flip_wq = NULL;
     mutex_unlock(&g_core_mu);
     if (t)
         kthread_stop(t);
 #ifdef MEMD_DISP_TEST
     memd_vnc_stop();
 #endif
-    if (g_flip_wq) {
-        flush_workqueue(g_flip_wq);
-        destroy_workqueue(g_flip_wq);
-        g_flip_wq = NULL;
+    if (wq) {
+        flush_workqueue(wq);
+        destroy_workqueue(wq);
     }
     mutex_lock(&g_core_mu);
     if (dead && dead->close)

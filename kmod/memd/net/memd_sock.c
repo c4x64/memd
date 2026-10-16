@@ -57,7 +57,7 @@ static int memd_release(struct socket* sock) {
 static int memd_ioctl(struct socket* sock, unsigned int cmd, unsigned long arg) {
     void __user* argp = (void __user*)arg;
 
-    int i;
+    size_t i;
     for (i = 0; i < ARRAY_SIZE(ioctl_handlers); i++) {
         if (cmd == ioctl_handlers[i].cmd) {
             /* The {0, NULL} sentinel is the sole NULL-handler entry and

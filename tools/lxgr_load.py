@@ -55,10 +55,12 @@ MAX_ZIP_ENTRIES = 4096
 # Survivor-chain cap: every failed unload appends one entry, so an
 # install that would push past this refuses instead of growing the
 # state file (and the resident set) without bound.
-# Interplay (Round-7 audit): a HEALTHY flow never approaches 64 --
-# success clears the chain (hotswap drops it, uninstall unlinks the
-# record), so the count only grows across CONSECUTIVE unload failures
-# (driver/target wedged, 64 hotswaps in a row without one drain). The
+# Interplay (Round-7 audit, Round-8 exactness): a HEALTHY flow never
+# approaches 64 -- drain success clears the chain (hotswap drops it,
+# uninstall unlinks the record), so the count only grows while no
+# drain runs: CONSECUTIVE unload failures (driver/target wedged, 64
+# hotswaps in a row) or consecutive reinstalls (each install retires
+# the displaced handle until a hotswap/uninstall drains it). The
 # refusal happens in cmd_install BEFORE any load (no stranded
 # live-but-unrecorded handle), and hotswap inherits it because it
 # funnels through cmd_install; write_state re-checks as a backstop for
