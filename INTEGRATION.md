@@ -1,7 +1,10 @@
 # DSU driver contract surface (verified, read-only)
 
-Source of truth: `/client.h` and `/memd.hpp` at the repo root. This file
-enumerates ONLY what those headers define — no invented APIs. Sizes are
+Source of truth: `/client.h` and `/memd.hpp` at the repo root, plus the
+matching kernel-side declarations in `kmod/memd/ioctl/memd_ioctl.h` and
+`kmod/memd/utils/memd_inject.h` (same structs/macros, LP64-identical by
+construction). This file enumerates ONLY what those headers define — no
+invented APIs. Sizes are
 LP64 (arm64, 8-byte pointers; verified against `memd.hpp` static_asserts
 where present and C layout rules otherwise).
 
@@ -135,3 +138,117 @@ struct memd_learn_status_cmd {
   `dlopen` handle in `x0`.
 - `REGISTER_MEMD_MODULE(cls)` / `REGISTER_ZYGISK_MODULE(cls)` (aliased)
   install the factory; `onUnload` is reserved and never invoked.
+
+## Hide / install / status / unload call contracts (ops 14/21/22/38/39/40/41/42/43)
+
+Read-only summary of `client.h` at the repo root, `kmod/memd/ioctl/memd_ioctl.h`,
+and `kmod/memd/utils/memd_inject.h`. No invented APIs. Sizes are LP64
+(arm64: 4-byte `int`/`pid_t`, 8-byte pointers/`uint64_t`; `pid_t` = 4 B).
+
+| nr | Macro (`client.h` / `memd_ioctl.h`) | Struct | Size (LP64) | Direction |
+|----|-------------------------------------|--------|-------------|-----------|
+| 14 | `MEMD_IOCTL_HIDE_PROCESS` `_IOWR('W', 14, struct memd_hide_proc_cmd)` | `struct memd_hide_proc_cmd` | 8 | app -> driver |
+| 21 | `MEMD_IOCTL_HIDE_STATUS` `_IOWR('W', 21, struct memd_hide_status_cmd)` | `struct memd_hide_status_cmd` | 8 | query |
+| 22 | `MEMD_IOCTL_HIDE_INSTALL` `_IOWR('W', 22, struct memd_hide_install_cmd)` | `struct memd_hide_install_cmd` | 8 | app -> driver |
+| 38 | `MEMD_IOCTL_LOAD_SOTOAPP` `_IOWR('W', 38, struct memd_loadso_cmd)` | `struct memd_loadso_cmd` | 352 | app -> driver -> target |
+| 39 | `MEMD_IOCTL_LOAD_SOSUTOAPP` `_IOWR('W', 39, struct memd_loadso_cmd)` | `struct memd_loadso_cmd` | 352 | app -> driver -> target |
+| 40 | `MEMD_IOCTL_BOOTSTRAP` `_IOWR('W', 40, struct memd_bootstrap_cmd)` | `struct memd_bootstrap_cmd` | 32 | app -> driver (once per install) |
+| 41 | `MEMD_IOCTL_LOADSO_UNLOAD` `_IOWR('W', 41, struct memd_loadso_unload_cmd)` | `struct memd_loadso_unload_cmd` | 24 | app -> driver -> target |
+| 42 | `MEMD_IOCTL_VERSION` `_IOWR('W', 42, struct memd_version_cmd)` | `struct memd_version_cmd` | 28 | query |
+| 43 | `MEMD_IOCTL_LEARN_STATUS` `_IOWR('W', 43, struct memd_learn_status_cmd)` | `struct memd_learn_status_cmd` | 44 | query |
+
+Number-sharing note (verbatim from `client.h`): "nr 21/22/23 are shared
+across features (e.g. HIDE_STATUS and HWBP_INFO are both nr 21), but the
+full _IOWR codes differ via the struct-size field — verified mechanically,
+no dispatch collision." The app must always use the full `MEMD_IOCTL_*`
+macro, never a bare number.
+
+### `struct memd_hide_proc_cmd` (8 B) — nr 14
+
+```c
+struct memd_hide_proc_cmd {
+    pid_t pid;  /* Input: Process ID */
+    int   hide; /* Input: 1 to hide, 0 to unhide */
+};
+```
+
+Per-header contract: `pid` selects the process, `hide = 1` adds it to the
+hidden set, `hide = 0` removes it. `client.h` provides no thin wrapper for
+this op — issue `MEMD_IOCTL_HIDE_PROCESS` directly on the driver fd.
+App policy (owner override 2026-10-16, see `BLOCKERS.md`): any future UI
+wiring MUST be an explicit, visible, user-initiated action with
+explanatory copy — never silent, never by default. Not yet bridged in
+`native/memd_bridge.c` (five bridged calls only: version, learn-status,
+bootstrap, load, unload).
+
+### `struct memd_hide_status_cmd` (8 B) — nr 21
+
+```c
+struct memd_hide_status_cmd {
+    int active;       /* Output: 1 if the getdents64 filter is installed */
+    int hidden_count; /* Output: pids currently in the hidden set */
+};
+```
+
+Read-only snapshot. No wrapper in `client.h`; issue
+`MEMD_IOCTL_HIDE_STATUS` directly.
+
+### `struct memd_hide_install_cmd` (8 B) — nr 22
+
+```c
+struct memd_hide_install_cmd {
+    int install; /* Input: 1 install, 0 uninstall */
+    int result;  /* Output: 0 ok, negative errno on failure */
+};
+```
+
+Installs/uninstalls the `getdents64` filter the nr-14 hiding relies on.
+No wrapper in `client.h`; issue `MEMD_IOCTL_HIDE_INSTALL` directly.
+Same explicit-user-action-only policy as nr 14.
+
+### Install / status / unload wrappers (`client.h` thin typed wrappers)
+
+- Install: `memd_load_so(fd, pid, path, entry, su, ephemeral, &handle,
+  &entry_result)` → nr 38 (`su == 0`) / nr 39 (`su != 0`). Guards:
+  `pid > 0`, `path` absolute and `< 256` (`sizeof(path)`), `entry` (if
+  non-empty) `< 64` and containing no `/`; `entry == ""`/NULL skips the
+  entry call. `ephemeral != 0` sets `MEMD_LOADSO_EPHEMERAL`. Returns
+  `0` ok / `-errno`; `handle` + `entry_result` via out-params
+  (`entry_result` valid only when entry was requested). `0` ok with
+  `cmd.result < 0` returns `cmd.result`.
+- Status (identity): `memd_get_version(fd, &out)` — fills `abi =
+  MEMD_ABI_VERSION`, fails closed on mismatch (see VERSION semantics
+  below). Status (offsets): `memd_get_learn_status(fd, &out)` — fills
+  `gen` + per-field offsets + `mask` (see LEARN_STATUS semantics below).
+  Both return `0` ok / `-errno`, and propagate `cmd.result` when negative.
+- Unload: `memd_unload_so(fd, pid, handle)` → nr 41. Guards: `fd >= 0`,
+  `pid > 0`, `handle != 0`. Returns `0` ok / `-errno`, else `cmd.result`.
+  Driver zeroes the handle on success. Hotswap primitive:
+  `memd_hotswap_so(fd, pid, old_handle, path, entry, su, &new_handle,
+  &entry_result)` = load-new (persistent) + run entry, then `dlclose`
+  old handle; on unload failure the new library stays resident and its
+  handle is returned.
+
+### VERSION / LEARN_STATUS app semantics (what the app must do)
+
+- Probe FIRST: `memd_get_version` before any install/load/bootstrap.
+  Set `abi = MEMD_ABI_VERSION` (1); a mismatch fails closed so old
+  userspace never misreads a newer wire format. `isCompatible()` in
+  `core/DriverCaps.java` is exactly `abi == 1`.
+- `major.minor.patch` = driver version (`1.0.0` constants
+  `MEMD_VERSION_MAJOR/MINOR/PATCH` in both headers). Display verbatim;
+  never compare as a float.
+- `flags`: bit 0 `MEMD_F_BOOTSTRAP_DONE` (1) = file-helper addresses
+  already delivered; bit 1 `MEMD_F_LEARNED_OFFSETS` (2) = offset learning
+  complete. Unknown bits are preserved and shown numerically (see
+  `DriverCaps.describe()`), never dropped. Bootstrap delivery (nr 40,
+  `memd_bootstrap(fd, filp_open, kernel_read, filp_close)`, all three
+  nonzero) is once per install — skip when `BOOTSTRAP_DONE` is set.
+- `gen`: learned generation index, or `-1` = unknown. `-1` is valid data
+  (driver not yet learned), not an error.
+- LEARN_STATUS: observability snapshot only — `gen`, eight ordered offset
+  fields (`t_pid`, `t_tgid`, `t_mm`, `t_cred`, `v_start`, `v_end`,
+  `v_flags`, `m_pgd`, each `-1` = unknown), `mask` (bit i = i-th field
+  learned, `t_pid` = bit0 … `m_pgd` = bit7), `result` (`0` ok, else
+  `-errno`). The app surfaces unknown (`-1` / clear bit) fields as
+  "not learned", never as zero offsets.

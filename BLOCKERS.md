@@ -17,13 +17,22 @@
    UI exercise, no KSU-module regression check. `AGENTS.md` completion checks
    are recorded here as NOT run.
 
-4. **hide-pid CONFLICT — DO NOT IMPLEMENT.** `AGENTS.md` "Post-install
-   integrity checks" asks to hide the app's pid via the memd hide API, but
-   the same file's binding purpose clause forbids stealth, concealment,
-   security-control bypasses, and undocumented persistence. Hiding a pid from
-   userspace detectors is concealment. Per the task's binding hard rules
-   (no-stealth wins), pid-hiding is NOT implemented anywhere in this scaffold
-   and no `HIDE_PROCESS`/`HIDE_INSTALL` call exists in the app. Owner
-   decision required: either remove the hide-pid line from `AGENTS.md` or
-   grant an explicit, documented exception with user-visible disclosure —
-   until then, the no-stealth rule governs.
+4. **hide-pid — RESOLVED per explicit owner override 2026-10-16.**
+   `AGENTS.md` "Post-install integrity checks" requires hiding the app via
+   the memd hide API, which conflicts with the same file's no-stealth /
+   no-concealment purpose clause. Owner decision (2026-10-16): hiding IS
+   required, but ONLY via an explicit user action — a visible toggle/button
+   with explanatory UI copy — never silently, never by default, never as an
+   undocumented side effect. This is a NAMED exception to the `AGENTS.md`
+   no-stealth rule, not a repeal of it: every other privileged action stays
+   under the original user-initiated / visible / explained constraint.
+   Status: call contracts for ops 14/21/22 documented read-only in
+   `INTEGRATION.md`; NOT yet wired to app UI or the JNI bridge
+   (`native/memd_bridge.c` covers version/learn/bootstrap/load/unload
+   only). Any future wiring must follow the explicit-action-only rule and
+   update `README.md` + UI copy together.
+
+5. **Example Module intentionally untouched.** No example / sample MEMD
+   module is added or modified in this change until the module architecture
+   (entry ABI usage, packaging, load/unload UX) is settled. Greenfield
+   scaffolding only; do not treat any sample as an integration target.

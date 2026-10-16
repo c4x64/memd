@@ -1,12 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- DSU (package com.lxgr.dsu).
+     Version authority: app/build.gradle (versionName from VERSION file);
+     android:versionCode/versionName are intentionally NOT duplicated here
+     (AGP ignores manifest versions when set in Gradle; one source only).
+     No stealth/persistence: every privileged action is user-initiated. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.lxgr.dsu"
-    android:versionCode="1"
-    android:versionName="RD-20261016-0652">
+    package="com.lxgr.dsu">
+
+    <!-- RECEIVE_BOOT_COMPLETED: the ONLY permission. Justification: it backs
+         the explicit opt-in "Load MEMD at boot" setting (SettingsFragment);
+         boot loading runs visibly via the root manager's supported mechanism
+         and the toggle defaults OFF. No BootReceiver is declared yet — the
+         mechanism is unimplemented (see BLOCKERS.md); the permission is
+         retained so the manifest already states the requirement. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- No other permissions. INTERNET: not requested (no network calls).
+         READ/WRITE_EXTERNAL_STORAGE, QUERY_ALL_PACKAGES: not requested (no
+         file scanning, no package enumeration). Root access itself is via the
+         user's installed root manager, not a manifest permission. -->
 
     <application
         android:label="DSU"
         android:allowBackup="false">
+        <!-- Single launcher activity. No exported receivers/services yet. -->
         <activity
             android:name=".MainActivity"
             android:label="DSU"

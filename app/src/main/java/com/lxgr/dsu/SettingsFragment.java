@@ -18,8 +18,17 @@ import android.widget.TextView;
  * (mechanism not yet implemented — see BLOCKERS.md). Boot-time loading is
  * never silent: the user is told what will run, denial/failure states are
  * surfaced, and turning the toggle OFF stops automatic loading.
+ *
+ * App version string below must match the VERSION file.
  */
 public class SettingsFragment extends Fragment {
+
+    /** App version. Must match the VERSION file. */
+    public static final String APP_VERSION = "RD-20261016-0652";
+
+    /** No-argument constructor required for fragment re-instantiation. */
+    public SettingsFragment() {
+    }
 
     /** Default OFF. Persisted only when the real boot mechanism lands. */
     private boolean loadAtBoot = false;
@@ -49,6 +58,11 @@ public class SettingsFragment extends Fragment {
             }
         });
         layout.addView(toggle);
+
+        TextView version = new TextView(getActivity());
+        version.setText("App version: " + APP_VERSION
+                + " (must match the VERSION file).");
+        layout.addView(version);
 
         return layout;
     }

@@ -1,0 +1,37 @@
+// DSU root project settings.
+//
+// Product: DSU. Version authority is the sibling VERSION file (canonical
+// value at time of writing: RD-20261016-0652); versionName in
+// app/build.gradle hardcodes that literal with a comment citing VERSION,
+// per the Userspace App task rules. VERSION itself is read-only here.
+//
+// CI NOTE: Gradle plugin/dependency resolution needs network on first
+// sync (gradlePluginPortal/google/mavenCentral below). The offline
+// ./build.sh check (javac + android.jar, optional NDK clang, d8) stays
+// the network-free gate; Gradle builds are a CI concern.
+
+// PINNED: Android Gradle Plugin. Update only in a dedicated change with
+// release-note review + affected build/test run (see AGENTS.md "CI and
+// upstream dependencies"). Requires Gradle >= 8.7 (wrapper pin lives
+// outside this file; CI must provide it — network needed for first sync).
+pluginManagement {
+    plugins {
+        id 'com.android.application' version '8.5.2'
+    }
+    repositories {
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "DSU"
+include(":app")

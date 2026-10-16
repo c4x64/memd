@@ -1,0 +1,57 @@
+// DSU app Gradle config.
+//
+// Canonical version source: the Userspace App/VERSION file, whose content
+// is RD-20261016-0652 at time of writing. versionName below hardcodes that
+// literal (AGENTS.md forbids deriving versions from the local clock; Gradle
+// cannot read a sibling file without extra build logic, so the literal is
+// kept in sync by the reviewed release process, with VERSION canonical).
+//
+// CI NOTE: first Gradle sync needs network to resolve the pinned AGP
+// (see ../settings.gradle) and SDK components. Offline verification is
+// ./build.sh (javac + android.jar, optional NDK clang, d8) — no network.
+//
+// UPSTREAM STUBS: KernelSU / DirtyFrag sources are NOT vendored in this
+// repo (see BLOCKERS.md). No KSU/DirtyFrag dependency is declared here;
+// the KSU Modules tab is an explicit UNSUPPORTED placeholder. Never add
+// a moving "latest" dependency; pin exact versions per AGENTS.md.
+
+plugins {
+    // Version pinned in ../settings.gradle pluginManagement (AGP 8.5.2).
+    id 'com.android.application'
+}
+
+android {
+    // PINNED: must match a locally/CI-installed platform (android-34).
+    namespace "com.lxgr.dsu"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.lxgr.dsu"
+        // PINNED floor: scaffold uses framework APIs available since 26.
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        // Canonical value lives in ../VERSION; do not bump independently.
+        versionName "RD-20261016-0652"
+    }
+
+    compileOptions {
+        // Matches ./build.sh javac -source 8 -target 8.
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    // PINNED NDK: 26.1.10909125 is the newest fully-installed NDK on the
+    // authoring machine (28.x dir present but empty). CI must install this
+    // exact revision for native-bridge builds.
+    ndkVersion "26.1.10909125"
+}
+
+dependencies {
+    // No external dependencies: the scaffold uses framework classes only
+    // (android.app.Activity/Fragment, widget). When a dependency becomes
+    // necessary, pin an exact version, e.g.
+    // implementation "androidx.appcompat:appcompat:1.7.0", and record the
+    // upstream URL + revision + licenses per AGENTS.md. Never use dynamic
+    // versions (e.g. "1.+") or moving tags.
+}
