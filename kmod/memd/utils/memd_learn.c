@@ -1313,7 +1313,7 @@ static void memd_learn_mm_extended(void)
         int found = -1, n = 0, i;
         for (i = 0; i + 8 <= 512; i += 8) {
             unsigned long v = 0;
-            if (memd_safe_read64((char *)mm + i, &v))
+            if (memd_safe_read64((char *)mm + i, (unsigned long *)&v))
                 continue;
             if (v == (u64)mmap) {
                 if (!n)
