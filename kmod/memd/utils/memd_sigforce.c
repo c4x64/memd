@@ -173,6 +173,16 @@ static int memd_sigforce_deliver_sync(struct task_struct *task, int sig, int for
     struct siginfo info;
     unsigned long flags;
     int ret = 0;
+    /* Resolved sleepable, before the lock: the send entry's lazy resolve
+     * sleeps (kallsyms file IO + GFP_KERNEL), and a bootstrap re-arm
+     * between a pure warm and the send would re-dirty the table and
+     * sleep again under sigforce_lock below. Locals pin kernel text
+     * addresses (stable across re-arms, never imports); the send path
+     * itself is siglock + GFP_ATOMIC and never sleeps. */
+    int (*fn_send)(int, struct kernel_siginfo *,
+                   struct task_struct *, enum pid_type);
+    int (*fn_do)(int, struct kernel_siginfo *,
+                 struct task_struct *, enum pid_type);
 
     if (!task)
         return -ESRCH;
@@ -192,12 +202,10 @@ static int memd_sigforce_deliver_sync(struct task_struct *task, int sig, int for
     info.si_pid = task_pid_vnr(current);
     info.si_uid = memd_uid();
 
-    /* memd_send_signal resolves send_signal/do_send_sig_info lazily via
-     * a /proc/kallsyms parse (file IO + GFP_KERNEL: sleeps) on first use;
-     * steady state is siglock + GFP_ATOMIC (never sleeps). Warm the table
-     * here, sleepable, so nothing under sigforce_lock below can sleep. */
-    (void)kallsyms_lookup_name_ex("send_signal");
-    (void)kallsyms_lookup_name_ex("do_send_sig_info");
+    /* Resolve here, sleepable, so nothing under sigforce_lock below
+     * can sleep even if a bootstrap re-arms the table mid-call. */
+    fn_send = (void *)kallsyms_lookup_name_ex("send_signal");
+    fn_do = (void *)kallsyms_lookup_name_ex("do_send_sig_info");
 
     spin_lock_irqsave(&sigforce_lock, flags);
 
@@ -226,7 +234,16 @@ static int memd_sigforce_deliver_sync(struct task_struct *task, int sig, int for
         }
     }
 
-    ret = memd_send_signal(sig, &info, task, PIDTYPE_PID);
+    /* Direct call on the pre-resolved locals: a concurrent re-arm
+     * cannot dirty these, so nothing here sleeps. Fail closed with
+     * -ESRCH when neither entry resolves (same as memd_send_signal,
+     * e.g. kptr_restrict hides every address). */
+    if (fn_send)
+        ret = fn_send(sig, (struct kernel_siginfo *)&info, task, PIDTYPE_PID);
+    else if (fn_do)
+        ret = fn_do(sig, (struct kernel_siginfo *)&info, task, PIDTYPE_PID);
+    else
+        ret = -ESRCH;
 
     if (force && ret == 0) {
         if (sig == SIGKILL || sig == SIGSTOP) {
@@ -411,10 +428,16 @@ int memd_sigforce_send_group(struct task_struct *task, int sig, int force)
     /* for_each_process needs RCU, but the send must not run under it:
      * first-use resolution inside memd_send_signal sleeps (kallsyms file
      * IO), and sleeping inside rcu_read_lock is never legal. Leaders own
-     * a unique signal_struct, so at most one match; pin it with a ref
-     * (legal under RCU) and send after unlock. */
-    wanted = task->signal;
+     * a unique signal_struct (vfork/CLONE_SIGHAND share mm/sighand, never
+     * signal across leaders), so at most one match; pin it with a ref
+     * (legal under RCU) and send after unlock. The pointer is loaded
+     * inside the critical section because signal_struct is RCU-freed. */
     rcu_read_lock();
+    wanted = task->signal;
+    if (!wanted) {
+        rcu_read_unlock();
+        return -ESRCH;
+    }
     for_each_process(p) {
         if (p->signal == wanted) {
             get_task_struct(p);
