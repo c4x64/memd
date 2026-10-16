@@ -309,7 +309,6 @@ jobs:
 
   generate-matrix:
     name: Generate Build Matrix
-    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.generate.outputs.matrix }}
@@ -320,7 +319,11 @@ jobs:
       - name: Generate build matrix
         id: generate
         run: |
-          python3 .github/scripts/generate_matrix.py --fetch-latest --output matrix.json
+          if [ "${{ github.event_name }}" != "push" ]; then
+            python3 .github/scripts/generate_matrix.py --fetch-latest --output matrix.json
+          else
+            python3 .github/scripts/generate_matrix.py --output matrix.json
+          fi
           echo "matrix=$(cat matrix.json | jq -c .)" >> $GITHUB_OUTPUT
 
       - name: Verify SPX flavors match matrix
@@ -329,7 +332,6 @@ jobs:
   build:
     name: Build ${{ matrix.kmi }}
     needs: generate-matrix
-    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/ylarod/ddk:${{ matrix.ddk_tag }}
@@ -570,7 +572,6 @@ jobs:
   pack:
     name: Pack SPX Binary
     needs: [generate-matrix, build]
-    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     # Releases need an explicit grant (repo default token is restricted).
     permissions:
