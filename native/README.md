@@ -2,7 +2,7 @@
 
 Thin translation layer between `com.lxgr.dsu.MemdDriver` (Java) and the
 driver ioctl surface declared in repo-root `client.h`, which is included
-by relative path (`../../client.h`) and never copied. No stealth, no
+by relative path (`../client.h`) and never copied. No stealth, no
 concealment, no persistence: each entry validates args, fills one
 `client.h` struct, issues one `ioctl()` on the caller-supplied fd, and
 returns a status int. Expected driver errors are returned, never thrown.

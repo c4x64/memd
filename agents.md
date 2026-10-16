@@ -119,4 +119,8 @@ Before calling a change complete:
 -Integrity check to check if has been tampered
 -using memd it hides itself using the hideapi its pid is hidden from userspace detectors
 
+## Push identity
+
+- All commits and pushes use the operator's GitHub account only (`c4x64`, `gh auth` active). No bot, no random, no `opencode@local` authors. Verify `git config user.name/email` and `gh auth status` before every push.
+
 

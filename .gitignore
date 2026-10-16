@@ -1,0 +1,5 @@
+# DSU branch root
+build/
+*.o
+*.dex
+local.properties

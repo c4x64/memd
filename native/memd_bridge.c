@@ -17,7 +17,7 @@
 #include <string.h>
 
 #include "memd_bridge.h"
-#include "../../client.h"
+#include "../client.h"
 
 JNIEXPORT jint JNICALL
 Java_com_lxgr_dsu_MemdDriver_getVersion(JNIEnv *env, jclass clazz,
