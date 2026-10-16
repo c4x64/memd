@@ -104,7 +104,8 @@
 #define MEMD_PT_NREGS  34
 
 /* Proven struct cred head layout (same basis as memd_capable/mem..._uid):
- * usage counter at +0, uid value at +4. cap offsets come from the
+ * usage counter at +0, uid value at +memd_cred_uid_off() (compiled 4,
+ * learned t_cred_uid when known). cap offsets come from the
  * learned t_cred_cap_* (fallback: cap_effective at +56). */
 #define MEMD_CRED_USAGE_MAX 100000u
 
@@ -605,10 +606,12 @@ static unsigned long cred_cap_eff_off(void)
 static int su_stage(struct task_struct *task, struct memd_su_saved *s)
  {
     unsigned long c, w, usage;
+    unsigned long uid_off;
     u32 uid;
     memset(s, 0, sizeof(*s));
     if (!task)
         return -ESRCH;
+    uid_off = memd_cred_uid_off();
     c = (unsigned long)memd_t_cred(task);
     if (c < TASK_SIZE_64)
         return -ESRCH;
@@ -617,7 +620,7 @@ static int su_stage(struct task_struct *task, struct memd_su_saved *s)
     usage = (u32)(w & 0xffffffffU);
     if (usage < 1 || usage > MEMD_CRED_USAGE_MAX)
         return -ESRCH;
-    if (memd_safe_read32((void *)(c + 4), &uid))
+    if (memd_safe_read32((void *)(c + uid_off), &uid))
         return -EFAULT;
     {
         atomic_t *cnt = (atomic_t *)(void *)c;
@@ -634,7 +637,7 @@ static int su_stage(struct task_struct *task, struct memd_su_saved *s)
             goto fail_read;
         s->have_perm = true;
     }
-    if (memd_safe_write32((void *)(c + 4), 0))
+    if (memd_safe_write32((void *)(c + uid_off), 0))
         goto fail;
     if (memd_safe_write64((void *)(c + cred_cap_eff_off()), ~0UL))
         goto fail;
@@ -647,7 +650,7 @@ fail:
     /* A write clobbered state: restore every saved field before the
      * target can resume elevated. All saved values are valid here
      * (reads complete before the first write). */
-    memd_safe_write32((void *)(c + 4), s->uid);
+    memd_safe_write32((void *)(c + uid_off), s->uid);
     memd_safe_write64((void *)(c + cred_cap_eff_off()), s->cap_eff);
     if (s->have_perm)
         memd_safe_write64((void *)(c + (unsigned long)memd_learned_ext.t_cred_cap_perm),
@@ -667,13 +670,15 @@ static int su_unstage(struct task_struct *task, struct memd_su_saved *s,
                       bool *killed_out)
  {
     int err = 0;
+    unsigned long uid_off;
     if (!s->active || !s->cred)
         return 0;
+    uid_off = memd_cred_uid_off();
     /* Object pinned throughout by our ref; restore verbatim. If the
      * task replaced its creds under us, or any restore write faults,
      * the live cred may stay elevated: kill instead of resuming. */
     if (!task || (unsigned long)memd_t_cred(task) != (unsigned long)s->cred ||
-        memd_safe_write32((void *)((unsigned long)s->cred + 4), s->uid) ||
+        memd_safe_write32((void *)((unsigned long)s->cred + uid_off), s->uid) ||
         memd_safe_write64((void *)((unsigned long)s->cred + cred_cap_eff_off()),
                           s->cap_eff) ||
         (s->have_perm &&

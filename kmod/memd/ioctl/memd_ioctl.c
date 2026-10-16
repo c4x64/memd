@@ -278,7 +278,7 @@ int do_pte_mapping(struct socket* sock, void* arg) {
         unsigned int uid_val;
         if (memd_learned.t_cred >= 0 &&
             !memd_safe_read64((char *)task + memd_learned.t_cred, &cred_addr) && cred_addr &&
-            !memd_safe_read32((const void *)(cred_addr + 4), &uid_val)) {
+            !memd_safe_read32((const void *)(cred_addr + memd_cred_uid_off()), &uid_val)) {
             hide_uid = (uid_t)uid_val;
             have_uid = 1;
         }
@@ -323,6 +323,13 @@ int do_pte_mapping(struct socket* sock, void* arg) {
 
     /* Installing PTEs in a live foreign mm without the write lock
      * races reclaim/fork/exit_mmap walks of the same tables. */
+    /* Warm the kallsyms table outside the write lock: the first
+     * find_vma resolve parses /proc/kallsyms (may sleep); doing that
+     * under the held mmap write lock would hold writers across the
+     * whole parse. Warmed here, the under-lock resolves below are
+     * table-only (no file IO). No VMA walk here (that needs the lock);
+     * result discarded. */
+    (void)kallsyms_lookup_name_ex("find_vma");
     MM_WRITE_LOCK(mm);
 
     for (i = 0; i < cmd.num_pages; i++) {
@@ -1233,7 +1240,7 @@ int do_get_process_info(struct socket* sock, void __user* arg) {
         unsigned int v = 0;
         if (memd_learned.t_cred >= 0 &&
             !memd_safe_read64((char *)task + memd_learned.t_cred, &c) && c &&
-            !memd_safe_read32((const void *)(c + 4), &v))
+            !memd_safe_read32((const void *)(c + memd_cred_uid_off()), &v))
             cmd.uid = (uid_t)v;
     }
     {

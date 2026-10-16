@@ -57,11 +57,12 @@ def _selftest():
     without needing Linux or a C++ compiler.
 
     Mocks the compiler probe (two_tu_gate._compiler) and the subprocess
-    runner (subprocess.run); sys.platform is patched per case. Seven
+    runner (subprocess.run); sys.platform is patched per case. Eight
     cases cover the contract in the module docstring:
       no-compiler non-Linux -> SKIP, no-compiler Linux -> FAIL,
       syntax-fail -> FAIL, syntax-ok non-Linux -> SKIP,
-      Linux link-fail -> FAIL, Linux run-miss -> FAIL, Linux full -> PASS.
+      Linux link-fail -> FAIL, Linux run-miss -> FAIL,
+      Linux run-rc-nonzero -> FAIL, Linux full -> PASS.
     Returns 0 when every case hits its contract code, 1 otherwise. Run:
         python3 tools/two_tu_gate.py --self-test
     """
