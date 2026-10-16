@@ -123,4 +123,8 @@ Before calling a change complete:
 
 - All commits and pushes use the operator's GitHub account only (`c4x64`, `gh auth` active). No bot, no random, no `opencode@local` authors. Verify `git config user.name/email` and `gh auth status` before every push.
 
+## No cross-branch merges
+
+- Never merge this branch with any other branch in either direction — no PRs, no merge button. Dismiss GitHub's "Compare & pull request" banner. Histories are unrelated by design; merging is contamination. If one ever lands, revert it.
+
 
