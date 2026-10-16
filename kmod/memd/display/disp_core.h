@@ -102,10 +102,12 @@ struct memd_disp_backend {
  * directly (cursor pixels, layer buffers, gamma/mode/edid structs, frame
  * ops). The only userspace-reachable paths today (do_disp_install /
  * do_disp_frame via memd_disp_*) bounce through copy_from_user before the
- * core; cursor / layer / gamma / mode / edid helpers have no ioctl wiring
- * at all (no in-tree caller). Any future ioctl wiring for those helpers
- * must copy_from_user into a kernel buffer first — never hand a __user
- * pointer to these entries. */
+ * core; the TEST-only do_disp_readback passes its destination as a plain
+ * integer and the core copies via memd_copy_to_user (never a direct
+ * deref). Cursor / layer / gamma / mode / edid helpers have no ioctl
+ * wiring at all (no in-tree caller). Any future ioctl wiring for those
+ * helpers must copy_from_user into a kernel buffer first — never hand a
+ * __user pointer to these entries. */
 int memd_core_install(__u32 backend, __u32 width, __u32 height);
 int memd_core_uninstall(void);
 int memd_core_active(void);

@@ -206,6 +206,20 @@ static int memd_drm_open(__u32 w, __u32 h)
         put_device(d);
         return -ENODEV;
     }
+    /* Fail closed on unknown generation (includes dormant 5.4, which
+     * shares the old vmap signature but never resolves to MEMD_GEN_54):
+     * the vmap signature branch below is only proven for the listed
+     * gens, so guessing the new signature would mis-call it. */
+    {
+        int ng;
+        ng = memd_net_gen();
+        if (ng != MEMD_GEN_510 && ng != MEMD_GEN_515 &&
+            ng != MEMD_GEN_61 && ng != MEMD_GEN_66 &&
+            ng != MEMD_GEN_612) {
+            put_device(d);
+            return -ENODEV;
+        }
+    }
     memset(g_drm.client_store, 0, sizeof(g_drm.client_store));
     g_drm.client = g_drm.client_store;
     rc = p_drm_client_init(drm_dev, g_drm.client, "memd", NULL);
@@ -222,8 +236,9 @@ static int memd_drm_open(__u32 w, __u32 h)
         return -ENODEV;
     }
     /* Map for CPU draws (generation-branched signatures, CI-verified).
-     * 5.4/5.10: void *vmap(buffer). 5.15+: int vmap(buffer, 16B map). */
-    g_drm.mapped_new = (memd_net_gen() != MEMD_GEN_510 && memd_net_gen() != MEMD_GEN_54);
+     * 5.10: void *vmap(buffer). 5.15+: int vmap(buffer, 16B map).
+     * Unknown gens are refused above, so only 5.10 takes the old path. */
+    g_drm.mapped_new = (memd_net_gen() != MEMD_GEN_510);
     if (!g_drm.mapped_new) {
         g_drm.vaddr = p_drm_client_buffer_vmap(g_drm.fb);
         if (!g_drm.vaddr) {
