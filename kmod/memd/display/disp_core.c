@@ -36,6 +36,12 @@ static const struct memd_disp_backend *memd_backends[] = {
 };
 
 static DEFINE_MUTEX(g_core_mu);
+/* Serializes install/uninstall across the flush_workqueue unlock window
+ * (worker takes only g_core_mu, so inst -> core ordering never inverts). */
+static DEFINE_MUTEX(g_inst_mu);
+/* Waitqueue lifetime: init-once, survives installs; install/uninstall wake
+ * only when true (first install must not wake an uninitialised queue). */
+static bool g_vsync_wq_ok = false;
 
 static struct task_struct *g_refresh_task;
 static struct workqueue_struct *g_flip_wq = NULL;
@@ -168,17 +174,17 @@ static int64_t memd_get_time_ns(void)
 static void memd_vsync_init(void)
  {
     /* The waitqueue persists across installs: re-initialising it while
-     * a waiter sleeps on it corrupts the queue. Init once only. */
-    static bool wq_ok = false;
+     * a waiter sleeps on it corrupts the queue. Init once only. File
+     * scope flag so install/uninstall can test lifetime safely. */
     g_core.vsync.enabled = g_core.tear_free;
     if (g_core.frame_interval_ns > 0)
         g_core.vsync.frame_interval_ns = g_core.frame_interval_ns;
     else
         g_core.vsync.frame_interval_ns = 16666666;
     g_core.vsync.next_vsync_ns = memd_get_time_ns() + g_core.vsync.frame_interval_ns;
-    if (!wq_ok) {
+    if (!g_vsync_wq_ok) {
         init_waitqueue_head(&g_core.vsync.wq);
-        wq_ok = true;
+        g_vsync_wq_ok = true;
     }
     atomic_set(&g_core.vsync.frame_pending, 0);
 }
@@ -330,6 +336,10 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
         check_mul_overflow(px, (size_t)4, &bytes) || bytes == 0)
         return -EINVAL;
 
+    /* Serialize installs vs uninstalls across the flush unlock window
+     * below (worker takes only g_core_mu, so inst -> core never deadlocks;
+     * frames keep failing closed on NULL be without taking inst). */
+    mutex_lock(&g_inst_mu);
     mutex_lock(&g_core_mu);
     /* Tear down any previous session first (clean slate). */
     if (g_core.be && g_core.be->close)
@@ -364,7 +374,7 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
     }
     /* Wake stale waiters before recycling the waitqueue (guarded:
      * the queue is only valid after a prior init). */
-    if (g_core.vsync.frame_interval_ns)
+    if (g_vsync_wq_ok)
         wake_up_all(&g_core.vsync.wq);
 
     /* Initialize new features (vsync waitqueue persists: init-once
@@ -400,6 +410,7 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
         if (!be) {
             g_core.last_errno = -ENODEV;
             mutex_unlock(&g_core_mu);
+            mutex_unlock(&g_inst_mu);
             return -ENODEV;
         }
         g_core.front = vmalloc(bytes);
@@ -422,6 +433,7 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
         memd_vnc_start();
 #endif
         mutex_unlock(&g_core_mu);
+        mutex_unlock(&g_inst_mu);
         return 0;
     }
     /* Auto: simplefb (bootloader-lit, zero programming) first, then
@@ -439,6 +451,7 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
             g_core.front = g_core.back = NULL;
             g_core.last_errno = -ENOMEM;
             mutex_unlock(&g_core_mu);
+            mutex_unlock(&g_inst_mu);
             return -ENOMEM;
         }
         g_core.w = width;
@@ -454,6 +467,7 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
         memd_vnc_start();
 #endif
             mutex_unlock(&g_core_mu);
+            mutex_unlock(&g_inst_mu);
             return 0;
         }
         g_core.last_errno = rc;
@@ -463,6 +477,7 @@ int memd_core_install(__u32 backend, __u32 width, __u32 height)
         g_core.w = g_core.h = 0;
     }
     mutex_unlock(&g_core_mu);
+    mutex_unlock(&g_inst_mu);
     return -ENODEV;
 
 nomem:
@@ -473,6 +488,7 @@ nomem:
     g_core.front = g_core.back = NULL;
     g_core.last_errno = -ENOMEM;
     mutex_unlock(&g_core_mu);
+    mutex_unlock(&g_inst_mu);
     return -ENOMEM;
 
 fail_open:
@@ -481,6 +497,7 @@ fail_open:
     g_core.front = g_core.back = NULL;
     g_core.w = g_core.h = 0;
     mutex_unlock(&g_core_mu);
+    mutex_unlock(&g_inst_mu);
     return rc;
 }
 
@@ -489,9 +506,11 @@ int memd_core_uninstall(void)
     struct task_struct *t;
     const struct memd_disp_backend *dead;
     unsigned long i;
+    mutex_lock(&g_inst_mu);
     mutex_lock(&g_core_mu);
     if (!g_core.be) {
         mutex_unlock(&g_core_mu);
+        mutex_unlock(&g_inst_mu);
         return -ENODEV;
     }
     t = g_refresh_task;
@@ -534,8 +553,10 @@ int memd_core_uninstall(void)
     }
     memset(g_core.layers, 0, sizeof(g_core.layers));
     g_core.layer_count = 0;
-    wake_up_all(&g_core.vsync.wq);
+    if (g_vsync_wq_ok)
+        wake_up_all(&g_core.vsync.wq);
     mutex_unlock(&g_core_mu);
+    mutex_unlock(&g_inst_mu);
     return 0;
 }
 
@@ -562,9 +583,12 @@ int memd_core_status(__u32 *backend, __u32 *w, __u32 *h, __u32 *err)
     if (g_core.be && g_core.be->status) {
         __u32 bw = 0, bh = 0, be = 0;
         g_core.be->status(&bw, &bh, &be);
-        if (w)
+        /* Probe-only backends report 0x0 (nothing scanned out);
+         * keep the core's installed dimensions so callers never see
+         * active=1 with 0 size. Live backends echo the same dims. */
+        if (w && bw)
             *w = bw;
-        if (h)
+        if (h && bh)
             *h = bh;
         if (err && be)
             *err = be;

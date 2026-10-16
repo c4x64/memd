@@ -167,7 +167,7 @@ void* arraylist_get_ts(struct karray_list* list, size_t index) {
         return arraylist_get(list, index);
 
     spin_lock_irqsave(&list->lock, flags);
-    if (index < list->size)
+    if (list->data && index < list->size)
         element = list->data[index];
     spin_unlock_irqrestore(&list->lock, flags);
     return element;
@@ -183,7 +183,7 @@ void* arraylist_remove_ts(struct karray_list* list, size_t index) {
         return arraylist_remove(list, index);
 
     spin_lock_irqsave(&list->lock, flags);
-    if (index < list->size) {
+    if (list->data && index < list->size) {
         element = list->data[index];
         memmove(&list->data[index], &list->data[index + 1], (list->size - index - 1) * sizeof(void*));
         list->size--;
@@ -396,7 +396,7 @@ void arraylist_for_each_ts(struct karray_list* list, void (*fn)(void*, void*), v
      * under a live iteration). */
     for (;;) {
         spin_lock_irqsave(&list->lock, flags);
-        if (i >= list->size) {
+        if (!list->data || i >= list->size) {
             spin_unlock_irqrestore(&list->lock, flags);
             break;
         }

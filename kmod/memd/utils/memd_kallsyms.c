@@ -37,6 +37,28 @@ static const char *memd_wanted[] = {
     "__cfi_check_fail",
     "__ubsan_handle_cfi_check_fail_abort",
     "__ubsan_handle_cfi_check_fail",
+    /* CFI-bypass patch targets (utils/memd_utils.c cfi_bypass): every
+     * literal passed to cfi_patch_ret/cfi_bypass_* must be listed —
+     * unlisted names fail closed to 0 and silently skip patching. */
+    "report_cfi_failure",
+    "cfi_slowpath",
+    "__cfi_verify",
+    "__kcfi_check_fail",
+    "__ubsan_handle_type_mismatch",
+    "__ubsan_handle_builtin_unreachable",
+    "__ubsan_handle_pointer_overflow",
+    "__ubsan_handle_load_invalid_value",
+    "__ubsan_handle_out_of_bounds",
+    "__ubsan_handle_shift_out_of_bounds",
+    "__ubsan_handle_divrem_overflow",
+    "__ubsan_handle_mul_overflow",
+    "__ubsan_handle_negate_overflow",
+    "__ubsan_handle_float_cast_overflow",
+    "__ubsan_handle_invalid_builtin",
+    "__ubsan_handle_cfi_bad_type",
+    "kcfi_failure",
+    "kcfi_type_mismatch",
+    "kcfi_check_fail_diag",
     "kallsyms_lookup_name",
     "pfn_valid",
     "max_pfn",
@@ -141,12 +163,16 @@ int memd_kallsyms_bootstrap(unsigned long fo, unsigned long kr, unsigned long fc
     WRITE_ONCE(my_filp_open, (void *)fo);
     WRITE_ONCE(my_kernel_read, (void *)kr);
     WRITE_ONCE(my_filp_close, (void *)fc);
-    /* Re-arm: an earlier attempt may have parsed (and failed) already. */
+    /* Re-arm: an earlier attempt may have parsed (and failed) already.
+     * WRITE_ONCE: memd_parsed also has a lock-free READ_ONCE fast path
+     * in memd_kallsyms(), so the publishing stores must not be plain
+     * (plain-under-lock + lock-free-READ_ONCE is a mixed discipline —
+     * torn/stale reads on weak memory). */
     {
         unsigned long flags;
         spin_lock_irqsave(&memd_klock, flags);
-        memd_parsed = false;
-        memd_unavailable = false;
+        WRITE_ONCE(memd_parsed, false);
+        WRITE_ONCE(memd_unavailable, false);
         memset(memd_addrs, 0, sizeof(memd_addrs));
         spin_unlock_irqrestore(&memd_klock, flags);
     }
@@ -226,11 +252,13 @@ static void memd_publish(unsigned long *tmp)
         nonzero += tmp[i] ? 1 : 0;
     spin_lock_irqsave(&memd_klock, flags);
     memcpy(memd_addrs, tmp, sizeof(memd_addrs));
-    memd_parsed = true;
+    /* WRITE_ONCE (see bootstrap re-arm): lock-free READ_ONCE fast path
+     * outside this lock must pair with a marked store. */
+    WRITE_ONCE(memd_parsed, true);
     /* kptr_restrict renders every address 0: detect and mark so callers
      * fail soft once instead of per-call. A zero table with successful
      * reads means hidden, not absent. */
-    memd_unavailable = (nonzero == 0);
+    WRITE_ONCE(memd_unavailable, (nonzero == 0));
     spin_unlock_irqrestore(&memd_klock, flags);
 }
 

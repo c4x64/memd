@@ -252,18 +252,30 @@ int do_pte_mapping(struct socket* sock, void* arg) {
 
     struct mm_struct* mm;
     uid_t hide_uid;
+    int have_uid;
     /* Foreign task layout skews across OEMs (proven, see
      * do_get_process_info): never dereference task->cred directly.
-     * Learned offset + extable-guarded read; unknown -> 0. Snapshot
+     * Learned offset + extable-guarded read; unknown -> have_uid = 0
+     * (hide refused below, never aliased to uid 0). Snapshot
      * before put_task_struct: task may be freed after the put. */
     hide_uid = 0;
+    have_uid = 0;
     {
         unsigned long cred_addr;
         unsigned int uid_val;
         if (memd_learned.t_cred >= 0 &&
             !memd_safe_read64((char *)task + memd_learned.t_cred, &cred_addr) && cred_addr &&
-            !memd_safe_read32((const void *)(cred_addr + 4), &uid_val))
+            !memd_safe_read32((const void *)(cred_addr + 4), &uid_val)) {
             hide_uid = (uid_t)uid_val;
+            have_uid = 1;
+        }
+    }
+    /* Unknown uid must not alias uid 0 (root): fail the hide fast
+     * before any PTE is installed. Mapping without hide stays allowed. */
+    if (cmd.hide && !have_uid) {
+        put_task_struct(task);
+        memd_warn("unknown uid for pid %d, refusing hide\n", cmd.pid);
+        return -EINVAL;
     }
     mm = get_task_mm(task);
     put_task_struct(task);

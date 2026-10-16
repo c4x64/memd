@@ -237,6 +237,6 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, KeyError, http.client.HTTPException) as error:
+    except (OSError, ValueError, http.client.HTTPException) as error:
         print("KernelCI mirror fetch failed: %s" % error, file=sys.stderr)
         sys.exit(1)

@@ -211,21 +211,34 @@ int memd_input_dev_ok(struct input_dev *dev)
 }
 
 /* Logging without the _printk import: vprintk resolved once through
- * the table, messages silently dropped before the bootstrap lands. */
+ * the table. Pre-bootstrap drops are counted, and the first call that
+ * resolves vprintk reports the loss once — a loud early failure must
+ * not vanish silently when userspace needs it after bootstrap. */
 int memd_printk(const char *fmt, ...)
  {
     static int (*fn)(const char *, va_list) = NULL;
+    static int dropped = 0;
     int (*tmp)(const char *, va_list);
     va_list ap;
     int r;
+    int d;
     if (!fmt)
         return 0;
     tmp = READ_ONCE(fn);
     if (!tmp) {
         tmp = (void *)kallsyms_lookup_name_ex("vprintk");
-        if (!tmp)
+        if (!tmp) {
+            d = READ_ONCE(dropped);
+            WRITE_ONCE(dropped, d + 1);
             return 0;
+        }
         WRITE_ONCE(fn, tmp);
+        d = READ_ONCE(dropped);
+        if (d > 0) {
+            WRITE_ONCE(dropped, 0);
+            tmp(KERN_WARNING MEMD_LOG_PREFIX
+                "early messages dropped before bootstrap: %d\n", d);
+        }
     }
     va_start(ap, fmt);
     r = tmp(fmt, ap);
@@ -1143,11 +1156,11 @@ int is_pid_alive(pid_t pid) {
 
 /* Single find_process_by_name: get_cmdline via runtime kallsyms
  * (6.1+ kernels), transparent fallback to get_cmdline_ex below.
- * Two phases: snapshot pids under RCU using plain pointer reads only,
- * then run get_cmdline/access_process_vm (both may sleep) on pinned
- * tasks with no locks held. Sleeping inside rcu_read_lock() would
- * stall grace periods and trip lockdep; the old single-pass loop did
- * exactly that. */
+ * Two phases: snapshot pinned tasks under RCU using plain pointer
+ * reads only, then run get_cmdline/access_process_vm (both may sleep)
+ * on pinned tasks with no locks held. Sleeping inside rcu_read_lock()
+ * would stall grace periods and trip lockdep; the old single-pass loop
+ * did exactly that. */
 int get_cmdline_ex(struct task_struct *task, char *buffer, int buflen);
 pid_t find_process_by_name(const char* name) {
     struct task_struct* task;
@@ -1160,8 +1173,9 @@ pid_t find_process_by_name(const char* name) {
     int ret;
     int ntask;
     int i;
+    int j;
     pid_t _p;
-    pid_t *pids;
+    struct task_struct **tasks;
     int (*get_cmd)(struct task_struct*, char*, int);
     static int (*my_get_cmdline)(struct task_struct* task, char* buffer, int buflen) = NULL;
 
@@ -1187,7 +1201,14 @@ pid_t find_process_by_name(const char* name) {
         }
     }
 
-    /* Phase 1: snapshot candidate pids (no sleeping calls under RCU). */
+    /* Phase 1: snapshot pinned tasks under RCU using plain pointer
+     * reads only, then run get_cmdline/access_process_vm (both may
+     * sleep) on pinned tasks with no locks held. Sleeping inside
+     * rcu_read_lock() would stall grace periods and trip lockdep; the
+     * old single-pass loop did exactly that. Tasks (not pids) are
+     * pinned so a pid recycled between snapshot and lookup can never
+     * substitute a different task: order and identity match the old
+     * loop exactly. */
     ntask = 0;
     rcu_read_lock();
     for_each_process(task) {
@@ -1200,8 +1221,8 @@ pid_t find_process_by_name(const char* name) {
     if (ntask <= 0) {
         return 0;
     }
-    pids = kmalloc((size_t)ntask * sizeof(pid_t), GFP_KERNEL);
-    if (!pids) {
+    tasks = kmalloc((size_t)ntask * sizeof(*tasks), GFP_KERNEL);
+    if (!tasks) {
         return 0;
     }
     rcu_read_lock();
@@ -1211,7 +1232,7 @@ pid_t find_process_by_name(const char* name) {
             continue;
         }
         if (i < ntask) {
-            pids[i] = memd_t_pid(task);
+            tasks[i] = get_task_struct(task);
             i++;
         }
     }
@@ -1223,10 +1244,7 @@ pid_t find_process_by_name(const char* name) {
      * task->comm fallback only when the cmdline read fails. Exited
      * tasks simply resolve to NULL and are skipped. */
     for (i = 0; i < ntask; i++) {
-        task = get_target_task(pids[i]);
-        if (!task) {
-            continue;
-        }
+        task = tasks[i];
         cmdline[0] = '\0';
         ret = get_cmd(task, cmdline, sizeof(cmdline));
         if (ret < 0) {
@@ -1235,7 +1253,9 @@ pid_t find_process_by_name(const char* name) {
             if (strlen(tcomm) == name_len && strncmp(tcomm, name, name_len) == 0) {
                 _p = memd_t_pid(task);
                 put_task_struct(task);
-                kfree(pids);
+                for (j = i + 1; j < ntask; j++)
+                    put_task_struct(tasks[j]);
+                kfree(tasks);
                 return _p;
             }
         } else {
@@ -1255,13 +1275,15 @@ pid_t find_process_by_name(const char* name) {
             if (strlen(prog_name) == name_len && strncmp(prog_name, name, name_len) == 0) {
                 _p = memd_t_pid(task);
                 put_task_struct(task);
-                kfree(pids);
+                for (j = i + 1; j < ntask; j++)
+                    put_task_struct(tasks[j]);
+                kfree(tasks);
                 return _p;
             }
         }
         put_task_struct(task);
     }
-    kfree(pids);
+    kfree(tasks);
     return 0;
 }
 

@@ -137,13 +137,14 @@ int memd_copy_to_task_full(struct task_struct *t, unsigned long dst_user,
 
 int memd_strncpy_from_user(char *dst, const void *src, size_t max_len)
  {
+    size_t copied = 0;
+
     if (!dst || !src || max_len == 0)
         return -EINVAL;
     /* Return type is int: clamp so (int)copied below cannot truncate. */
     if (max_len > 2147483647UL)
         max_len = 2147483647UL;
 
-    size_t copied = 0;
     while (copied < max_len - 1) {
         char c;
         unsigned long remaining = memd_copy_from_user(&c, (char *)src + copied, 1);

@@ -52,6 +52,10 @@ LOADSO_EPHEMERAL = 1
 MAX_PROP_BYTES = 65536
 MAX_SO_BYTES = 64 * 1024 * 1024
 MAX_ZIP_ENTRIES = 4096
+# Survivor-chain cap: every failed unload appends one entry, so an
+# install that would push past this refuses instead of growing the
+# state file (and the resident set) without bound.
+MAX_PREV_HANDLES = 64
 MAX_PID = (1 << 31) - 1  # struct "<i" range; real pids are far smaller
 MAX_HANDLE = (1 << 64) - 1  # struct "<Q" range
 
@@ -288,12 +292,36 @@ def read_state(root, module_id, pid):
 def write_state(root, module_id, pid, record):
     """Atomically replace the state file: a crash mid-write must leave
     either the old record or the new one, never truncated JSON (which
-    read_state would treat as 'no install' and leak live handles)."""
+    read_state would treat as 'no install' and leak live handles).
+
+    fsyncs the tmp file and its directory so the rename is durable, not
+    just atomic: without that, a power loss could roll back to the old
+    record and orphan the just-loaded handle. Same-dir os.replace is
+    atomic on every kernel filesystem backing the state dir (tmpfs,
+    ext4/f2fs); no copy fallback, which could only weaken the guarantee.
+    Also refuses an over-cap chain as a backstop (cmd_install checks
+    first, before loading anything)."""
+    pending = record.get("prev_handles")
+    if isinstance(pending, list) and len(pending) > MAX_PREV_HANDLES:
+        raise ValueError("prev_handles chain exceeds %d entries"
+                         % MAX_PREV_HANDLES)
     path = state_path(root, module_id, pid)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as stream:
         json.dump(record, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
     os.replace(tmp, path)
+    try:
+        dir_fd = os.open(os.path.dirname(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
 
 
 def pending_handles(state):
@@ -317,6 +345,16 @@ def cmd_install(args):
     print("staged %s -> %s (v%s)" % (args.zip, staged, version))
     if lock_down(staged):
         print("warning: lock_down failed (need root?)")
+    # Fail closed before touching the driver: a full survivor chain means
+    # unloads keep failing, so refuse another load rather than pile a new
+    # resident handle on top. Checked here (not after the load) so a
+    # refusal never strands a live-but-unrecorded handle in the target.
+    already = read_state(args.root, module_id, args.pid)
+    if len(pending_handles(already)) >= MAX_PREV_HANDLES:
+        raise ValueError("too many un-unloaded handles (%d); "
+                         "uninstall --id %s --pid %d first"
+                         % (len(pending_handles(already)), module_id,
+                            args.pid))
     sock = find_driver_family()
     try:
         result, handle, entry_result = ioctl_load(
@@ -332,7 +370,7 @@ def cmd_install(args):
     # after this point still has every resident handle on record; the
     # next hotswap/uninstall drains them.
     record = {"id": module_id, "version": version, "handle": handle}
-    displaced = read_state(args.root, module_id, args.pid)
+    displaced = already
     pend = []
     old = displaced.get("handle", 0)
     if (

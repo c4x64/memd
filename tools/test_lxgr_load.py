@@ -327,6 +327,49 @@ class HotswapStateTests(unittest.TestCase):
         self.assertEqual(state["handle"], 0xBBB)
         self.assertNotIn("prev_handles", state)
 
+    def test_write_state_rejects_oversize_chain(self):
+        self._seed({"handle": 0})
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            lxgr_load.write_state(
+                self.root, "lxgr.demo", 99,
+                {"handle": 1,
+                 "prev_handles": list(range(1, lxgr_load.MAX_PREV_HANDLES + 2))})
+        # At-cap record still writes (boundary is inclusive).
+        lxgr_load.write_state(
+            self.root, "lxgr.demo", 99,
+            {"handle": 1,
+             "prev_handles": list(range(1, lxgr_load.MAX_PREV_HANDLES + 1))})
+        self.assertEqual(
+            len(lxgr_load.read_state(self.root, "lxgr.demo", 99)["prev_handles"]),
+            lxgr_load.MAX_PREV_HANDLES)
+
+    def test_install_refuses_full_chain_before_loading(self):
+        import unittest.mock as mock
+
+        full = list(range(0x200, 0x200 + lxgr_load.MAX_PREV_HANDLES))
+        self._seed({"id": "lxgr.demo", "version": "2", "handle": 0x111,
+                    "prev_handles": full})
+        with mock.patch.object(lxgr_load, "ioctl_load") as load, \
+             mock.patch.object(lxgr_load, "find_driver_family"):
+            with self.assertRaisesRegex(ValueError, "uninstall"):
+                lxgr_load.cmd_install(self._args())
+            load.assert_not_called()  # no stranded live handle
+        state = lxgr_load.read_state(self.root, "lxgr.demo", 99)
+        self.assertEqual(state["handle"], 0x111)
+        self.assertEqual(state["prev_handles"], full)
+
+    def test_install_at_cap_minus_one_succeeds(self):
+        import unittest.mock as mock
+
+        almost = list(range(0x200, 0x200 + lxgr_load.MAX_PREV_HANDLES - 1))
+        self._seed({"id": "lxgr.demo", "version": "2", "handle": 0x111,
+                    "prev_handles": almost})
+        with mock.patch.object(lxgr_load, "ioctl_load", return_value=(0, 0xAAA, 0)), \
+             mock.patch.object(lxgr_load, "find_driver_family"):
+            self.assertEqual(lxgr_load.cmd_install(self._args()), 0)
+        state = lxgr_load.read_state(self.root, "lxgr.demo", 99)
+        self.assertEqual(len(state["prev_handles"]), lxgr_load.MAX_PREV_HANDLES)
+
     def test_hotswap_rejects_oversize_prop(self):
         big = os.path.join(self.tmp.name, "big.zip")
         with zipfile.ZipFile(big, "w") as archive:

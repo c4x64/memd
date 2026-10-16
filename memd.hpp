@@ -376,7 +376,11 @@ class IModule {
 
 using ModuleFactory = IModule *(*)();
 
-static inline ModuleFactory &factory_slot() {
+// External linkage (plain inline, NOT static): the function-local static
+// is then one process-wide registry, so REGISTER_* in one TU and the
+// entry bootstrap in another still meet. A static (per-TU) copy would
+// strand registrations whenever a payload spans translation units.
+inline ModuleFactory &factory_slot() {
     static ModuleFactory factory = nullptr;
     return factory;
 }
@@ -504,7 +508,9 @@ struct PltHookState {
     std::vector<PltRule> rules;
 };
 
-static inline PltHookState &plt_state() {
+// Shared across TUs like factory_slot above: rules registered from one
+// TU must be visible to a pltHookCommit issued from another.
+inline PltHookState &plt_state() {
     static PltHookState state;
     return state;
 }
@@ -854,9 +860,9 @@ static inline int boot_module(uintptr_t /*dlopen_handle*/) {
 #define REGISTER_ZYGISK_MODULE(cls) REGISTER_MEMD_MODULE(cls)
 
 // Our injector calls this symbol with the dlopen handle in x0.
-// Single-TU only: one definition per module (inline keeps multi-TU
-// payloads linking; REGISTER_* must still appear exactly once, in the
-// same TU as the factory it registers).
+// One definition per module: inline (weak) linkage keeps multi-TU
+// payloads linking, and REGISTER_* must appear exactly once in any
+// single TU (the factory_slot registry above is shared across TUs).
 extern "C" inline int lxgr_main(uintptr_t dlopen_handle) {
     return zygisk::detail::boot_module(dlopen_handle);
 }

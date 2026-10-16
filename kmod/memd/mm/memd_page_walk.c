@@ -631,12 +631,26 @@ int memd_walk_page_range(struct mm_struct *mm, unsigned long start, unsigned lon
          .data = data,
          .flags = PAGE_WALK_REGIONS,
      };
+     unsigned long aligned_start;
+     unsigned long aligned_end;
 
      if (!mm || !callback || start >= end)
          return -EINVAL;
 
+     /* Align the range out to page boundaries: walk_pte_level_ctx
+      * derives the PTE index from addr >> PAGE_SHIFT but reports addr
+      * verbatim, so an unaligned start would hand the callback an
+      * unaligned addr/end for a whole-page PTE. Fail closed on end
+      * wrap. */
+     aligned_start = start & PAGE_MASK;
+     if (end > ULONG_MAX - (PAGE_SIZE - 1))
+         return -EINVAL;
+     aligned_end = (end + (PAGE_SIZE - 1)) & PAGE_MASK;
+     if (aligned_end <= aligned_start)
+         return -EINVAL;
+
      /* Honor the caller's range (the old code ignored start/end and
       * always walked the whole address space). */
-     return walk_pgd_level_ctx(mm, start, end, &ctx);
+     return walk_pgd_level_ctx(mm, aligned_start, aligned_end, &ctx);
  }
 /* kmod/memd/mm/memd_page_walk.c[∂] */

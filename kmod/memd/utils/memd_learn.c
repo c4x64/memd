@@ -212,19 +212,30 @@ static void memd_learn_pgd(void)
     }
     ttbr = read_sysreg(ttbr0_el1);
     /* TTBR0 match (non-KPTI fast path): strip ASID, keep phys page.
+     * mm->pgd is a linear-map VA, so translate it before comparing
+     * to the TTBR phys (a raw VA == phys compare never matches).
      * Even on a value match, shape-check before trusting the compiled
      * mm->pgd field (garbage on foreign layouts could alias want). */
     want = ttbr & 0x0000fffffffff000ULL;
-    if ((u64)(uintptr_t)mm->pgd == want) {
-        u64 pa = (u64)(uintptr_t)virt_to_phys((void *)(uintptr_t)mm->pgd);
-        if (memd_pgd_shape_ok(pa)) {
-            memd_learned.m_pgd = (int)((char *)&mm->pgd - (char *)mm);
-            memd_info("learn: mm pgd compiled+%d confirmed\n",
-                      memd_learned.m_pgd);
-            mmput(mm);
-            return;
+    {
+        u64 pgd_va = (u64)(uintptr_t)mm->pgd;
+        u64 pa = 0;
+        int pa_match = 0;
+        if ((pgd_va & 0xffff000000000000UL) == 0xffff000000000000UL &&
+            virt_addr_valid((void *)(uintptr_t)pgd_va)) {
+            pa = (u64)(uintptr_t)virt_to_phys((void *)(uintptr_t)pgd_va);
+            pa_match = (pa == want);
         }
-        memd_err("learn: mm pgd compiled match failed shape, scanning\n");
+        if (pa_match) {
+            if (memd_pgd_shape_ok(pa)) {
+                memd_learned.m_pgd = (int)((char *)&mm->pgd - (char *)mm);
+                memd_info("learn: mm pgd compiled+%d confirmed\n",
+                          memd_learned.m_pgd);
+                mmput(mm);
+                return;
+            }
+            memd_err("learn: mm pgd compiled match failed shape, scanning\n");
+        }
     }
     /* Shape scan (KPTI-proof): TTBR0 (user tables) need not equal
      * mm->pgd, so find the pgd by table shape instead of value.

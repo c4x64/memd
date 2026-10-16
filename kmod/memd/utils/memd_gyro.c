@@ -351,11 +351,18 @@ int memd_gyro_prepare_target(struct task_struct *task, struct memd_gyro_prepare_
             memd_info("gyro: created virtual input device\n");
         }
 
-        memd_gyro_release_locked();
-        gyro_input_dev = dev;
-        gyro_is_virtual = is_virtual;
+        if (dev == gyro_input_dev) {
+            /* Re-targeting the current slot itself (borrowed get ref
+             * aliasing it): release would drop/free the device we are
+             * about to install. Put the fresh ref, keep the slot. */
+            input_put_device(dev);
+        } else {
+            memd_gyro_release_locked();
+            gyro_input_dev = dev;
+            gyro_is_virtual = is_virtual;
+        }
         gyro_initialized = true;
-        memd_info("gyro: prepared target device %s\n", dev->name);
+        memd_info("gyro: prepared target device %s\n", gyro_input_dev->name);
     } else {
         memd_gyro_release_locked();
         memset(&gyro_cal, 0, sizeof(gyro_cal));
@@ -431,15 +438,21 @@ int memd_touch_init(struct task_struct *task, struct memd_touch_init_cmd *cmd)
             return -ENOTSUPP;
         }
 
-        memd_touch_release_locked();
-        touch_input_dev = dev;
-        touch_is_virtual = is_virtual;
+        if (dev == touch_input_dev) {
+            /* Same-device re-init (see gyro path): drop the fresh get
+             * ref, keep the slot, refresh only soft state below. */
+            input_put_device(dev);
+        } else {
+            memd_touch_release_locked();
+            touch_input_dev = dev;
+            touch_is_virtual = is_virtual;
+        }
         touch_initialized = true;
         touch_slot_count = 0;
         memset(last_touch_x, 0, sizeof(last_touch_x));
         memset(last_touch_y, 0, sizeof(last_touch_y));
         memset(last_touch_time, 0, sizeof(last_touch_time));
-        memd_info("touch: initialized device %s\n", dev->name);
+        memd_info("touch: initialized device %s\n", touch_input_dev->name);
     } else {
         memd_touch_release_locked();
         memset(&touch_cal, 0, sizeof(touch_cal));

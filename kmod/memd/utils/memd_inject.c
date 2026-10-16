@@ -751,6 +751,11 @@ static int remote_call(struct task_struct *task, struct mm_struct *mm,
             continue;
         if (done != 1)
             continue;
+        /* Pair with the stub's DMB ISH (message passing): order the
+         * done load before the out load so a 1 cannot pair with a
+         * stale retval word. Control dependency alone does not order
+         * ARM loads; ISHLD does. No include needed (inline asm). */
+        __asm__ __volatile__("dmb ishld" ::: "memory");
         if (memd_task_copy_ok(task, 0, flag_va + 8, &out, 8))
             break;
         *retval = (uintptr_t)out;
