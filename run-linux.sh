@@ -28,7 +28,20 @@ fi
 
 echo "kernel: $(uname -r)"
 echo "loading $KO"
-insmod "$KO" || { echo "insmod failed"; exit 1; }
+if ! insmod "$KO"; then
+    echo "Prebuilt module failed to load; attempting on-device build."
+    echo "DO NOT touch or shut down this device while building."
+    _here=$(cd "$(dirname "$0")" && pwd)
+    if [ -x "$_here/build-on-device.sh" ]; then
+        "$_here/build-on-device.sh" || { echo "On-device build failed"; exit 1; }
+        KO="$_here/kmod/rwbridge.ko"
+        [ -f "$KO" ] || { echo "Built module not found"; exit 1; }
+        insmod "$KO" || { echo "insmod failed after on-device build"; exit 1; }
+    else
+        echo "No on-device build helper available"
+        exit 1
+    fi
+fi
 
 if grep -q "^${MODNAME} " /proc/modules 2>/dev/null; then
     echo "rwbridge loaded successfully"
