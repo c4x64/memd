@@ -47,19 +47,19 @@ jobs:
       - name: Run 2-TU gate (direct exit-code contract)
         run: python3 linux/arm/tools/two_tu_gate.py
 
-      - name: Verify linux/arm/client.h matches kernel headers
+      - name: Verify linux/arm/linux/arm/client.h matches kernel headers
         run: python3 .github/scripts/check_client_h.py
 
-      - name: Compile-check linux/arm/client.h (C89 + C++)
+      - name: Compile-check linux/arm/linux/arm/client.h (C89 + C++)
         run: |
-          printf '#include "linux/arm/client.h"\nint main(void){return 0;}\n' > /tmp/client_t.c
+          printf '#include "linux/arm/linux/arm/client.h"\nint main(void){return 0;}\n' > /tmp/client_t.c
           cp /tmp/client_t.c /tmp/client_t.cpp
           gcc -fsyntax-only -Wall -Werror -std=gnu89 -I. /tmp/client_t.c
           g++ -fsyntax-only -Wall -Werror -I. /tmp/client_t.cpp
 
-      - name: Compile-check linux/arm/memd.hpp (C++17)
+      - name: Compile-check linux/arm/linux/arm/memd.hpp (C++17)
         run: |
-          printf '#include "linux/arm/memd.hpp"\nint main(void){return 0;}\n' > /tmp/memd_hpp_t.cpp
+          printf '#include "linux/arm/linux/arm/memd.hpp"\nint main(void){return 0;}\n' > /tmp/memd_hpp_t.cpp
           g++ -fsyntax-only -Wall -Werror -std=c++17 -I. /tmp/memd_hpp_t.cpp
 
   kcidb-readiness:
@@ -293,7 +293,7 @@ jobs:
             echo "{\"index\":$i,\"target_key\":\"$TK\",\"status\":\"$ST\"}" >> batch-results/worker-${{ matrix.worker }}.jsonl
             cp "$WS.log" "batch-results/$i.log" 2>/dev/null || true
             cp "$WS/result.json" "batch-results/$i.result.json" 2>/dev/null || true
-            cp linux/arm/kmod/rwbridge.ko "batch-results/$i.ko" 2>/dev/null || true
+            cp linux/arm/linux/arm/kmod/rwbridge.ko "batch-results/$i.ko" 2>/dev/null || true
             rm -rf "$WS"
             i=$((i + 8))
           done
@@ -571,7 +571,7 @@ jobs:
           # them instead of importing the whole symvers via KBUILD_EXTRA_SYMBOLS).
           if [ -f "$KDIR_RESOLVED/Module.symvers" ]; then
             mkdir -p linux/arm/kmod
-            cp -f "$KDIR_RESOLVED/Module.symvers" linux/arm/kmod/Module.symvers
+            cp -f "$KDIR_RESOLVED/Module.symvers" linux/arm/linux/arm/kmod/Module.symvers
           fi
           
           cd linux/arm/kmod
@@ -628,8 +628,8 @@ jobs:
         with:
           name: _build-${{ matrix.kmi }}
           path: |
-            linux/arm/kmod/rwbridge-${{ matrix.kmi }}.ko
-            linux/arm/run.sh
+            linux/arm/linux/arm/kmod/rwbridge-${{ matrix.kmi }}.ko
+            linux/arm/linux/arm/run.sh
 
   build-linux-generic:
     name: Build generic Linux (informational)
@@ -686,8 +686,8 @@ jobs:
 
       - name: Build finit-force helper + spx_decompress
         run: |
-          aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o finit-force linux/arm/kmod/finit-force.c
-          aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o spx_decompress linux/arm/kmod/spx_decompress.c
+          aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o finit-force linux/arm/linux/arm/kmod/finit-force.c
+          aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o spx_decompress linux/arm/linux/arm/kmod/spx_decompress.c
           file finit-force
           file spx_decompress
           cp finit-force dl/linux/arm/kmod/finit-force
@@ -706,12 +706,12 @@ jobs:
           
           python3 .github/scripts/gen_blobs.py \
             $KO_LIST \
-            linux/arm/run.sh blobs.c
+            linux/arm/linux/arm/run.sh blobs.c
           
           # Link the SPX packed loader against the generated blobs
-          # (see linux/arm/kmod/spx.c header for the documented command)
+          # (see linux/arm/linux/arm/kmod/spx.c header for the documented command)
           aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o rwbridge-spx \
-            linux/arm/kmod/spx.c blobs.c
+            linux/arm/linux/arm/kmod/spx.c blobs.c
           file rwbridge-spx
           
           # Compress final SPX binary with LZ4 (90%+ compression)
@@ -737,10 +737,10 @@ jobs:
         with:
           name: shell-bundle
           path: |
-            dl/linux/arm/kmod/rwbridge-*.ko
+            dl/linux/arm/linux/arm/kmod/rwbridge-*.ko
             dl/linux/arm/kmod/finit-force
             dl/linux/arm/kmod/spx_decompress
-            linux/arm/run.sh
+            linux/arm/linux/arm/run.sh
 
       - name: Create Release
         if: github.event_name == 'workflow_dispatch' && inputs.release_channel != ''
@@ -755,7 +755,7 @@ jobs:
             rwbridge-spx
             rwbridge-spx.lz4
             dl/linux/arm/kmod/spx_decompress
-            dl/linux/arm/kmod/rwbridge-*.ko
+            dl/linux/arm/linux/arm/kmod/rwbridge-*.ko
             dl/linux/arm/kmod/finit-force
-            linux/arm/run.sh
+            linux/arm/linux/arm/run.sh
 # .github/workflows/build.yml[∂]
