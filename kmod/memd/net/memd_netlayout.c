@@ -29,8 +29,7 @@ static char memd_cached_release[72];
  * function of its arguments: no kernel state, no allocation. */
 int memd_net_gen_from_version(int major, int minor)
 {
-    if (major == 5 && minor == 4)
-        return MEMD_GEN_54;
+    /* 5.4 stays NO-GO: no DDK image exists to prove table entries. */
     if (major == 5 && minor == 10)
         return MEMD_GEN_510;
     if (major == 5 && minor == 15)
