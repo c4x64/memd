@@ -80,21 +80,25 @@ if grep -q "^${MODNAME} " /proc/modules 2>/dev/null; then
     exit 0
 fi
 
-# 1. Locate the .ko: explicit $1 wins, else the universal image, else
-# side by side, else the per-KMI matrix pick below.
+# 1. Locate the .ko: explicit $1 wins, else cached on-device build,
+# else build on device now (primary method; no prebuilt fallback).
 if [ -n "$1" ] && [ -f "$1" ]; then
     KO="$1"
+elif [ -f "$STAGE_DIR/rwbridge-cached.ko" ]; then
+    KO="$STAGE_DIR/rwbridge-cached.ko"
 else
-    for c in "${SCRIPT_DIR}/rwbridge-universal.ko" "${SCRIPT_DIR}/kmod/rwbridge-universal.ko" "${SCRIPT_DIR}/dl/kmod/rwbridge-universal.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge-universal.ko"; do
-        if [ -f "$c" ]; then KO="$c"; break; fi
-    done
-    if [ -z "$KO" ]; then
-        for c in "${SCRIPT_DIR}/rwbridge.ko" "${SCRIPT_DIR}/kmod/rwbridge.ko" "${SCRIPT_DIR}/dl/kmod/rwbridge.ko" "${SCRIPT_DIR}/kmod_bin/rwbridge.ko"; do
-            if [ -f "$c" ]; then KO="$c"; break; fi
-        done
+    if [ -x "$SCRIPT_DIR/build-on-device.sh" ]; then
+        log "no cached module; building on device"
+        if "$SCRIPT_DIR/build-on-device.sh"; then
+            for c in "$SCRIPT_DIR/kmod/rwbridge.ko" "$SCRIPT_DIR/rwbridge.ko"; do
+                if [ -f "$c" ]; then cp -f "$c" "$STAGE_DIR/rwbridge-cached.ko"; KO="$STAGE_DIR/rwbridge-cached.ko"; break; fi
+            done
+        fi
     fi
 fi
-[ -n "$KO" ] || die "rwbridge-universal.ko not found (pass path as \$1 or place next to run.sh)"
+if [ -z "$KO" ]; then
+    die "no module available (on-device build failed or helper missing)"
+fi
 KVER=$(uname -r 2>/dev/null)
 log "kernel: $KVER"
 # android11-5.4 is documented NO-GO: no DDK image was ever published

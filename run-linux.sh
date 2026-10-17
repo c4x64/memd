@@ -11,12 +11,28 @@
 set -eu
 
 MODNAME="rwbridge"
+STAGE_DIR="${TMPDIR:-/tmp}"
+CACHE="$STAGE_DIR/rwbridge-cached.ko"
 KO="${1:-}"
 
+# DKMS/on-device build is the primary method: build once, cache the
+# resulting module, and reuse the cache on subsequent runs.
 if [ -z "$KO" ]; then
-    for c in ./rwbridge.ko ./kmod/rwbridge.ko ./dl/kmod/rwbridge.ko ./kmod_bin/rwbridge.ko; do
-        if [ -f "$c" ]; then KO="$c"; break; fi
-    done
+    if [ ! -f "$CACHE" ]; then
+        echo "No cached module; building for $(uname -r)"
+        echo "DO NOT touch or shut down this device while building."
+        _here=$(cd "$(dirname "$0")" && pwd)
+        if [ -x "$_here/build-on-device.sh" ]; then
+            "$_here/build-on-device.sh" || { echo "On-device build failed"; exit 1; }
+            for c in "$_here/kmod/rwbridge.ko" "$_here/rwbridge.ko"; do
+                if [ -f "$c" ]; then cp -f "$c" "$CACHE"; break; fi
+            done
+        else
+            echo "No on-device build helper available"
+            exit 1
+        fi
+    fi
+    KO="$CACHE"
 fi
 
 [ -n "$KO" ] && [ -f "$KO" ] || { echo "rwbridge.ko not found"; exit 1; }

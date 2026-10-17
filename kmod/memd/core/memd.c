@@ -157,7 +157,7 @@ static void __exit memd_exit(void) {
 module_init(memd_init);
 module_exit(memd_exit);
 
-MODULE_AUTHOR("Genghis Khan");
+MODULE_AUTHOR("c4x64");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("https://github.com/c4x64/memd");
 MODULE_VERSION("1.0.5");
