@@ -1656,7 +1656,7 @@ unsigned long memd_get_kernel_base(void)
 /* BTF (BPF Type Format) parsing for struct layouts.
  * When CONFIG_DEBUG_INFO_BTF=y, the kernel exposes BTF data that can
  * provide exact struct member offsets without scanning. */
-#if defined(CONFIG_DEBUG_INFO_BTF) || defined(CONFIG_BPF_SYSCALL)
+#if 0 /* BTF helpers are not present in every target KMI System.map; disable direct imports for universality */
 #include <linux/btf.h>
 #include <linux/bpf.h>
 
@@ -1744,74 +1744,10 @@ static void memd_btf_init(void)
 /* Apply BTF-derived offsets to learned structures */
 static void memd_apply_btf_offsets(void)
 {
-    int offsets[16];
-    const char *members[16];
-    int gen = memd_net_gen();
-
-    if (!memd_btf_available)
-        return;
-
-    memd_btf_init();
-    if (!memd_btf_available)
-        return;
-
-    /* task_struct: pid, tgid, comm, mm, cred */
-    members[0] = "pid";
-    members[1] = "tgid";
-    members[2] = "comm";
-    members[3] = "mm";
-    members[4] = "cred";
-    if (memd_btf_find_struct_offsets("task_struct", members, offsets, 5) == 0) {
-        if (offsets[0] >= 0 && memd_learned.t_pid < 0)
-            memd_learned.t_pid = offsets[0];
-        if (offsets[1] >= 0 && memd_learned.t_tgid < 0)
-            memd_learned.t_tgid = offsets[1];
-        if (offsets[2] >= 0 && memd_learned.t_comm < 0)
-            memd_learned.t_comm = offsets[2];
-        if (offsets[3] >= 0 && memd_learned.t_mm < 0)
-            memd_learned.t_mm = offsets[3];
-        if (offsets[4] >= 0 && memd_learned.t_cred < 0)
-            memd_learned.t_cred = offsets[4];
-        memd_info("btf: applied task_struct offsets\n");
-    }
-
-    /* mm_struct: pgd */
-    members[0] = "pgd";
-    if (memd_btf_find_struct_offsets("mm_struct", members, offsets, 1) == 0) {
-        if (offsets[0] >= 0 && memd_learned.m_pgd < 0)
-            memd_learned.m_pgd = offsets[0];
-        memd_info("btf: applied mm_struct pgd offset\n");
-    }
-
-    /* vm_area_struct: vm_start, vm_end, vm_flags */
-    members[0] = "vm_start";
-    members[1] = "vm_end";
-    members[2] = "vm_flags";
-    if (memd_btf_find_struct_offsets("vm_area_struct", members, offsets, 3) == 0) {
-        if (offsets[0] >= 0 && memd_learned.v_start < 0)
-            memd_learned.v_start = offsets[0];
-        if (offsets[1] >= 0 && memd_learned.v_end < 0)
-            memd_learned.v_end = offsets[1];
-        if (offsets[2] >= 0 && memd_learned.v_flags < 0)
-            memd_learned.v_flags = offsets[2];
-        memd_info("btf: applied vm_area_struct offsets\n");
-    }
-
-    /* Extended structs based on generation */
-    if (gen >= 0) {
-        /* cred: cap_effective, uid */
-        members[0] = "cap_effective";
-        members[1] = "uid";
-        if (memd_btf_find_struct_offsets("cred", members, offsets, 2) == 0) {
-            if (offsets[0] >= 0 && memd_learned_ext.t_cred_cap_eff < 0)
-                memd_learned_ext.t_cred_cap_eff = offsets[0];
-            if (offsets[1] >= 0 && memd_learned_ext.t_cred_uid < 0)
-                memd_learned_ext.t_cred_uid = offsets[1];
-            memd_info("btf: applied cred offsets\n");
-        }
-    }
+    /* BTF direct imports are disabled for universal builds; offsets come
+     * from the runtime anchor scanner instead. */
+    return;
 }
-
 
 static void memd_learn_sighand_verify(void)
  {
@@ -2418,7 +2354,7 @@ int memd_btf_get_offset(const char *struct_name, const char *member_name)
     if (!memd_btf_available_now())
         return -ENODEV;
     members[0] = member_name;
-#if defined(CONFIG_DEBUG_INFO_BTF) || defined(CONFIG_BPF_SYSCALL)
+#if 0 /* BTF helpers are not present in every target KMI System.map; disable direct imports for universality */
     if (memd_btf_find_struct_offsets(struct_name, members, offsets, 1) != 0)
         return -ENOENT;
     return offsets[0];
