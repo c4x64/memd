@@ -35,7 +35,7 @@ def main():
         f.write(ko_list)
 
     # Read spx.c template
-    spx_path = os.path.join(os.path.dirname(__file__), "..", "..", "kmod", "spx.c")
+    spx_path = os.path.join(os.path.dirname(__file__), "..", "..", "Branch-main", "kmod", "spx.c")
     spx_src = open(spx_path).read()
 
     # Generate dynamic flavors table

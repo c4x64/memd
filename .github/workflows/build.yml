@@ -54,13 +54,13 @@ jobs:
         run: |
           printf '#include "client.h"\nint main(void){return 0;}\n' > /tmp/client_t.c
           cp /tmp/client_t.c /tmp/client_t.cpp
-          gcc -fsyntax-only -Wall -Werror -std=gnu89 -I. /tmp/client_t.c
-          g++ -fsyntax-only -Wall -Werror -I. /tmp/client_t.cpp
+          gcc -fsyntax-only -Wall -Werror -std=gnu89 -IBranch-main /tmp/client_t.c
+          g++ -fsyntax-only -Wall -Werror -IBranch-main /tmp/client_t.cpp
 
       - name: Compile-check memd.hpp (C++17)
         run: |
           printf '#include "memd.hpp"\nint main(void){return 0;}\n' > /tmp/memd_hpp_t.cpp
-          g++ -fsyntax-only -Wall -Werror -std=c++17 -I. /tmp/memd_hpp_t.cpp
+          g++ -fsyntax-only -Wall -Werror -std=c++17 -IBranch-main /tmp/memd_hpp_t.cpp
 
   kcidb-readiness:
     name: Check KernelCI credentials
