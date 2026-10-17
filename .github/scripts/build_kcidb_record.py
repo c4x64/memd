@@ -263,15 +263,15 @@ def build(record, target_key, cache_root, workspace):
     run(
         [
             *base_make,
-            f"M={os.path.abspath(os.path.join(os.getcwd(), 'Branch-main', 'kmod'))}",
+            f"M={os.path.abspath(os.path.join(os.getcwd(), 'kmod'))}",
             "modules",
         ]
     )
 
-    module = os.path.join(os.getcwd(), "Branch-main", "kmod", "rwbridge.ko")
+    module = os.path.join(os.getcwd(), "kmod", "rwbridge.ko")
     if not os.path.isfile(module):
         raise ValueError(
-            "The kernel build completed without producing Branch-main/kmod/rwbridge.ko."
+            "The kernel build completed without producing kmod/rwbridge.ko."
         )
 
     result = {

@@ -20,18 +20,17 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-CLIENT_ROOT = os.path.join(ROOT, "Branch-main")
 
 KERN_FILES = [
-    "Branch-main/kmod/memd/ioctl/memd_ioctl.h",
-    "Branch-main/kmod/memd/utils/memd_hwbp.h",
-    "Branch-main/kmod/memd/utils/memd_gyro.h",
-    "Branch-main/kmod/memd/utils/memd_sigforce.h",
-    "Branch-main/kmod/memd/utils/memd_inject.h",
-    "Branch-main/kmod/memd/display/memd_display.h",
-    "Branch-main/kmod/memd/mm/memd_bindproc.c",
+    "kmod/memd/ioctl/memd_ioctl.h",
+    "kmod/memd/utils/memd_hwbp.h",
+    "kmod/memd/utils/memd_gyro.h",
+    "kmod/memd/utils/memd_sigforce.h",
+    "kmod/memd/utils/memd_inject.h",
+    "kmod/memd/display/memd_display.h",
+    "kmod/memd/mm/memd_bindproc.c",
 ]
-CLIENT = os.path.join("Branch-main", "client.h")
+CLIENT = "client.h"
 
 # Bindproc structs live under short names in kmod (bp_*) but are exposed
 # to userspace with the memd_ prefix; layouts are identical.
@@ -799,10 +798,10 @@ def main():
                 bodies[body] = name
 
     kconsts = extract_consts("\n".join([
-        read("Branch-main/kmod/memd/utils/memd_utils.h"),
-        read("Branch-main/kmod/memd/display/memd_display.h"),
-        read("Branch-main/kmod/memd/utils/memd_gyro.h"),
-        read("Branch-main/kmod/memd/utils/memd_hwbp.h"),
+        read("kmod/memd/utils/memd_utils.h"),
+        read("kmod/memd/display/memd_display.h"),
+        read("kmod/memd/utils/memd_gyro.h"),
+        read("kmod/memd/utils/memd_hwbp.h"),
     ]), ["WMT_", "MEMD_DISP_", "MEMD_GYRO_", "MEMD_TOUCH_",
           "MEMD_VIRTUAL_INPUT_TYPE_", "MEMD_HWBP_"])
     cconsts = extract_consts(csrc, ["WMT_", "MEMD_DISP_", "MEMD_GYRO_",

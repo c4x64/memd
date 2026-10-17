@@ -21,5 +21,5 @@ jobs:
           for p in app core native BLOCKERS.md UPSTREAM.md INTEGRATION.md tests agents.md AGENTS.md; do
             if [ -e "$p" ]; then echo "GUARD FAIL: '$p' must not exist on main (folder-root leak)"; fail=1; fi
           done
-          [ -d Branch-main/kmod ] || { echo "GUARD FAIL: 'Branch-main/kmod/' missing on main"; fail=1; }
+          [ -d kmod ] || { echo "GUARD FAIL: 'kmod/' missing on main"; fail=1; }
           exit $fail
