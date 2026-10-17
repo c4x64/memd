@@ -1,5 +1,5 @@
-#ifndef ANDROID_MEMD_MEMD_PROC_H
-#define ANDROID_MEMD_MEMD_PROC_H
+#ifndef MEMD_MEMD_PROC_H
+#define MEMD_MEMD_PROC_H
 
 #include <linux/mm.h>
 #include <linux/mm_types.h>
@@ -16,5 +16,5 @@ bool memd_hide_check_visibility(pid_t pid, struct pid_namespace *ns);
 int memd_hide_get_hidden_pids(pid_t *buf, size_t buf_size, size_t *count);
 int memd_hide_get_ns_hidden_pids(pid_t *buf, size_t buf_size, size_t *count, struct pid_namespace *ns);
 
-#endif // ANDROID_MEMD_MEMD_PROC_H
+#endif // MEMD_MEMD_PROC_H
 /* kmod/memd/proc/memd_proc.h[∂] */

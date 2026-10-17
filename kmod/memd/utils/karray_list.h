@@ -1,5 +1,5 @@
-#ifndef ANDROID_MEMD_KARRAY_LIST_H
-#define ANDROID_MEMD_KARRAY_LIST_H
+#ifndef MEMD_KARRAY_LIST_H
+#define MEMD_KARRAY_LIST_H
 
 #include <linux/mm.h>
 #include <linux/mm_types.h>
@@ -70,5 +70,5 @@ size_t arraylist_capacity(struct karray_list* list);
 /* Thread safety control */
 void arraylist_set_thread_safe(struct karray_list* list, bool enable);
 
-#endif // ANDROID_MEMD_KARRAY_LIST_H
+#endif // MEMD_KARRAY_LIST_H
 /* kmod/memd/utils/karray_list.h[∂] */

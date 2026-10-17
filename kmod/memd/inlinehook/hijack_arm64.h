@@ -1,5 +1,5 @@
-#ifndef ANDROID_MEMD_HIJACK_ARM64_H
-#define ANDROID_MEMD_HIJACK_ARM64_H
+#ifndef MEMD_HIJACK_ARM64_H
+#define MEMD_HIJACK_ARM64_H
 
 #include <linux/compiler.h>
 #include <linux/types.h>
@@ -61,5 +61,5 @@ void memd_destroy_trampoline(struct memd_trampoline *tramp);
 int memd_install_inline_hook(void *target, void *handler, void **orig);
 void memd_remove_inline_hook(void *target, void *orig);
 
-#endif // ANDROID_MEMD_HIJACK_ARM64_H
+#endif // MEMD_HIJACK_ARM64_H
 /* kmod/memd/inlinehook/hijack_arm64.h[∂] */
