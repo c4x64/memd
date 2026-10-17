@@ -20,6 +20,14 @@
 # Requires root. Nothing persists (no boot scripts); worst case is one reboot.
 # Layout: this script + rwbridge.ko side by side (CI artifact, /data/local/tmp).
 
+# Delegate to the generic Linux loader when not running on Android.
+if [ ! -x /system/bin/getprop ]; then
+    _here=$(cd "$(dirname "$0")" && pwd)
+    if [ -x "$_here/run-linux.sh" ]; then
+        exec "$_here/run-linux.sh" "$@"
+    fi
+fi
+
 MODNAME="rwbridge"
 KO=""
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
