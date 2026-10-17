@@ -7,7 +7,7 @@ for job in matrix['include']:
     kmi = job['kmi']
     if kmi == 'universal-test':
         continue  # test-only artifact, never shipped
-    kos.append(f'dl/kmod/rwbridge-{kmi}.ko')
+    kos.append(f'dl/linux/arm/kmod/rwbridge-{kmi}.ko')
 kos.sort()
 with open('/tmp/ko_list.txt', 'w') as f:
     f.write(' '.join(kos))

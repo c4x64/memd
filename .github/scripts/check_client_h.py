@@ -22,15 +22,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 
 KERN_FILES = [
-    "kmod/memd/ioctl/memd_ioctl.h",
-    "kmod/memd/utils/memd_hwbp.h",
-    "kmod/memd/utils/memd_gyro.h",
-    "kmod/memd/utils/memd_sigforce.h",
-    "kmod/memd/utils/memd_inject.h",
-    "kmod/memd/display/memd_display.h",
-    "kmod/memd/mm/memd_bindproc.c",
+    "linux/arm/kmod/memd/ioctl/memd_ioctl.h",
+    "linux/arm/kmod/memd/utils/memd_hwbp.h",
+    "linux/arm/kmod/memd/utils/memd_gyro.h",
+    "linux/arm/kmod/memd/utils/memd_sigforce.h",
+    "linux/arm/kmod/memd/utils/memd_inject.h",
+    "linux/arm/kmod/memd/display/memd_display.h",
+    "linux/arm/kmod/memd/mm/memd_bindproc.c",
 ]
-CLIENT = "client.h"
+CLIENT = os.path.join("linux", "arm", "client.h")
 
 # Bindproc structs live under short names in kmod (bp_*) but are exposed
 # to userspace with the memd_ prefix; layouts are identical.
@@ -798,10 +798,10 @@ def main():
                 bodies[body] = name
 
     kconsts = extract_consts("\n".join([
-        read("kmod/memd/utils/memd_utils.h"),
-        read("kmod/memd/display/memd_display.h"),
-        read("kmod/memd/utils/memd_gyro.h"),
-        read("kmod/memd/utils/memd_hwbp.h"),
+        read("linux/arm/kmod/memd/utils/memd_utils.h"),
+        read("linux/arm/kmod/memd/display/memd_display.h"),
+        read("linux/arm/kmod/memd/utils/memd_gyro.h"),
+        read("linux/arm/kmod/memd/utils/memd_hwbp.h"),
     ]), ["WMT_", "MEMD_DISP_", "MEMD_GYRO_", "MEMD_TOUCH_",
           "MEMD_VIRTUAL_INPUT_TYPE_", "MEMD_HWBP_"])
     cconsts = extract_consts(csrc, ["WMT_", "MEMD_DISP_", "MEMD_GYRO_",

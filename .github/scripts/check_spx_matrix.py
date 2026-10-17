@@ -28,7 +28,7 @@ def expand(shorthand):
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     repo = os.path.dirname(os.path.dirname(here))
-    spx_path = os.path.join(repo, "kmod", "spx.c")
+    spx_path = os.path.join(repo, "linux", "arm", "kmod", "spx.c")
     try:
         src = open(spx_path).read()
     except OSError as e:
