@@ -328,6 +328,36 @@ struct memd_bootstrap_cmd {
 };
 #define MEMD_IOCTL_BOOTSTRAP _IOWR('W', 40, struct memd_bootstrap_cmd)
 
+/* Runtime offset update: userspace pushes learned offsets without rebuild.
+ * Single update: field name (32 bytes) + offset value. */
+struct memd_offset_update_cmd {
+    char field_name[32]; /* Input: field name (e.g., "t_pid", "v_start") */
+    int offset;          /* Input: offset value in bytes */
+    int result;          /* Output: 0 ok, else -errno */
+};
+#define MEMD_IOCTL_OFFSET_UPDATE _IOWR('W', 44, struct memd_offset_update_cmd)
+
+/* Bulk offset update: userspace pushes multiple offsets at once.
+ * Up to 32 name/offset pairs in one ioctl. */
+#define MEMD_MAX_BULK_OFFSETS 32
+struct memd_bulk_offset_update_cmd {
+    __u32 count;                      /* Input: number of entries */
+    struct {
+        char field_name[32];
+        int offset;
+    } entries[MEMD_MAX_BULK_OFFSETS]; /* Input: array of name/offset pairs */
+    int result;                       /* Output: 0 ok, negative = first error, positive = count of failures */
+};
+#define MEMD_IOCTL_BULK_OFFSET_UPDATE _IOWR('W', 45, struct memd_bulk_offset_update_cmd)
+
+/* ASLR/KASLR info query: returns kernel base and slide. */
+struct memd_kaslr_info_cmd {
+    __u64 kernel_base; /* Output: kernel base virtual address */
+    __u64 kaslr_slide; /* Output: KASLR slide (0 if none or unknown) */
+    int result;        /* Output: 0 ok, else -errno */
+};
+#define MEMD_IOCTL_KASLR_INFO _IOWR('W', 46, struct memd_kaslr_info_cmd)
+
 /* IOCTL command for hiding status (hook active, hidden count) */
 struct memd_hide_status_cmd {
     int active; /* Output: 1 if the getdents64 filter is installed */
@@ -402,6 +432,9 @@ int do_loadso_unload(struct socket* sock, void __user* arg);
 int do_memd_version(struct socket* sock, void __user* arg);
 int do_learn_status(struct socket* sock, void __user* arg);
 int do_bootstrap(struct socket* sock, void __user* arg);
+int do_offset_update(struct socket* sock, void __user* arg);
+int do_bulk_offset_update(struct socket* sock, void __user* arg);
+int do_kaslr_info(struct socket* sock, void __user* arg);
 
 typedef int (*ioctl_handler_t)(struct socket* sock, void __user* arg);
 
@@ -458,6 +491,9 @@ static const struct ioctl_cmd_map {
     {.cmd = MEMD_IOCTL_VERSION, .handler = do_memd_version},
     {.cmd = MEMD_IOCTL_LEARN_STATUS, .handler = do_learn_status},
     {.cmd = MEMD_IOCTL_BOOTSTRAP, .handler = do_bootstrap},
+    {.cmd = MEMD_IOCTL_OFFSET_UPDATE, .handler = do_offset_update},
+    {.cmd = MEMD_IOCTL_BULK_OFFSET_UPDATE, .handler = do_bulk_offset_update},
+    {.cmd = MEMD_IOCTL_KASLR_INFO, .handler = do_kaslr_info},
     {.cmd = 0, .handler = NULL} /* Sentinel to mark end of array */
 };
 

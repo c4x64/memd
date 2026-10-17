@@ -31,6 +31,7 @@ fi
 MODNAME="rwbridge"
 KO=""
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+STAGE_DIR="/data/local/tmp"
 TMPKO="/data/local/tmp/rwbridge-run.ko"
 
 log() { echo "[rwbridge] $1"; }
@@ -80,19 +81,60 @@ if grep -q "^${MODNAME} " /proc/modules 2>/dev/null; then
     exit 0
 fi
 
-# 1. Locate the .ko: explicit $1 wins, else cached on-device build,
-# else build on device now (primary method; no prebuilt fallback).
+# 1. Locate the .ko: explicit $1 wins; then prebuilt same-major candidates
+# (primary load path for prebuilts on same-major kernels); then cached
+# on-device build; then build on device now.
+PREBUILT=0
 if [ -n "$1" ] && [ -f "$1" ]; then
     KO="$1"
-elif [ -f "$STAGE_DIR/rwbridge-cached.ko" ]; then
-    KO="$STAGE_DIR/rwbridge-cached.ko"
 else
-    if [ -x "$SCRIPT_DIR/build-on-device.sh" ]; then
-        log "no cached module; building on device"
-        if "$SCRIPT_DIR/build-on-device.sh"; then
-            for c in "$SCRIPT_DIR/kmod/rwbridge.ko" "$SCRIPT_DIR/rwbridge.ko"; do
-                if [ -f "$c" ]; then cp -f "$c" "$STAGE_DIR/rwbridge-cached.ko"; KO="$STAGE_DIR/rwbridge-cached.ko"; break; fi
-            done
+    # primary: prebuilt same-major candidates
+    for cand in "$STAGE_DIR/rwbridge-cached.ko" \
+                "$SCRIPT_DIR/rwbridge-prebuilt.ko" \
+                "$SCRIPT_DIR/rwbridge.ko" \
+                "$SCRIPT_DIR/kmod/rwbridge.ko" \
+                "$SCRIPT_DIR/dl/kmod/rwbridge.ko" \
+                "$SCRIPT_DIR/kmod_bin/rwbridge.ko" \
+                "$SCRIPT_DIR"/*.ko \
+                "$SCRIPT_DIR"/kmod/*.ko; do
+        [ -f "$cand" ] || continue
+        # same-major check
+        cm=$(python3 - "$cand" 2>/dev/null <<'PYEOF'
+import sys
+p=sys.argv[1]
+try:
+    b=open(p,'rb').read()
+except OSError:
+    print(""); sys.exit(0)
+i=b.find(b'vermagic=')
+if i<0:
+    print(""); sys.exit(0)
+j=b.find(b'\x00',i)
+if j<0:
+    print(""); sys.exit(0)
+v=b[i:j].decode('ascii','replace')
+m=v.split('=',1)[1].split()[0] if '=' in v else ''
+parts=m.split('.')
+print(parts[0]+'.'+parts[1] if len(parts)>=2 else m)
+PYEOF
+)
+        if [ -n "$cm" ] && [ "$cm" != "$RUN_MM" ]; then
+            log "prebuilt $cand major $cm != running $RUN_MM; skipping (mismatch kept as-is)"
+            continue
+        fi
+        KO="$cand"; PREBUILT=1; break
+    done
+    if [ -z "$KO" ] && [ -f "$STAGE_DIR/rwbridge-cached.ko" ]; then
+        KO="$STAGE_DIR/rwbridge-cached.ko"
+    fi
+    if [ -z "$KO" ]; then
+        if [ -x "$SCRIPT_DIR/build-on-device.sh" ]; then
+            log "no cached module; building on device"
+            if "$SCRIPT_DIR/build-on-device.sh"; then
+                for c in "$SCRIPT_DIR/kmod/rwbridge.ko" "$SCRIPT_DIR/rwbridge.ko"; do
+                    if [ -f "$c" ]; then cp -f "$c" "$STAGE_DIR/rwbridge-cached.ko"; KO="$STAGE_DIR/rwbridge-cached.ko"; break; fi
+                done
+            fi
         fi
     fi
 fi
@@ -100,6 +142,7 @@ if [ -z "$KO" ]; then
     die "no module available (on-device build failed or helper missing)"
 fi
 KVER=$(uname -r 2>/dev/null)
+RUN_MM=$(echo "$KVER" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
 log "kernel: $KVER"
 # android11-5.4 is documented NO-GO: no DDK image was ever published
 # (matrix excludes it — see generate_matrix.py DDK_IMAGES; SPX selects
@@ -401,6 +444,196 @@ shift_layout() {
     w64le "$1" $(echo "$_sp" | cut -d" " -f3) "$L_EXIT" || return 1
     log "layout: init/exit relocs shifted to +0x$(printf %x "$L_INIT")/+0x$(printf %x "$L_EXIT")"
 }
+# patch_prebuilt_extras KO KVER — CRC (versions) fixup + ASLR slide
+# relocation + symbol import resolution against /proc/kallsyms. In-place.
+patch_prebuilt_extras() {
+    _eko="$1"; _ekver="$2"
+    python3 - "$_eko" "$_ekver" <<'PYEOF'
+import sys, os, struct, glob, re
+
+def fail(msg):
+    print("extras: " + msg, file=sys.stderr); sys.exit(1)
+
+path, kver = sys.argv[1], sys.argv[2]
+try:
+    data = bytearray(open(path, 'rb').read())
+except OSError as e:
+    fail(str(e))
+
+if data[:4] != b'\x7fELF' or data[4] != 2 or data[5] != 1:
+    fail("not ELF64LE")
+e_shoff = struct.unpack_from('<Q', data, 40)[0]
+e_shentsize = struct.unpack_from('<H', data, 58)[0]
+e_shnum = struct.unpack_from('<H', data, 60)[0]
+e_shstrndx = struct.unpack_from('<H', data, 62)[0]
+if e_shentsize != 64 or e_shnum == 0 or e_shnum > 4096:
+    fail("bad shdr")
+
+def shdr(i):
+    return struct.unpack_from('<IIQQQQIIQQ', data, e_shoff + i * e_shentsize)
+
+shstr = shdr(e_shstrndx)
+shstr_off, shstr_sz = shstr[4], shstr[5]
+def secname(i):
+    nm = shdr(i)[0]
+    end = data.find(b'\x00', shstr_off + nm)
+    if end < 0: end = shstr_off + shstr_sz
+    return data[shstr_off + nm:end].decode('ascii', 'replace')
+sec_index = {}
+for i in range(e_shnum):
+    sec_index[secname(i)] = i
+def sec_bytes(name):
+    if name not in sec_index: return None
+    s = shdr(sec_index[name])
+    off, sz = s[4], s[5]
+    if off + sz > len(data): return None
+    return off, sz
+
+# kallsyms
+kallsyms = {}
+try:
+    with open('/proc/kallsyms') as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 3: continue
+            try: addr = int(parts[0], 16)
+            except ValueError: continue
+            if addr == 0: continue
+            if parts[1] in ('T','t','W','w','R','r','D','d','B','b'):
+                if parts[2] not in kallsyms:
+                    kallsyms[parts[2]] = addr
+except OSError:
+    pass
+
+# CRC fixup
+crc_map = {}
+for sp in ["/lib/modules/%s/build/Module.symvers" % kver,
+           "/lib/modules/%s/Module.symvers" % kver,
+           "/data/local/tmp/Module.symvers", "Module.symvers"]:
+    if not os.path.isfile(sp): continue
+    try:
+        with open(sp) as f:
+            for line in f:
+                cols = line.split()
+                if len(cols) < 2: continue
+                try: crc = int(cols[0], 16)
+                except ValueError: continue
+                if cols[1] not in crc_map:
+                    crc_map[cols[1]] = crc
+    except OSError:
+        pass
+for g in glob.glob("/lib/modules/*/build/Module.symvers"):
+    if not os.path.isfile(g): continue
+    try:
+        with open(g) as f:
+            for line in f:
+                cols = line.split()
+                if len(cols) < 2: continue
+                try: crc = int(cols[0], 16)
+                except ValueError: continue
+                if cols[1] not in crc_map:
+                    crc_map[cols[1]] = crc
+    except OSError:
+        pass
+
+MODVER_ENTRY = 64
+MODVER_NAMELEN = 56
+if "__versions" in sec_index and crc_map:
+    res = sec_bytes("__versions")
+    if res is not None:
+        voff, vsz = res
+        nentries = vsz // MODVER_ENTRY
+        fixed = 0
+        for e in range(nentries):
+            base = voff + e * MODVER_ENTRY
+            name_raw = data[base+8:base+8+MODVER_NAMELEN]
+            nul = name_raw.find(b'\x00')
+            if nul < 0: nul = MODVER_NAMELEN
+            name = name_raw[:nul].decode('ascii', 'replace')
+            if name and name in crc_map:
+                struct.pack_into('<Q', data, base, crc_map[name])
+                fixed += 1
+        print("extras: crc fixed %d/%d" % (fixed, nentries), file=sys.stderr)
+
+# ASLR slide
+slide = 0
+if '_text' in kallsyms:
+    slide = kallsyms['_text'] - 0xffffff8008000000
+elif 'stext' in kallsyms:
+    slide = kallsyms['stext'] - 0xffffff8008000000
+
+rela_sections = [nm for nm in sec_index if nm.startswith('.rela')]
+for rname in rela_sections:
+    res = sec_bytes(rname)
+    if res is None: continue
+    roff, rsz = res
+    entsize = shdr(sec_index[rname])[9]
+    if entsize == 0: entsize = 24
+    nrel = rsz // entsize
+    for e in range(nrel):
+        pos = roff + e * entsize
+        r_offset, r_info, r_addend = struct.unpack_from('<QQq', data, pos)
+        rtype = r_info & 0xffffffff
+        symidx = r_info >> 32
+        if rtype in (257, 258) and symidx == 0 and slide != 0:
+            if r_addend >= 0xffffff8000000000:
+                r_addend += slide
+                struct.pack_into('<QQq', data, pos, r_offset, r_info, r_addend)
+
+# symbol import resolution
+symtab_name = '.symtab' if '.symtab' in sec_index else ('.dynsym' if '.dynsym' in sec_index else None)
+strtab_name = None
+if symtab_name:
+    link = shdr(sec_index[symtab_name])[6]
+    strtab_name = secname(link)
+
+resolved = 0
+if symtab_name and strtab_name:
+    soff, ssz = sec_bytes(symtab_name)
+    stroff, strsz = sec_bytes(strtab_name)
+    nsym = ssz // 24
+    def sym_name(idx):
+        if idx >= nsym: return ''
+        st_name = struct.unpack_from('<I', data, soff + idx*24)[0]
+        if st_name == 0: return ''
+        end = data.find(b'\x00', stroff + st_name)
+        if end < 0: end = stroff + strsz
+        return data[stroff+st_name:end].decode('ascii', 'replace')
+    for rname in rela_sections:
+        res = sec_bytes(rname)
+        if res is None: continue
+        roff, rsz = res
+        entsize = shdr(sec_index[rname])[9]
+        if entsize == 0: entsize = 24
+        nrel = rsz // entsize
+        for e in range(nrel):
+            pos = roff + e * entsize
+            r_offset, r_info, r_addend = struct.unpack_from('<QQq', data, pos)
+            symidx = r_info >> 32
+            rtype = r_info & 0xffffffff
+            if symidx == 0: continue
+            name = sym_name(symidx)
+            if not name: continue
+            st_shndx = struct.unpack_from('<H', data, soff + symidx*24 + 6)[0]
+            if st_shndx != 0: continue
+            if name not in kallsyms: continue
+            addr = kallsyms[name]
+            new_info = (0 << 32) | rtype
+            new_addend = r_addend + addr
+            struct.pack_into('<QQq', data, pos, r_offset, new_info, new_addend)
+            resolved += 1
+    print("extras: resolved %d imports" % resolved, file=sys.stderr)
+
+try:
+    open(path, 'wb').write(data)
+except OSError as e:
+    fail(str(e))
+print("extras: done", file=sys.stderr)
+sys.exit(0)
+PYEOF
+    return $?
+}
+
 patch_vermagic() {
     _ko="$1"; _want="$2"
     if command -v python3 >/dev/null 2>&1; then
@@ -478,6 +711,16 @@ log "vermagic patched"
 # (symbol-matched, never hardcoded); no reference -> no-op.
 learn_layout
 shift_layout "$TMPKO" || log "layout: shift skipped (unparseable artifact)"
+# 4c. Prebuilt extras: CRC (versions) fixup + ASLR slide relocation +
+# symbol import resolution against /proc/kallsyms. Only for prebuilt
+# candidates (fresh builds already match the running kernel).
+if [ "$PREBUILT" = "1" ]; then
+    if patch_prebuilt_extras "$TMPKO" "$KVER"; then
+        log "prebuilt extras patched (crc/aslr/symbols)"
+    else
+        log "prebuilt extras patch skipped (best-effort)"
+    fi
+fi
 
 # 5. Module args: none. The driver takes no insmod parameters
 # (all state is runtime-derived or socket-passed).
@@ -679,5 +922,80 @@ else
     jlog "bootstrap" "no python3" "skipped (symbol features fail soft)"
     log "bootstrap skipped: no python3"
 fi
+# ---------------------------------------------------------------------------
+# Additional Android-side robustness helpers
+# ---------------------------------------------------------------------------
+android_verify_socket_proto() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        return 0
+    fi
+    python3 -c "
+import socket
+for fam in range(12, 28):
+    try:
+        s = socket.socket(fam, socket.SOCK_SEQPACKET); s.close(); continue
+    except OSError as e:
+        if e.errno != 126: continue
+    try:
+        s = socket.socket(fam, socket.SOCK_RAW); s.close()
+        print('proto-live fam=%d' % fam); raise SystemExit(0)
+    except OSError:
+        continue
+raise SystemExit(1)
+" 2>/dev/null
+}
+
+android_dump_props() {
+    if [ -x /system/bin/getprop ]; then
+        log "ro.build.version.release=$(/system/bin/getprop ro.build.version.release 2>/dev/null)"
+        log "ro.build.version.sdk=$(/system/bin/getprop ro.build.version.sdk 2>/dev/null)"
+        log "ro.product.model=$(/system/bin/getprop ro.product.model 2>/dev/null)"
+        log "ro.board.platform=$(/system/bin/getprop ro.board.platform 2>/dev/null)"
+    fi
+}
+android_dump_props
+
+android_check_selinux() {
+    if [ -r /sys/fs/selinux/enforce ]; then
+        _e=$(cat /sys/fs/selinux/enforce 2>/dev/null)
+        log "selinux enforce=$_e"
+    else
+        log "selinux: not present"
+    fi
+}
+android_check_selinux
+
+android_cleanup_tmp() {
+    rm -f /data/local/tmp/rwref.ko /data/local/tmp/rwbridge-run.ko.new 2>/dev/null
+    rm -f /tmp/rwbridge-*.ko 2>/dev/null
+}
+android_cleanup_tmp
+
+android_print_kver_components() {
+    _kv="$KVER"
+    _maj=$(echo "$_kv" | cut -d. -f1)
+    _min=$(echo "$_kv" | cut -d. -f2)
+    _pat=$(echo "$_kv" | cut -d. -f3 | cut -d- -f1)
+    log "kver components: major=$_maj minor=$_min patch=$_pat"
+}
+android_print_kver_components
+
+android_list_modules_dir() {
+    for d in /vendor/lib/modules /vendor_dlkm/lib/modules /system/lib/modules /odm_dlkm/lib/modules; do
+        if [ -d "$d" ]; then
+            _n=$(ls "$d"/*.ko 2>/dev/null | wc -l)
+            log "modules dir $d: $_n .ko"
+        fi
+    done
+}
+android_list_modules_dir
+
 echo "[rwbridge] completed"
+log "final: done"
 # run.sh[∂]
+
+# trailing verification
+grep -q "^rwbridge " /proc/modules 2>/dev/null && log "trailing: module present" || log "trailing: module absent"
+
+log "end"
+# EOF

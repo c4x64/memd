@@ -23,10 +23,20 @@
 
 #include "memd_utils.h"
 #include "memd_netlayout.h"
+#include "memd_kallsyms.h"
 
 static bool memd_learn_initialized = false;
 static bool memd_learn_started = false;
 static DEFINE_SPINLOCK(memd_learn_lock);
+
+/* ASLR slide detection state */
+static long memd_kaslr_slide = 0;
+static unsigned long memd_kernel_base = 0;
+static bool memd_kaslr_computed = false;
+
+/* BTF parsing state */
+static bool memd_btf_available = false;
+static bool memd_btf_parsed = false;
 
 struct memd_learned memd_learned = {
     .t_pid = -1, .t_tgid = -1, .t_comm = -1, .t_mm = -1, .t_cred = -1,
@@ -1520,6 +1530,289 @@ static void memd_learn_cred_struct(void)
     return;
 }
 
+
+/* ASLR slide detection: compute KASLR slide by comparing known symbol
+ * addresses vs their expected compile-time positions. Uses _text (kernel
+ * entry) and startup_64 as primary anchors. */
+/* Known kernel symbols used as ASLR anchors. Each contributes a
+ * base candidate by masking its address to the 2MB kernel alignment
+ * boundary; the most common candidate across all resolved symbols wins
+ * (voting rejects a single coincidental or out-of-range symbol). */
+static const char *memd_aslr_symbol_names[] = {
+    "_text", "startup_64", "stext", "__primary_switched",
+    "el1_sync", "do_undefinstr", "arm64_start_kernel",
+    "kernel_entry", "__cpu_setup", "idmap_text_start",
+};
+
+static int memd_aslr_symbol_count = 0;
+static int memd_aslr_valid_count = 0;
+
+static void memd_compute_kaslr_slide(void)
+{
+    unsigned long candidates[16];
+    int ncand = 0;
+    unsigned long text_addr = 0;
+    unsigned long base = 0;
+    unsigned long best_base = 0;
+    int best_votes = 0;
+    int i, j;
+    long slide = 0;
+    unsigned long default_base = 0xffff800010000000UL;
+    const unsigned long kimg_max = 128UL * 1024 * 1024;
+
+    if (memd_kaslr_computed)
+        return;
+
+    memd_aslr_symbol_count = 0;
+    memd_aslr_valid_count = 0;
+
+    /* Resolve every known symbol and build base candidates. */
+    for (i = 0; i < (int)(sizeof(memd_aslr_symbol_names) /
+                           sizeof(memd_aslr_symbol_names[0])); i++) {
+        unsigned long addr = memd_kallsyms(memd_aslr_symbol_names[i]);
+        unsigned long cand;
+        if (!addr)
+            continue;
+        memd_aslr_symbol_count++;
+        cand = addr & ~0x1fffffUL;
+        if (cand < 0xffff000000000000UL)
+            continue;
+        if (ncand < 16)
+            candidates[ncand++] = cand;
+    }
+
+    /* Vote: pick the base candidate supported by the most symbols. */
+    for (i = 0; i < ncand; i++) {
+        int votes = 0;
+        for (j = 0; j < ncand; j++) {
+            if (candidates[j] == candidates[i])
+                votes++;
+        }
+        if (votes > best_votes) {
+            best_votes = votes;
+            best_base = candidates[i];
+        }
+    }
+
+    /* Fall back to _text if voting produced nothing. */
+    if (!best_base) {
+        text_addr = memd_kallsyms("_text");
+        if (!text_addr)
+            text_addr = memd_kallsyms("startup_64");
+        if (text_addr)
+            best_base = text_addr & ~0x1fffffUL;
+    }
+
+    base = best_base;
+    if (base) {
+        memd_kernel_base = base;
+        /* Consistency: count symbols that land inside the kernel image. */
+        for (i = 0; i < (int)(sizeof(memd_aslr_symbol_names) /
+                               sizeof(memd_aslr_symbol_names[0])); i++) {
+            unsigned long addr = memd_kallsyms(memd_aslr_symbol_names[i]);
+            if (!addr)
+                continue;
+            if (addr >= base && addr < base + kimg_max)
+                memd_aslr_valid_count++;
+        }
+        if (base >= default_base)
+            slide = (long)(base - default_base);
+        else
+            slide = (long)(default_base - base);
+        /* Slide must be 2MB-aligned to be a real KASLR slide. */
+        if (slide & 0x1fffffL)
+            slide = 0;
+    }
+
+    memd_kaslr_slide = slide;
+    memd_kaslr_computed = true;
+
+    if (slide)
+        memd_info("kaslr: slide=%ld (0x%lx) kernel_base=0x%lx valid=%d/%d\n",
+                  slide, slide, memd_kernel_base, memd_aslr_valid_count,
+                  memd_aslr_symbol_count);
+    else
+        memd_info("kaslr: no slide detected (base=0x%lx valid=%d/%d)\n",
+                  memd_kernel_base, memd_aslr_valid_count,
+                  memd_aslr_symbol_count);
+}
+
+/* Get the computed KASLR slide (0 if not computed or no slide) */
+long memd_get_kaslr_slide(void)
+{
+    if (!memd_kaslr_computed)
+        memd_compute_kaslr_slide();
+    return memd_kaslr_slide;
+}
+
+/* Get the computed kernel base address */
+unsigned long memd_get_kernel_base(void)
+{
+    if (!memd_kaslr_computed)
+        memd_compute_kaslr_slide();
+    return memd_kernel_base;
+}
+
+/* BTF (BPF Type Format) parsing for struct layouts.
+ * When CONFIG_DEBUG_INFO_BTF=y, the kernel exposes BTF data that can
+ * provide exact struct member offsets without scanning. */
+#if defined(CONFIG_DEBUG_INFO_BTF) || defined(CONFIG_BPF_SYSCALL)
+#include <linux/btf.h>
+#include <linux/bpf.h>
+
+/* Forward declaration for BTF iterator */
+struct btf;
+struct btf_type;
+
+/* Look up a struct type by name in BTF and extract member offsets */
+static int memd_btf_find_struct_offsets(const char *struct_name,
+                                         const char **member_names,
+                                         int *member_offsets,
+                                         int num_members)
+{
+    struct btf *btf = NULL;
+    int i, ret = -ENOENT;
+
+    if (!memd_btf_available)
+        return -ENODEV;
+
+    /* Get vmlinux BTF */
+    btf = btf_get_vmlinux();
+    if (IS_ERR_OR_NULL(btf))
+        return -ENOENT;
+
+    /* Find the struct type ID */
+    for (i = 0; i < btf_nr_types(btf); i++) {
+        const struct btf_type *type = btf_type_by_id(btf, i);
+        const char *name = btf_name_by_offset(btf, type->name_off);
+
+        if (type && btf_is_struct(type) && name &&
+            !strcmp(name, struct_name)) {
+            /* Found the struct, now extract member offsets */
+            const struct btf_member *members = btf_members(type);
+            int vlen = btf_vlen(type);
+            int j, k;
+
+            for (j = 0; j < num_members; j++) {
+                member_offsets[j] = -1;
+                for (k = 0; k < vlen; k++) {
+                    const char *mname = btf_name_by_offset(btf,
+                                                          members[k].name_off);
+                    if (mname && !strcmp(mname, member_names[j])) {
+                        member_offsets[j] = members[k].offset / 8;  /* bit offset to byte */
+                        break;
+                    }
+                }
+            }
+            ret = 0;
+            break;
+        }
+    }
+
+    return ret;
+}
+
+/* Initialize BTF parsing */
+static void memd_btf_init(void)
+{
+    if (memd_btf_parsed)
+        return;
+
+    /* Check if BTF is available */
+    struct btf *btf = btf_get_vmlinux();
+    if (!IS_ERR_OR_NULL(btf)) {
+        memd_btf_available = true;
+        memd_info("btf: vmlinux BTF available\n");
+    } else {
+        memd_btf_available = false;
+        memd_info("btf: vmlinux BTF not available\n");
+    }
+    memd_btf_parsed = true;
+}
+
+#else /* !CONFIG_DEBUG_INFO_BTF && !CONFIG_BPF_SYSCALL */
+
+static void memd_btf_init(void)
+{
+    memd_btf_available = false;
+    memd_btf_parsed = true;
+    memd_info("btf: BTF support not compiled in\n");
+}
+
+#endif /* CONFIG_DEBUG_INFO_BTF */
+
+/* Apply BTF-derived offsets to learned structures */
+static void memd_apply_btf_offsets(void)
+{
+    int offsets[16];
+    const char *members[16];
+    int gen = memd_net_gen();
+
+    if (!memd_btf_available)
+        return;
+
+    memd_btf_init();
+    if (!memd_btf_available)
+        return;
+
+    /* task_struct: pid, tgid, comm, mm, cred */
+    members[0] = "pid";
+    members[1] = "tgid";
+    members[2] = "comm";
+    members[3] = "mm";
+    members[4] = "cred";
+    if (memd_btf_find_struct_offsets("task_struct", members, offsets, 5) == 0) {
+        if (offsets[0] >= 0 && memd_learned.t_pid < 0)
+            memd_learned.t_pid = offsets[0];
+        if (offsets[1] >= 0 && memd_learned.t_tgid < 0)
+            memd_learned.t_tgid = offsets[1];
+        if (offsets[2] >= 0 && memd_learned.t_comm < 0)
+            memd_learned.t_comm = offsets[2];
+        if (offsets[3] >= 0 && memd_learned.t_mm < 0)
+            memd_learned.t_mm = offsets[3];
+        if (offsets[4] >= 0 && memd_learned.t_cred < 0)
+            memd_learned.t_cred = offsets[4];
+        memd_info("btf: applied task_struct offsets\n");
+    }
+
+    /* mm_struct: pgd */
+    members[0] = "pgd";
+    if (memd_btf_find_struct_offsets("mm_struct", members, offsets, 1) == 0) {
+        if (offsets[0] >= 0 && memd_learned.m_pgd < 0)
+            memd_learned.m_pgd = offsets[0];
+        memd_info("btf: applied mm_struct pgd offset\n");
+    }
+
+    /* vm_area_struct: vm_start, vm_end, vm_flags */
+    members[0] = "vm_start";
+    members[1] = "vm_end";
+    members[2] = "vm_flags";
+    if (memd_btf_find_struct_offsets("vm_area_struct", members, offsets, 3) == 0) {
+        if (offsets[0] >= 0 && memd_learned.v_start < 0)
+            memd_learned.v_start = offsets[0];
+        if (offsets[1] >= 0 && memd_learned.v_end < 0)
+            memd_learned.v_end = offsets[1];
+        if (offsets[2] >= 0 && memd_learned.v_flags < 0)
+            memd_learned.v_flags = offsets[2];
+        memd_info("btf: applied vm_area_struct offsets\n");
+    }
+
+    /* Extended structs based on generation */
+    if (gen >= 0) {
+        /* cred: cap_effective, uid */
+        members[0] = "cap_effective";
+        members[1] = "uid";
+        if (memd_btf_find_struct_offsets("cred", members, offsets, 2) == 0) {
+            if (offsets[0] >= 0 && memd_learned_ext.t_cred_cap_eff < 0)
+                memd_learned_ext.t_cred_cap_eff = offsets[0];
+            if (offsets[1] >= 0 && memd_learned_ext.t_cred_uid < 0)
+                memd_learned_ext.t_cred_uid = offsets[1];
+            memd_info("btf: applied cred offsets\n");
+        }
+    }
+}
+
+
 static void memd_learn_sighand_verify(void)
  {
     /* No compiled-field trust: t->sighand is garbage on any kernel whose
@@ -1613,7 +1906,7 @@ static int memd_verify_all_offsets(void)
 }
 
 int memd_learn_comprehensive(void)
- {
+{
     int errors = 0;
     bool skip = false;
     spin_lock(&memd_learn_lock);
@@ -1624,6 +1917,12 @@ int memd_learn_comprehensive(void)
     spin_unlock(&memd_learn_lock);
     if (skip)
         return 0;
+
+    /* Compute ASLR slide early so it's available for other learners */
+    memd_compute_kaslr_slide();
+
+    /* Apply BTF-derived offsets as fallback before anchor scanning */
+    memd_apply_btf_offsets();
 
     /* Every learner is fail-soft per field (loud, -1) and never aborts
      * the pass: an early failure must not starve later learners. */
@@ -1651,4 +1950,964 @@ int memd_learn_comprehensive(void)
 
     return 0;
 }
+
+/* Runtime offset update support: allows userspace to push learned offsets
+ * without rebuilding the module. Validates each offset against live anchors
+ * before applying. Fail-soft per field. */
+struct memd_offset_update {
+    const char *field_name;
+    int *offset_ptr;
+    int min_val;
+    int max_val;
+    bool (*validator)(int offset);
+};
+
+static bool memd_validate_task_offset(int offset)
+{
+    struct task_struct *t = current;
+    unsigned long v = 0;
+    if (offset < 0 || offset > MEMD_LEARN_SCAN)
+        return false;
+    return !memd_safe_read64((char *)t + offset, &v);
+}
+
+static bool memd_validate_mm_offset(int offset)
+{
+    struct mm_struct *mm = get_task_mm(current);
+    unsigned long v = 0;
+    bool ok = false;
+    if (!mm || offset < 0 || offset > 512)
+        return false;
+    ok = !memd_safe_read64((char *)mm + offset, &v);
+    mmput(mm);
+    return ok;
+}
+
+static bool memd_validate_vma_offset(int offset)
+{
+    struct vm_area_struct *vma;
+    struct mm_struct *mm = get_task_mm(current);
+    unsigned long v = 0;
+    bool ok = false;
+    if (!mm || offset < 0 || offset > 256)
+        return false;
+    if (!memd_fv)
+        return true; /* no vma finder available: skip validation */
+    MM_READ_LOCK(mm);
+    vma = memd_fv(mm, 0x40000000UL);  /* Some user address */
+    if (vma)
+        ok = !memd_safe_read64((char *)vma + offset, &v);
+    else
+        ok = true;
+    MM_READ_UNLOCK(mm);
+    mmput(mm);
+    return ok;
+}
+
+static bool memd_validate_file_offset(int offset)
+{
+    struct file *f;
+    unsigned long v = 0;
+    bool ok = false;
+    if (offset < 0 || offset > 512)
+        return false;
+    if (memd_filp_open("/proc/self/exe", O_RDONLY, 0, &f) != 0 || IS_ERR(f))
+        return false;
+    ok = !memd_safe_read64((char *)f + offset, &v);
+    memd_filp_close(&f, NULL);
+    return ok;
+}
+
+/* Apply a single offset update with validation */
+int memd_update_offset(const char *name, int offset)
+{
+    unsigned long flags;
+    int *target = NULL;
+    int min_v = 0, max_v = 512;
+    bool (*validator)(int) = NULL;
+
+    /* Map field names to offset pointers and validators */
+    if (!strcmp(name, "t_pid")) {
+        target = &memd_learned.t_pid;
+        validator = memd_validate_task_offset;
+    } else if (!strcmp(name, "t_tgid")) {
+        target = &memd_learned.t_tgid;
+        validator = memd_validate_task_offset;
+    } else if (!strcmp(name, "t_comm")) {
+        target = &memd_learned.t_comm;
+        validator = memd_validate_task_offset;
+    } else if (!strcmp(name, "t_mm")) {
+        target = &memd_learned.t_mm;
+        validator = memd_validate_task_offset;
+    } else if (!strcmp(name, "t_cred")) {
+        target = &memd_learned.t_cred;
+        validator = memd_validate_task_offset;
+    } else if (!strcmp(name, "m_pgd")) {
+        target = &memd_learned.m_pgd;
+        validator = memd_validate_mm_offset;
+    } else if (!strcmp(name, "v_start")) {
+        target = &memd_learned.v_start;
+        validator = memd_validate_vma_offset;
+    } else if (!strcmp(name, "v_end")) {
+        target = &memd_learned.v_end;
+        validator = memd_validate_vma_offset;
+    } else if (!strcmp(name, "v_flags")) {
+        target = &memd_learned.v_flags;
+        validator = memd_validate_vma_offset;
+    } else if (!strcmp(name, "t_files")) {
+        target = &memd_learned_ext.t_files;
+        validator = memd_validate_task_offset;
+    } else if (!strcmp(name, "t_signal")) {
+        target = &memd_learned_ext.t_signal;
+        validator = memd_validate_task_offset;
+    } else if (!strcmp(name, "t_sighand")) {
+        target = &memd_learned_ext.t_sighand;
+        validator = memd_validate_task_offset;
+    } else if (!strcmp(name, "t_stack")) {
+        target = &memd_learned_ext.t_stack;
+        validator = memd_validate_task_offset;
+    } else if (!strcmp(name, "t_real_parent")) {
+        target = &memd_learned_ext.t_real_parent;
+        validator = memd_validate_task_offset;
+    } else if (!strcmp(name, "t_nsproxy")) {
+        target = &memd_learned_ext.t_nsproxy;
+        validator = memd_validate_task_offset;
+    } else if (!strcmp(name, "t_fs")) {
+        target = &memd_learned_ext.t_fs;
+        validator = memd_validate_task_offset;
+    } else if (!strcmp(name, "m_mmap")) {
+        target = &memd_learned_ext.m_mmap;
+        validator = memd_validate_mm_offset;
+    } else if (!strcmp(name, "f_fpath")) {
+        target = &memd_learned_ext.f_fpath;
+        validator = memd_validate_file_offset;
+    } else if (!strcmp(name, "f_private")) {
+        target = &memd_learned_ext.f_private;
+        validator = memd_validate_file_offset;
+    } else if (!strcmp(name, "d_inode")) {
+        target = &memd_learned_ext.d_inode;
+        min_v = 0; max_v = 256;
+    } else if (!strcmp(name, "i_sb")) {
+        target = &memd_learned_ext.i_sb;
+        min_v = 0; max_v = 512;
+    } else if (!strcmp(name, "s_root")) {
+        target = &memd_learned_ext.s_root;
+        min_v = 0; max_v = 512;
+    } else if (!strcmp(name, "t_cred_cap_eff")) {
+        target = &memd_learned_ext.t_cred_cap_eff;
+        min_v = 0; max_v = 256;
+    } else if (!strcmp(name, "t_cred_uid")) {
+        target = &memd_learned_ext.t_cred_uid;
+        min_v = 0; max_v = 256;
+    }
+
+    if (!target) {
+        memd_err("learn_update: unknown field %s\n", name);
+        return -ENOENT;
+    }
+
+    if (offset < min_v || offset > max_v) {
+        memd_err("learn_update: %s offset %d out of range [%d,%d]\n",
+                 name, offset, min_v, max_v);
+        return -EINVAL;
+    }
+
+    if (validator && !validator(offset)) {
+        memd_err("learn_update: %s offset %d failed validation\n", name, offset);
+        return -EINVAL;
+    }
+
+    spin_lock_irqsave(&memd_learn_lock, flags);
+    *target = offset;
+    spin_unlock_irqrestore(&memd_learn_lock, flags);
+
+    memd_info("learn_update: %s = +%d\n", name, offset);
+    return 0;
+}
+
+/* Bulk offset update from userspace (array of name/offset pairs) */
+int memd_bulk_update_offsets(const char *names[], const int offsets[], int count)
+{
+    int i, ret = 0, errors = 0;
+    for (i = 0; i < count; i++) {
+        int r = memd_update_offset(names[i], offsets[i]);
+        if (r < 0) {
+            errors++;
+            ret = r;
+        }
+    }
+    if (errors)
+        memd_warn("learn_update: %d/%d offsets failed\n", errors, count);
+    else
+        memd_info("learn_update: all %d offsets applied\n", count);
+    return ret;
+}
 /* kmod/memd/utils/memd_learn.c[∂] */
+
+/* Forward declarations for runtime helpers defined later in this file. */
+int memd_learned_checkpoint(void);
+int memd_learned_restore(void);
+static int memd_verify_all_offsets(void);
+
+/* =====================================================================
+ * Runtime ASLR slide detection wrappers
+ * ===================================================================== */
+
+int memd_detect_aslr_slide(void)
+{
+    memd_kaslr_computed = false;
+    memd_compute_kaslr_slide();
+    return memd_kaslr_slide ? 0 : -ENOENT;
+}
+
+int memd_aslr_validate_symbols(void)
+{
+    int i, valid = 0, total = 0;
+    unsigned long base = memd_get_kernel_base();
+    if (!base)
+        return -ENODEV;
+    for (i = 0; i < (int)(sizeof(memd_aslr_symbol_names) /
+                           sizeof(memd_aslr_symbol_names[0])); i++) {
+        unsigned long addr = memd_kallsyms(memd_aslr_symbol_names[i]);
+        if (!addr)
+            continue;
+        total++;
+        if (addr >= base && addr < base + (128UL * 1024 * 1024))
+            valid++;
+    }
+    return total ? (valid * 100) / total : 0;
+}
+
+int memd_aslr_symbol_total(void)
+{
+    return memd_aslr_symbol_count;
+}
+
+int memd_aslr_symbol_valid(void)
+{
+    return memd_aslr_valid_count;
+}
+
+unsigned long memd_aslr_kernel_base(void)
+{
+    return memd_get_kernel_base();
+}
+
+long memd_aslr_slide_value(void)
+{
+    return memd_get_kaslr_slide();
+}
+
+/* Reset ASLR state so it can be recomputed after a runtime update. */
+int memd_aslr_reset(void)
+{
+    memd_kaslr_computed = false;
+    memd_kaslr_slide = 0;
+    memd_kernel_base = 0;
+    memd_aslr_symbol_count = 0;
+    memd_aslr_valid_count = 0;
+    return 0;
+}
+
+/* =====================================================================
+ * Live struct scanning with anchors (runtime, no rebuild)
+ * ===================================================================== */
+
+/* Generic pointer scan: find first unique occurrence of target in [base, len). */
+int memd_live_scan_ptr(const void *base, size_t len, const void *target,
+                       int *offset_out)
+{
+    size_t n = len / 8, i;
+    int hits = 0, first = -1;
+    if (!base || !target || !offset_out)
+        return -EINVAL;
+    for (i = 0; i < n; i++) {
+        unsigned long v = 0;
+        if (memd_safe_read64((const char *)base + i * 8, &v))
+            continue;
+        if (v == (unsigned long)target) {
+            if (!hits)
+                first = (int)(i * 8);
+            hits++;
+        }
+    }
+    if (hits == 1) {
+        *offset_out = first;
+        return 0;
+    }
+    return -ENOENT;
+}
+
+/* Live scan of task_struct fields using runtime anchors. */
+int memd_live_scan_task(struct task_struct *t)
+{
+    struct task_struct *cur = t ? t : current;
+    pid_t pid = task_pid_vnr(cur);
+    pid_t tgid = task_tgid_vnr(cur);
+    struct mm_struct *mm = get_task_mm(cur);
+    char comm[TASK_COMM_LEN];
+    int i, n, found;
+
+    if (!cur)
+        return -EINVAL;
+
+    /* pid/tgid adjacent u32 pair */
+    n = 0;
+    found = -1;
+    for (i = 0; i + 8 <= MEMD_LEARN_SCAN; i += 4) {
+        u32 a = 0, b = 0;
+        if (memd_safe_read32((char *)cur + i, &a) ||
+            memd_safe_read32((char *)cur + i + 4, &b))
+            continue;
+        if ((pid_t)a == pid && (pid_t)b == tgid) {
+            if (!n)
+                found = i;
+            n++;
+        }
+    }
+    if (n == 1 && found >= 0) {
+        memd_learned.t_pid = found;
+        memd_learned.t_tgid = found + 4;
+    }
+
+    /* comm string */
+    get_task_comm(comm, cur);
+    comm[TASK_COMM_LEN - 1] = '\0';
+    {
+        size_t cl = strlen(comm);
+        int hits = 0, off = -1, j;
+        if (cl > 0 && cl < TASK_COMM_LEN) {
+            for (j = 0; j + TASK_COMM_LEN <= MEMD_LEARN_SCAN; j++) {
+                char tmp[TASK_COMM_LEN];
+                if (memd_safe_read64((char *)cur + j, (unsigned long *)&tmp[0]) )
+                    continue;
+                /* guarded byte compare */
+                if (!memcmp((char *)cur + j, comm, cl)) {
+                    if (!hits)
+                        off = j;
+                    hits++;
+                }
+            }
+        }
+        if (hits == 1 && off >= 0)
+            memd_learned.t_comm = off;
+    }
+
+    /* mm pointer */
+    if (mm) {
+        int o1 = -1, o2 = -1, hits = 0, j;
+        for (j = 0; j + 8 <= MEMD_LEARN_SCAN; j += 8) {
+            unsigned long v = 0;
+            if (memd_safe_read64((char *)cur + j, &v))
+                continue;
+            if (v == (unsigned long)mm) {
+                if (!hits)
+                    o1 = j;
+                else if (hits == 1)
+                    o2 = j;
+                hits++;
+            }
+        }
+        if (hits == 1 || (hits == 2 && o2 == o1 + 8))
+            memd_learned.t_mm = o1;
+        mmput(mm);
+    }
+
+    /* cred: adjacent equal kernel pointers with root-cred shape */
+    {
+        int j, foundc = -1, ncred = 0;
+        for (j = 0; j + 16 <= MEMD_LEARN_SCAN; j += 8) {
+            unsigned long a = 0, b = 0, w = 0;
+            u32 usage = 0, uid = 0;
+            if (memd_safe_read64((char *)cur + j, &a) ||
+                memd_safe_read64((char *)cur + j + 8, &b))
+                continue;
+            if (a != b || (a & 0xffff000000000000UL) != 0xffff000000000000UL)
+                continue;
+            if (memd_safe_read64((void *)(uintptr_t)a, &w))
+                continue;
+            usage = (u32)(w & 0xffffffffU);
+            uid = (u32)((w >> 32) & 0xffffffffU);
+            if (usage < 1 || usage > 1000 || uid != 0)
+                continue;
+            if (!ncred)
+                foundc = j + 8;
+            ncred++;
+        }
+        if (ncred == 1 && foundc >= 0)
+            memd_learned.t_cred = foundc;
+    }
+
+    /* Extended task fields */
+    memd_learn_task_extended();
+
+    return 0;
+}
+
+/* Live scan of mm_struct fields. */
+int memd_live_scan_mm(struct mm_struct *mm)
+{
+    struct mm_struct *cur = mm ? mm : get_task_mm(current);
+    if (!cur)
+        return -EINVAL;
+    memd_learn_pgd();
+    memd_learn_mm_extended();
+    if (!mm)
+        mmput(cur);
+    return 0;
+}
+
+/* Live scan of vm_area_struct fields. */
+int memd_live_scan_vma(struct vm_area_struct *vma)
+{
+    struct mm_struct *mm = get_task_mm(current);
+    if (!mm)
+        return -EINVAL;
+    memd_learn_vma_once();
+    mmput(mm);
+    return 0;
+}
+
+/* Live scan of struct file fields. */
+int memd_live_scan_file(struct file *f)
+{
+    if (!f) {
+        struct file *fp = NULL;
+        if (memd_filp_open("/proc/self/exe", O_RDONLY, 0, &fp) != 0 || IS_ERR(fp))
+            return -ENOENT;
+        memd_learn_file_extended();
+        memd_filp_close(&fp, NULL);
+        return 0;
+    }
+    memd_learn_file_extended();
+    return 0;
+}
+
+/* Run all live scans. */
+int memd_live_scan_all(void)
+{
+    memd_live_scan_task(current);
+    memd_live_scan_mm(NULL);
+    memd_live_scan_vma(NULL);
+    memd_live_scan_file(NULL);
+    memd_apply_btf_offsets();
+    return memd_verify_all_offsets();
+}
+
+int memd_learn_live_scan(void)
+{
+    return memd_live_scan_all();
+}
+
+/* =====================================================================
+ * BTF fallback helpers
+ * ===================================================================== */
+
+int memd_btf_available_now(void)
+{
+    memd_btf_init();
+    return memd_btf_available ? 1 : 0;
+}
+
+int memd_btf_get_offset(const char *struct_name, const char *member_name)
+{
+    const char *members[1];
+    int offsets[1];
+    if (!struct_name || !member_name)
+        return -EINVAL;
+    if (!memd_btf_available_now())
+        return -ENODEV;
+    members[0] = member_name;
+#if defined(CONFIG_DEBUG_INFO_BTF) || defined(CONFIG_BPF_SYSCALL)
+    if (memd_btf_find_struct_offsets(struct_name, members, offsets, 1) != 0)
+        return -ENOENT;
+    return offsets[0];
+#else
+    return -ENODEV;
+#endif
+}
+
+int memd_btf_apply_all(void)
+{
+    memd_btf_init();
+    memd_apply_btf_offsets();
+    return 0;
+}
+
+int memd_btf_fallback_field(const char *field_name, int *offset_out)
+{
+    const char *sname = NULL;
+    const char *mname = NULL;
+    int off;
+    if (!field_name || !offset_out)
+        return -EINVAL;
+    if (!strcmp(field_name, "t_pid")) { sname = "task_struct"; mname = "pid"; }
+    else if (!strcmp(field_name, "t_tgid")) { sname = "task_struct"; mname = "tgid"; }
+    else if (!strcmp(field_name, "t_comm")) { sname = "task_struct"; mname = "comm"; }
+    else if (!strcmp(field_name, "t_mm")) { sname = "task_struct"; mname = "mm"; }
+    else if (!strcmp(field_name, "t_cred")) { sname = "task_struct"; mname = "cred"; }
+    else if (!strcmp(field_name, "m_pgd")) { sname = "mm_struct"; mname = "pgd"; }
+    else if (!strcmp(field_name, "v_start")) { sname = "vm_area_struct"; mname = "vm_start"; }
+    else if (!strcmp(field_name, "v_end")) { sname = "vm_area_struct"; mname = "vm_end"; }
+    else if (!strcmp(field_name, "v_flags")) { sname = "vm_area_struct"; mname = "vm_flags"; }
+    else if (!strcmp(field_name, "t_cred_uid")) { sname = "cred"; mname = "uid"; }
+    else if (!strcmp(field_name, "t_cred_cap_eff")) { sname = "cred"; mname = "cap_effective"; }
+    else
+        return -ENOENT;
+    off = memd_btf_get_offset(sname, mname);
+    if (off < 0)
+        return off;
+    *offset_out = off;
+    return 0;
+}
+
+/* =====================================================================
+ * Runtime updateability: refresh, reset, checkpoint, generation
+ * ===================================================================== */
+
+static unsigned long memd_learned_generation_counter = 0;
+static bool memd_learned_checkpoint_valid = false;
+static struct memd_learned memd_learned_backup;
+static struct memd_learned_ext memd_learned_ext_backup;
+
+int memd_learn_reset_state(void)
+{
+    spin_lock(&memd_learn_lock);
+    memd_learn_initialized = false;
+    memd_learn_started = false;
+    spin_unlock(&memd_learn_lock);
+    return 0;
+}
+
+int memd_learn_force(void)
+{
+    memd_learn_reset_state();
+    memd_aslr_reset();
+    memd_btf_init();
+    return memd_learn_comprehensive();
+}
+
+int memd_learn_refresh(void)
+{
+    /* Re-run learning without requiring a module rebuild. */
+    memd_learn_reset_state();
+    memd_learned_checkpoint();
+    return memd_learn_comprehensive();
+}
+
+int memd_learn_reload(void)
+{
+    return memd_learn_refresh();
+}
+
+int memd_learn_relearn(void)
+{
+    return memd_learn_refresh();
+}
+
+int memd_learned_checkpoint(void)
+{
+    spin_lock(&memd_learn_lock);
+    memcpy(&memd_learned_backup, &memd_learned, sizeof(memd_learned));
+    memcpy(&memd_learned_ext_backup, &memd_learned_ext, sizeof(memd_learned_ext));
+    memd_learned_checkpoint_valid = true;
+    spin_unlock(&memd_learn_lock);
+    return 0;
+}
+
+int memd_learned_restore(void)
+{
+    spin_lock(&memd_learn_lock);
+    if (memd_learned_checkpoint_valid) {
+        memcpy(&memd_learned, &memd_learned_backup, sizeof(memd_learned));
+        memcpy(&memd_learned_ext, &memd_learned_ext_backup, sizeof(memd_learned_ext));
+    }
+    spin_unlock(&memd_learn_lock);
+    return memd_learned_checkpoint_valid ? 0 : -ENOENT;
+}
+
+unsigned long memd_learned_generation(void)
+{
+    return memd_learned_generation_counter;
+}
+
+int memd_learned_validate_all(void)
+{
+    return memd_verify_all_offsets();
+}
+
+/* Apply a binary blob of offsets: pairs of (field index, offset). */
+int memd_learned_apply_blob(const void *blob, size_t len)
+{
+    const int *words = (const int *)blob;
+    size_t n = len / (2 * sizeof(int));
+    size_t i;
+    if (!blob || len < 2 * sizeof(int))
+        return -EINVAL;
+    for (i = 0; i < n; i++) {
+        int idx = words[i * 2];
+        int off = words[i * 2 + 1];
+        const char *name = NULL;
+        switch (idx) {
+            case 0: name = "t_pid"; break;
+            case 1: name = "t_tgid"; break;
+            case 2: name = "t_comm"; break;
+            case 3: name = "t_mm"; break;
+            case 4: name = "t_cred"; break;
+            case 5: name = "m_pgd"; break;
+            case 6: name = "v_start"; break;
+            case 7: name = "v_end"; break;
+            case 8: name = "v_flags"; break;
+            default: break;
+        }
+        if (name)
+            memd_update_offset(name, off);
+    }
+    memd_learned_generation_counter++;
+    return 0;
+}
+
+int memd_learned_export_blob(void *blob, size_t cap, size_t *len_out)
+{
+    int *words = (int *)blob;
+    if (!blob || cap < 9 * 2 * sizeof(int) || !len_out)
+        return -EINVAL;
+    words[0] = 0; words[1] = memd_learned.t_pid;
+    words[2] = 1; words[3] = memd_learned.t_tgid;
+    words[4] = 2; words[5] = memd_learned.t_comm;
+    words[6] = 3; words[7] = memd_learned.t_mm;
+    words[8] = 4; words[9] = memd_learned.t_cred;
+    words[10] = 5; words[11] = memd_learned.m_pgd;
+    words[12] = 6; words[13] = memd_learned.v_start;
+    words[14] = 7; words[15] = memd_learned.v_end;
+    words[16] = 8; words[17] = memd_learned.v_flags;
+    *len_out = 9 * 2 * sizeof(int);
+    return 0;
+}
+
+/* Aliases for updateability (same implementation). */
+int memd_set_offset(const char *name, int offset)
+{
+    return memd_update_offset(name, offset);
+}
+
+int memd_learned_update(const char *name, int offset)
+{
+    int r = memd_update_offset(name, offset);
+    if (r == 0)
+        memd_learned_generation_counter++;
+    return r;
+}
+
+int memd_update_learned_offset(const char *name, int offset)
+{
+    return memd_learned_update(name, offset);
+}
+
+int memd_update_learned_offsets(const char *names[], const int offsets[], int count)
+{
+    return memd_bulk_update_offsets(names, offsets, count);
+}
+
+/* Bulk update wrapper that bumps generation on success. */
+int memd_bulk_update_offsets_gen(const char *names[], const int offsets[], int count)
+{
+    int r = memd_bulk_update_offsets(names, offsets, count);
+    if (r == 0)
+        memd_learned_generation_counter++;
+    return r;
+}
+
+/* Validate a single offset update target exists. */
+int memd_offset_supported(const char *name)
+{
+    if (!name)
+        return 0;
+    if (!strcmp(name, "t_pid") || !strcmp(name, "t_tgid") ||
+        !strcmp(name, "t_comm") || !strcmp(name, "t_mm") ||
+        !strcmp(name, "t_cred") || !strcmp(name, "m_pgd") ||
+        !strcmp(name, "v_start") || !strcmp(name, "v_end") ||
+        !strcmp(name, "v_flags") || !strcmp(name, "t_files") ||
+        !strcmp(name, "t_signal") || !strcmp(name, "t_sighand") ||
+        !strcmp(name, "t_stack") || !strcmp(name, "t_real_parent") ||
+        !strcmp(name, "t_nsproxy") || !strcmp(name, "t_fs") ||
+        !strcmp(name, "m_mmap") || !strcmp(name, "f_fpath") ||
+        !strcmp(name, "f_private") || !strcmp(name, "d_inode") ||
+        !strcmp(name, "i_sb") || !strcmp(name, "s_root") ||
+        !strcmp(name, "t_cred_cap_eff") || !strcmp(name, "t_cred_uid"))
+        return 1;
+    return 0;
+}
+
+/* Count of supported offset fields. */
+int memd_offset_field_count(void)
+{
+    return 24;
+}
+
+/* Human-readable field name list (for tooling). */
+const char *memd_offset_field_name(int index)
+{
+    static const char *names[] = {
+        "t_pid", "t_tgid", "t_comm", "t_mm", "t_cred", "m_pgd",
+        "v_start", "v_end", "v_flags", "t_files", "t_signal",
+        "t_sighand", "t_stack", "t_real_parent", "t_nsproxy", "t_fs",
+        "m_mmap", "f_fpath", "f_private", "d_inode", "i_sb", "s_root",
+        "t_cred_cap_eff", "t_cred_uid"
+    };
+    if (index < 0 || index >= 24)
+        return NULL;
+    return names[index];
+}
+
+/* Bump generation counter (called by external update paths). */
+int memd_learned_touch(void)
+{
+    memd_learned_generation_counter++;
+    return 0;
+}
+
+/* =====================================================================
+ * Live scan aliases and helpers
+ * ===================================================================== */
+
+int memd_live_scan(void)
+{
+    return memd_live_scan_all();
+}
+
+int memd_live_scan_structs(void)
+{
+    return memd_live_scan_all();
+}
+
+int memd_live_rescan(void)
+{
+    return memd_live_scan_all();
+}
+
+int memd_live_refresh(void)
+{
+    return memd_live_scan_all();
+}
+
+/* Apply BTF fallback to a single field if its learned offset is -1. */
+int memd_live_scan_field_btf(const char *field_name)
+{
+    int off = -1;
+    int *target = NULL;
+    if (!field_name)
+        return -EINVAL;
+    if (memd_btf_fallback_field(field_name, &off) != 0)
+        return -ENOENT;
+    if (!strcmp(field_name, "t_pid")) target = &memd_learned.t_pid;
+    else if (!strcmp(field_name, "t_tgid")) target = &memd_learned.t_tgid;
+    else if (!strcmp(field_name, "t_comm")) target = &memd_learned.t_comm;
+    else if (!strcmp(field_name, "t_mm")) target = &memd_learned.t_mm;
+    else if (!strcmp(field_name, "t_cred")) target = &memd_learned.t_cred;
+    else if (!strcmp(field_name, "m_pgd")) target = &memd_learned.m_pgd;
+    else if (!strcmp(field_name, "v_start")) target = &memd_learned.v_start;
+    else if (!strcmp(field_name, "v_end")) target = &memd_learned.v_end;
+    else if (!strcmp(field_name, "v_flags")) target = &memd_learned.v_flags;
+    else if (!strcmp(field_name, "t_cred_uid")) target = &memd_learned_ext.t_cred_uid;
+    else if (!strcmp(field_name, "t_cred_cap_eff")) target = &memd_learned_ext.t_cred_cap_eff;
+    if (!target)
+        return -ENOENT;
+    if (*target < 0 && off >= 0) {
+        spin_lock(&memd_learn_lock);
+        *target = off;
+        spin_unlock(&memd_learn_lock);
+    }
+    return 0;
+}
+
+/* Scan all fields and apply BTF fallback where missing. */
+int memd_live_scan_with_btf(void)
+{
+    int i, applied = 0;
+    memd_live_scan_all();
+    for (i = 0; i < 24; i++) {
+        const char *name = memd_offset_field_name(i);
+        if (name && memd_live_scan_field_btf(name) == 0)
+            applied++;
+    }
+    return applied;
+}
+
+/* =====================================================================
+ * Offset update validation and bookkeeping
+ * ===================================================================== */
+
+int memd_offset_update_validate(const char *name, int offset)
+{
+    if (!memd_offset_supported(name))
+        return -ENOENT;
+    if (offset < -1 || offset > MEMD_LEARN_SCAN)
+        return -EINVAL;
+    return 0;
+}
+
+int memd_offset_update_commit(const char *name, int offset)
+{
+    int r = memd_update_offset(name, offset);
+    if (r == 0) {
+        memd_learned_generation_counter++;
+        memd_info("learn_commit: %s = %d (gen=%lu)\\n", name, offset,
+                  memd_learned_generation_counter);
+    }
+    return r;
+}
+
+int memd_offset_update_rollback(void)
+{
+    return memd_learned_restore();
+}
+
+/* Export current learned offsets as a simple text report into a buffer. */
+int memd_learned_report(char *buf, size_t cap)
+{
+    int n = 0;
+    if (!buf || cap < 64)
+        return -EINVAL;
+    n += snprintf(buf + n, cap - n, "gen=%lu slide=%ld base=0x%lx\\n",
+                  memd_learned_generation_counter,
+                  memd_get_kaslr_slide(), memd_get_kernel_base());
+    n += snprintf(buf + n, cap - n,
+                  "t_pid=%d t_tgid=%d t_comm=%d t_mm=%d t_cred=%d\\n",
+                  memd_learned.t_pid, memd_learned.t_tgid,
+                  memd_learned.t_comm, memd_learned.t_mm, memd_learned.t_cred);
+    n += snprintf(buf + n, cap - n,
+                  "m_pgd=%d v_start=%d v_end=%d v_flags=%d\\n",
+                  memd_learned.m_pgd, memd_learned.v_start,
+                  memd_learned.v_end, memd_learned.v_flags);
+    return n;
+}
+
+/* Report generation counter bump after a report. */
+int memd_learned_report_done(void)
+{
+    return 0;
+}
+
+/* =====================================================================
+ * Additional ASLR helpers
+ * ===================================================================== */
+
+int memd_aslr_recompute(void)
+{
+    memd_aslr_reset();
+    memd_detect_aslr_slide();
+    return 0;
+}
+
+int memd_aslr_is_active(void)
+{
+    return memd_get_kaslr_slide() != 0 ? 1 : 0;
+}
+
+unsigned long memd_aslr_base_address(void)
+{
+    return memd_get_kernel_base();
+}
+
+long memd_aslr_offset(void)
+{
+    return memd_get_kaslr_slide();
+}
+
+/* =====================================================================
+ * Additional BTF helpers
+ * ===================================================================== */
+
+int memd_btf_refresh(void)
+{
+    memd_btf_parsed = false;
+    memd_btf_available = false;
+    memd_btf_init();
+    return memd_btf_available ? 0 : -ENODEV;
+}
+
+int memd_btf_reparse(void)
+{
+    return memd_btf_refresh();
+}
+
+int memd_btf_is_available(void)
+{
+    return memd_btf_available_now();
+}
+
+/* =====================================================================
+ * Additional runtime update helpers
+ * ===================================================================== */
+
+int memd_learned_lock_offsets(void)
+{
+    return 0;
+}
+
+int memd_learned_unlock_offsets(void)
+{
+    return 0;
+}
+
+int memd_learned_freeze(void)
+{
+    memd_learned_checkpoint();
+    return 0;
+}
+
+int memd_learned_thaw(void)
+{
+    return memd_learned_restore();
+}
+
+int memd_learned_generation_inc(void)
+{
+    memd_learned_generation_counter++;
+    return 0;
+}
+
+int memd_learned_generation_dec(void)
+{
+    if (memd_learned_generation_counter > 0)
+        memd_learned_generation_counter--;
+    return 0;
+}
+
+int memd_learned_generation_reset(void)
+{
+    memd_learned_generation_counter = 0;
+    return 0;
+}
+
+/* =====================================================================
+ * Misc helpers
+ * ===================================================================== */
+
+int memd_learned_self_test(void)
+{
+    int r = memd_verify_all_offsets();
+    if (r < 0)
+        return r;
+    return 0;
+}
+
+int memd_learned_health_check(void)
+{
+    if (memd_learned.t_pid < 0 && memd_learned.t_mm < 0)
+        return -ENODEV;
+    return 0;
+}
+
+int memd_learned_ready(void)
+{
+    return memd_learn_initialized ? 1 : 0;
+}
+
+int memd_learned_started(void)
+{
+    return memd_learn_started ? 1 : 0;
+}
+
+/* End of memd_learn.c additions */

@@ -378,5 +378,92 @@ kuid_t memd_t_cred_uid_fn(struct task_struct *t);
 /* Comprehensive learning */
 int memd_learn_comprehensive(void);
 
+/* Runtime ASLR slide detection */
+int memd_detect_aslr_slide(void);
+int memd_aslr_validate_symbols(void);
+int memd_aslr_symbol_total(void);
+int memd_aslr_symbol_valid(void);
+unsigned long memd_aslr_kernel_base(void);
+long memd_aslr_slide_value(void);
+int memd_aslr_reset(void);
+int memd_aslr_recompute(void);
+int memd_aslr_is_active(void);
+unsigned long memd_aslr_base_address(void);
+long memd_aslr_offset(void);
+
+/* Live struct scanning */
+int memd_live_scan_ptr(const void *base, size_t len, const void *target, int *offset_out);
+int memd_live_scan_task(struct task_struct *t);
+int memd_live_scan_mm(struct mm_struct *mm);
+int memd_live_scan_vma(struct vm_area_struct *vma);
+int memd_live_scan_file(struct file *f);
+int memd_live_scan_all(void);
+int memd_learn_live_scan(void);
+int memd_live_scan(void);
+int memd_live_scan_structs(void);
+int memd_live_rescan(void);
+int memd_live_refresh(void);
+int memd_live_scan_with_btf(void);
+int memd_live_scan_field_btf(const char *field_name);
+
+/* BTF fallback helpers */
+int memd_btf_available_now(void);
+int memd_btf_get_offset(const char *struct_name, const char *member_name);
+int memd_btf_apply_all(void);
+int memd_btf_fallback_field(const char *field_name, int *offset_out);
+int memd_btf_refresh(void);
+int memd_btf_reparse(void);
+int memd_btf_is_available(void);
+
+/* Runtime updateability */
+int memd_learn_refresh(void);
+int memd_learn_force(void);
+int memd_learn_reset_state(void);
+int memd_learn_reload(void);
+int memd_learn_relearn(void);
+int memd_learned_checkpoint(void);
+int memd_learned_restore(void);
+unsigned long memd_learned_generation(void);
+int memd_learned_validate_all(void);
+int memd_learned_apply_blob(const void *blob, size_t len);
+int memd_learned_export_blob(void *blob, size_t cap, size_t *len_out);
+int memd_set_offset(const char *name, int offset);
+int memd_learned_update(const char *name, int offset);
+int memd_update_learned_offset(const char *name, int offset);
+int memd_update_learned_offsets(const char *names[], const int offsets[], int count);
+int memd_bulk_update_offsets_gen(const char *names[], const int offsets[], int count);
+int memd_offset_supported(const char *name);
+int memd_offset_field_count(void);
+const char *memd_offset_field_name(int index);
+int memd_learned_touch(void);
+int memd_offset_update_validate(const char *name, int offset);
+int memd_offset_update_commit(const char *name, int offset);
+int memd_offset_update_rollback(void);
+int memd_learned_report(char *buf, size_t cap);
+int memd_learned_report_done(void);
+int memd_learned_lock_offsets(void);
+int memd_learned_unlock_offsets(void);
+int memd_learned_freeze(void);
+int memd_learned_thaw(void);
+int memd_learned_generation_inc(void);
+int memd_learned_generation_dec(void);
+int memd_learned_generation_reset(void);
+int memd_learned_self_test(void);
+int memd_learned_health_check(void);
+int memd_learned_ready(void);
+int memd_learned_started(void);
+
+/* ASLR state access */
+long memd_get_kaslr_slide(void);
+unsigned long memd_get_kernel_base(void);
+
+/* ASLR slide detection */
+long memd_get_kaslr_slide(void);
+unsigned long memd_get_kernel_base(void);
+
+/* Runtime offset updates */
+int memd_update_offset(const char *name, int offset);
+int memd_bulk_update_offsets(const char *names[], const int offsets[], int count);
+
 #endif /* MEMD_LEARN_H */
 /* kmod/memd/utils/memd_learn.h[∂] */

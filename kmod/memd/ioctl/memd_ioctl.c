@@ -1694,3 +1694,70 @@ int do_learn_status(struct socket* sock, void* arg)
     return 0;
 }
 /* kmod/memd/ioctl/memd_ioctl.c[∂] */
+
+/* Single offset update: userspace pushes one field name + offset value. */
+int do_offset_update(struct socket* sock, void __user* arg)
+{
+    struct memd_offset_update_cmd cmd;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    /* NUL-terminate the field name (userspace controls it). */
+    cmd.field_name[sizeof(cmd.field_name) - 1] = '\0';
+    cmd.result = memd_update_offset(cmd.field_name, cmd.offset);
+    if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+
+/* Bulk offset update: userspace pushes multiple field name/offset pairs. */
+int do_bulk_offset_update(struct socket* sock, void __user* arg)
+{
+    struct memd_bulk_offset_update_cmd cmd;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    if (cmd.count > MEMD_MAX_BULK_OFFSETS)
+        cmd.count = MEMD_MAX_BULK_OFFSETS;
+    /* NUL-terminate all field names. */
+    {
+        int i;
+        for (i = 0; i < cmd.count; i++)
+            cmd.entries[i].field_name[sizeof(cmd.entries[i].field_name) - 1] = '\0';
+    }
+    /* Extract names and offsets arrays. */
+    {
+        const char *names[MEMD_MAX_BULK_OFFSETS];
+        int offsets[MEMD_MAX_BULK_OFFSETS];
+        int i;
+        for (i = 0; i < cmd.count; i++) {
+            names[i] = cmd.entries[i].field_name;
+            offsets[i] = cmd.entries[i].offset;
+        }
+        cmd.result = memd_bulk_update_offsets(names, offsets, cmd.count);
+    }
+    if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
+
+/* KASLR info query: returns kernel base and slide. */
+int do_kaslr_info(struct socket* sock, void* arg)
+{
+    struct memd_kaslr_info_cmd cmd;
+    (void)sock;
+    if (!memd_capable(CAP_SYS_ADMIN))
+        return -EPERM;
+    if (memd_copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    cmd.kernel_base = memd_get_kernel_base();
+    cmd.kaslr_slide = memd_get_kaslr_slide();
+    cmd.result = 0;
+    if (memd_copy_to_user(arg, &cmd, sizeof(cmd)))
+        return -EFAULT;
+    return 0;
+}
