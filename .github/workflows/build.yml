@@ -609,6 +609,10 @@ jobs:
 
       - name: Build module against generic Linux
         run: |
+          if [ "$(uname -m)" != "aarch64" ] && [ "$(uname -m)" != "arm64" ]; then
+            echo "Generic Linux build requires an arm64 host (module is arm64-only); skipping on $(uname -m)"
+            exit 0
+          fi
           KDIR=$(ls -d /usr/src/linux-headers-* 2>/dev/null | sort | tail -1)
           if [ -z "$KDIR" ] || [ ! -f "$KDIR/Makefile" ]; then
             echo "No generic Linux headers available; skipping"
