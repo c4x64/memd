@@ -230,9 +230,9 @@ jobs:
           retention-days: 90
 
   compile-kcidb-batch:
-    # Stride workers: a static 32-slot axis (dynamic matrices silently
+    # Stride workers: a static 8-slot axis (dynamic matrices silently
     # fail job creation). Worker W builds global indices
-    # start_offset+W, +W+32, ... — the full batch every run, no matrix
+    # start_offset+W, +W+8, ... — the full batch every run, no matrix
     # plumbing, no giant outputs.
     name: Compile batch worker ${{ matrix.worker }}
     needs: prepare-kcidb-batch
@@ -241,9 +241,9 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 32
+      max-parallel: 8
       matrix:
-        worker: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+        worker: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -294,7 +294,7 @@ jobs:
             cp "$WS/result.json" "batch-results/$i.result.json" 2>/dev/null || true
             cp kmod/rwbridge.ko "batch-results/$i.ko" 2>/dev/null || true
             rm -rf "$WS"
-            i=$((i + 32))
+            i=$((i + 8))
           done
           echo "worker ${{ matrix.worker }} done"
 
@@ -302,8 +302,47 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kernelci-batch-worker-${{ matrix.worker }}
+          name: _kcidb-worker-${{ matrix.worker }}
           path: batch-results/
+          if-no-files-found: warn
+          retention-days: 30
+
+  pack-kcidb:
+    name: Pack KCIDB results
+    needs: compile-kcidb-batch
+    runs-on: ubuntu-latest
+    if: github.event_name != 'push'
+    steps:
+      - name: Fetch KCIDB worker artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: _kcidb-worker-*
+          path: kcidb-dl
+          merge-multiple: true
+
+      - name: Collect .ko files
+        run: |
+          mkdir -p kcidb-kos
+          find kcidb-dl -name '*.ko' -exec cp {} kcidb-kos/ \; 2>/dev/null || true
+          echo "Collected $(ls kcidb-kos/*.ko 2>/dev/null | wc -l) .ko files"
+          ls -la kcidb-kos/ 2>/dev/null || echo "No .ko files found"
+
+      - name: Create tarball
+        run: |
+          if [ -d kcidb-kos ] && [ "$(ls kcidb-kos/*.ko 2>/dev/null | wc -l)" -gt 0 ]; then
+            tar czf kcidb-results.tar.gz -C kcidb-kos .
+            echo "Created tarball with $(ls kcidb-kos/*.ko | wc -l) .ko files"
+          else
+            echo "No .ko files to pack"
+            exit 0
+          fi
+
+      - name: Upload KCIDB results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kcidb-results
+          path: kcidb-results.tar.gz
           if-no-files-found: warn
           retention-days: 30
 
