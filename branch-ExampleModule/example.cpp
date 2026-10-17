@@ -20,7 +20,7 @@ int main(void)
 
     /* Demonstrate basic memory utilities from memd.hpp */
     printf("memd.hpp loaded successfully.\n");
-    printf("sizeof(lxgr::Module) = %zu\n", sizeof(lxgr::Module));
+    printf("sizeof(zygisk::Module) = %zu\n", sizeof(zygisk::Module));
 
     printf("=== Example complete ===\n");
     return 0;
