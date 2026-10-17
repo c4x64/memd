@@ -1,4 +1,4 @@
-// memd.hpp — Zygisk-scheme module SDK for the MEMD injector.
+// memd.hpp — Zygisk-scheme module SDK for the MEMD injector (Android and generic Linux).
 //
 // One header, two namespaces, zero link dependencies beyond libc:
 //

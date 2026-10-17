@@ -128,7 +128,7 @@ def extract_consts(src, prefixes):
 # ---- LP64 byte-layout cross-check: exact offsets/sizes, not eyeballing ----
 # Every command struct is laid out here in Python under LP64 rules and the
 # kernel and client.h results are byte-compared field by field. LP64 is the
-# right model for both sides: arm64 Android and the client hosts agree on
+# right model for both sides: arm64 targets (Android or generic Linux) and the client hosts agree on
 # every type used here (fixed-width ints, pid_t/uid_t 4B, pointers /
 # size_t / uintptr_t / unsigned long 8B, _Bool/bool/char 1B).
 #
