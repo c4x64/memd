@@ -45,7 +45,7 @@ jobs:
         run: python3 -m unittest discover -s tools -p 'test_*.py'
 
       - name: Run 2-TU gate (direct exit-code contract)
-        run: python3 tools/two_tu_gate.py
+        run: python3 Branch-main/tools/two_tu_gate.py
 
       - name: Verify client.h matches kernel headers
         run: python3 .github/scripts/check_client_h.py
@@ -292,7 +292,7 @@ jobs:
             echo "{\"index\":$i,\"target_key\":\"$TK\",\"status\":\"$ST\"}" >> batch-results/worker-${{ matrix.worker }}.jsonl
             cp "$WS.log" "batch-results/$i.log" 2>/dev/null || true
             cp "$WS/result.json" "batch-results/$i.result.json" 2>/dev/null || true
-            cp kmod/rwbridge.ko "batch-results/$i.ko" 2>/dev/null || true
+            cp Branch-main/kmod/rwbridge.ko "batch-results/$i.ko" 2>/dev/null || true
             rm -rf "$WS"
             i=$((i + 8))
           done
@@ -570,10 +570,10 @@ jobs:
           # them instead of importing the whole symvers via KBUILD_EXTRA_SYMBOLS).
           if [ -f "$KDIR_RESOLVED/Module.symvers" ]; then
             mkdir -p kmod
-            cp -f "$KDIR_RESOLVED/Module.symvers" kmod/Module.symvers
+            cp -f "$KDIR_RESOLVED/Module.symvers" Branch-main/kmod/Module.symvers
           fi
           
-          cd kmod
+          cd Branch-main/kmod
           export PATH="$(echo /opt/ddk/clang/*/bin | cut -d' ' -f1):$PATH"
           make V=1 O="$KDIR_RESOLVED" KDIR="$KDIR_RESOLVED" KMI="${{ matrix.kmi }}" ${{ matrix.dbg == true && 'DBG=1' || '' }} ${{ matrix.test == true && 'DISP_TEST=1' || '' }}
           OBJCOPY_BIN=$(cat "$GITHUB_WORKSPACE/.objcopy")
@@ -627,8 +627,8 @@ jobs:
         with:
           name: _build-${{ matrix.kmi }}
           path: |
-            kmod/rwbridge-${{ matrix.kmi }}.ko
-            run.sh
+            Branch-main/kmod/rwbridge-${{ matrix.kmi }}.ko
+            Branch-main/run.sh
 
   build-linux-generic:
     name: Build generic Linux (informational)
@@ -685,8 +685,8 @@ jobs:
 
       - name: Build finit-force helper + spx_decompress
         run: |
-          aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o finit-force kmod/finit-force.c
-          aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o spx_decompress kmod/spx_decompress.c
+          aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o finit-force Branch-main/kmod/finit-force.c
+          aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o spx_decompress Branch-main/kmod/spx_decompress.c
           file finit-force
           file spx_decompress
           cp finit-force dl/kmod/finit-force
@@ -705,12 +705,12 @@ jobs:
           
           python3 .github/scripts/gen_blobs.py \
             $KO_LIST \
-            run.sh blobs.c
+            Branch-main/run.sh blobs.c
           
           # Link the SPX packed loader against the generated blobs
-          # (see kmod/spx.c header for the documented command)
+          # (see Branch-main/kmod/spx.c header for the documented command)
           aarch64-linux-gnu-gcc -static-pie -O2 -Wall -o rwbridge-spx \
-            kmod/spx.c blobs.c
+            Branch-main/kmod/spx.c blobs.c
           file rwbridge-spx
           
           # Compress final SPX binary with LZ4 (90%+ compression)
@@ -736,10 +736,10 @@ jobs:
         with:
           name: shell-bundle
           path: |
-            dl/kmod/rwbridge-*.ko
+            dl/Branch-main/kmod/rwbridge-*.ko
             dl/kmod/finit-force
             dl/kmod/spx_decompress
-            run.sh
+            Branch-main/run.sh
 
       - name: Create Release
         if: github.event_name == 'workflow_dispatch' && inputs.release_channel != ''
@@ -754,7 +754,7 @@ jobs:
             rwbridge-spx
             rwbridge-spx.lz4
             dl/kmod/spx_decompress
-            dl/kmod/rwbridge-*.ko
+            dl/Branch-main/kmod/rwbridge-*.ko
             dl/kmod/finit-force
-            run.sh
+            Branch-main/run.sh
 # .github/workflows/build.yml[∂]
