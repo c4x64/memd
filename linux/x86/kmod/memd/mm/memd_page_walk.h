@@ -1,0 +1,85 @@
+#ifndef MEMD_PAGE_WALK_H
+#define MEMD_PAGE_WALK_H
+
+#include <linux/mm_types.h>
+#include <linux/types.h>
+
+#ifndef TASK_SIZE_64
+#ifdef TASK_SIZE
+#define TASK_SIZE_64 TASK_SIZE
+#else
+#define TASK_SIZE_64 (0UL)
+#endif
+#endif
+
+#define PAGE_WALK_REGIONS     (1 << 0)
+#define PAGE_WALK_PERMS       (1 << 1)
+#define PAGE_WALK_TYPE        (1 << 2)
+#define PAGE_WALK_SWAP        (1 << 3)
+
+struct page_walk_stats {
+    u64 total_pte_count;
+    u64 present_pte_count;
+    u64 pmd_huge_count;
+    u64 pud_huge_count;
+    u64 swap_entries;
+    u64 file_pages;
+    u64 anon_pages;
+    u64 pages_by_prot[8];
+};
+
+struct page_info {
+    u64 pfn;
+    u32 page_size;
+    bool present;
+    bool huge;
+    bool swapped;
+    bool read;
+    bool write;
+    bool exec;
+    bool dirty;
+    bool young;
+    bool user;
+    u32 swap_offset;
+    u32 swap_type;
+};
+
+struct page_walk_context;
+
+/* Locking contract: all four walkers take the target mm's read lock
+ * (MM_READ_LOCK) across the descent. get_task_mm pins only the
+ * mm_struct, so without the lock a racing exit_mmap frees table pages
+ * mid-walk (oops); with it a dying mm yields clean -ENOENT instead.
+ * Callbacks run under the read lock and must not take the mmap write
+ * lock. Callers must hold no mmap lock on entry. */
+int memd_page_walk(struct mm_struct *mm, struct page_walk_context *ctx);
+int memd_get_page_info(struct mm_struct *mm, unsigned long addr, struct page_info *info);
+int memd_walk_page_range(struct mm_struct *mm, unsigned long start, unsigned long end,
+                          int (*callback)(pte_t *pte, unsigned long addr, unsigned long end, void *data),
+                          void *data);
+
+void traverse_page_tables(struct mm_struct *mm, struct page_walk_stats *stats);
+
+
+#if defined(pmd_large)
+#define memd_pmd_huge(pmd) pmd_large(pmd)
+#elif defined(pmd_leaf)
+#define memd_pmd_huge(pmd) pmd_leaf(pmd)
+#elif defined(pmd_huge)
+#define memd_pmd_huge(pmd) pmd_huge(pmd)
+#else
+#define memd_pmd_huge(pmd) (0)
+#endif
+
+#if defined(pud_large)
+#define memd_pud_huge(pud) pud_large(pud)
+#elif defined(pud_leaf)
+#define memd_pud_huge(pud) pud_leaf(pud)
+#elif defined(pud_huge)
+#define memd_pud_huge(pud) pud_huge(pud)
+#else
+#define memd_pud_huge(pud) (0)
+#endif
+
+#endif // MEMD_PAGE_WALK_H
+/* kmod/memd/mm/memd_page_walk.h[∂] */

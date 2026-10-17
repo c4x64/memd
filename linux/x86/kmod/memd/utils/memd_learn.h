@@ -1,0 +1,469 @@
+#ifndef MEMD_LEARN_H
+#define MEMD_LEARN_H
+
+#include <linux/types.h>
+#include <linux/uidgid.h>
+
+struct task_struct;
+struct mm_struct;
+struct vm_area_struct;
+struct file;
+struct file_operations;
+struct dentry;
+struct cred;
+struct files_struct;
+
+/* Local cap container independent of kernel capability representation. */
+struct memd_learn_cap { unsigned int cap[2]; };
+struct signal_struct;
+struct sighand_struct;
+struct path;
+
+/* Runtime struct-offset learning (KPM-grade universality). Instead of
+ * trusting build-header layouts on foreign kernels, derive critical
+ * field offsets at init from LIVE anchors:
+ * - task->pid/tgid: adjacent equal u32 pair matching task_pid_vnr /
+ *   task_tgid_vnr of the loading task (single-threaded: pid == tgid).
+ * - task->comm: get_task_comm value scanned as a string.
+ * - task->mm: get_task_mm value scanned as a pointer.
+ * - mm->pgd: TTBR0_EL1 value scanned in mm (validated by walk checks
+ *   on every use — a wrong pgd fails closed, never mis-walks).
+ * - vma->vm_start/vm_end: adjacent u64 pair bracketing a known address
+ *   (from /proc/self/maps of the loading task), confirmed on two lines.
+ *
+ * Everything else (cosmetic/listing fields, stable structs) keeps
+ * compiled offsets with per-generation CI asserts. Learned offsets
+ * are per-boot constants (same kernel for every task).
+ */
+struct memd_learned {
+    int t_pid;    /* task_struct.pid, -1 unknown */
+    int t_tgid;   /* task_struct.tgid, -1 unknown */
+    int t_comm;   /* task_struct.comm, -1 unknown */
+    int t_mm;     /* task_struct.mm, -1 unknown */
+    int t_cred;   /* task_struct.cred, -1 unknown */
+    int m_pgd;    /* mm_struct.pgd, -1 unknown */
+    int v_start;  /* vm_area_struct.vm_start, -1 unknown */
+    int v_end;    /* vm_area_struct.vm_end, -1 unknown */
+    int v_flags;  /* vm_area_struct.vm_flags, -1 unknown */
+};
+
+extern struct memd_learned memd_learned;
+
+/* Learn all offsets. Always returns 0 (per-field fail-soft, loud). */
+int memd_learn(void);
+void memd_learn_vma_once(void);
+/* Lazy kernel-stack learning (first inject): task->stack offset plus
+ * thread size, anchored on current with exact pointer equality. */
+void memd_learn_task_stack_once(void);
+
+/* Readers: learned offset when known, compiled fallback otherwise. */
+pid_t memd_t_pid(struct task_struct *t);
+pid_t memd_t_tgid(struct task_struct *t);
+struct mm_struct *memd_t_mm(struct task_struct *t);
+int memd_t_mm_null(struct task_struct *t);
+struct cred *memd_t_cred(struct task_struct *t);
+/* NOTE: memd_t_stack is the macro below (single definition). Do not add
+ * a prototype here: a same-named declaration + macro is a collision with
+ * no function definition behind it. */
+/* Kernel stack size in bytes (16384/65536), learned with t_stack; 0 if
+ * unknown (callers must fail closed). */
+unsigned long memd_thread_size(void);
+void memd_t_comm(struct task_struct *t, char *buf, size_t cap);
+unsigned long memd_m_pgd(struct mm_struct *mm);
+/* Validated pgd (shape-checked table, fail-closed 0). Walk entry point. */
+unsigned long memd_valid_pgd(struct mm_struct *mm);
+unsigned long memd_v_start(struct vm_area_struct *vma);
+unsigned long memd_v_end(struct vm_area_struct *vma);
+unsigned long memd_v_flags(struct vm_area_struct *vma);
+
+/* struct file fields move per generation (6.6/6.12 rework): resolved by
+ * running generation. Returns NULL/0 when unknown (callers fail soft). */
+struct file_operations *memd_file_fop(struct file *f);
+struct dentry *memd_file_dentry(struct file *f);
+
+/* Privilege checks without build-header cred offsets (capable() inlines
+ * task->cred from build headers — wrong on foreign kernels = crash).
+ * Learned cred offset + stable struct cred layout (usage@0, uid@4,
+ * cap_effective@56 low word, CI-asserted per generation). Both cap
+ * words supported (caps 32..63 read at base+4: kernel_cap_struct is
+ * definitionally two u32s); cap>=64 denied fail-closed. Fail closed
+ * (deny) when unlearned. */
+int memd_capable(int cap);
+unsigned int memd_uid(void);
+/* Shared cred-uid offset (learned, else compiled fallback 4). All
+ * in-tree uid sites use this helper (verified round 18). */
+unsigned long memd_cred_uid_off(void);
+
+/* vma->vm_file learned the same way (known pathname match). */
+unsigned long memd_v_file(struct vm_area_struct *vma);
+
+/* Additional learned offsets for improved universality */
+struct memd_learned_ext {
+    int t_files;      /* task_struct.files */
+    int t_signal;     /* task_struct.signal */
+    int t_sighand;    /* task_struct.sighand */
+    int t_thread;     /* task_struct.thread */
+    int t_stack;      /* task_struct.stack */
+    int t_pid_link;   /* task_struct.pids */
+    int t_real_parent; /* task_struct.real_parent */
+    int t_parent;     /* task_struct.parent */
+    int t_group_leader; /* task_struct.group_leader */
+    int t_nsproxy;    /* task_struct.nsproxy */
+    int t_fs;         /* task_struct.fs */
+    int t_io_context; /* task_struct.io_context */
+    int t_cgroups;    /* task_struct.cgroups */
+    int t_robust_list; /* task_struct.robust_list */
+    int t_perf_event_ctxp; /* task_struct.perf_event_ctxp */
+    int t_bts;        /* task_struct.bts */
+    int m_mmap;       /* mm_struct.mmap */
+    int m_mmap_cache; /* mm_struct.mmap_cache */
+    int m_map_count;  /* mm_struct.map_count */
+    int m_pgtables_bytes; /* mm_struct.pgtables_bytes */
+    int m_hiwater_rss; /* mm_struct.hiwater_rss */
+    int m_hiwater_vm;  /* mm_struct.hiwater_vm */
+    int m_total_vm;    /* mm_struct.total_vm */
+    int m_locked_vm;   /* mm_struct.locked_vm */
+    int m_pinned_vm;   /* mm_struct.pinned_vm */
+    int m_data_vm;     /* mm_struct.data_vm */
+    int m_exec_vm;     /* mm_struct.exec_vm */
+    int m_stack_vm;    /* mm_struct.stack_vm */
+    int m_arg_lock;    /* mm_struct.arg_lock */
+    int m_arg_start;   /* mm_struct.arg_start */
+    int m_arg_end;     /* mm_struct.arg_end */
+    int m_env_start;   /* mm_struct.env_start */
+    int m_env_end;     /* mm_struct.env_end */
+    int f_fpath;      /* struct file.f_path */
+    int f_op;         /* struct file.f_op */
+    int f_private;    /* struct file.private_data (learned from our own anon file) */
+    int f_inode;      /* struct file.f_inode */
+    int f_mapping;    /* struct file.f_mapping */
+    int f_pos;        /* struct file.f_pos */
+    int f_flags;      /* struct file.f_flags */
+    int f_mode;       /* struct file.f_mode */
+    int f_count;      /* struct file.f_count */
+    int d_name;       /* struct dentry.d_name */
+    int d_parent;     /* struct dentry.d_parent */
+    int d_inode;      /* struct dentry.d_inode */
+    int d_op;         /* struct dentry.d_op */
+    int d_sb;         /* struct dentry.d_sb */
+    /* NOTE: dcache.h defines d_lock as d_lockref.lock (accessor macro),
+     * so this member must NOT be named d_lock (broke all matrix builds). */
+    int d_lockref;    /* struct dentry.d_lock offset */
+    int d_count;      /* struct dentry.d_count */
+    int d_flags;      /* struct dentry.d_flags */
+    int i_ino;        /* struct inode.i_ino */
+    int i_mode;       /* struct inode.i_mode */
+    int i_uid;        /* struct inode.i_uid */
+    int i_gid;        /* struct inode.i_gid */
+    int i_size;       /* struct inode.i_size */
+    int i_blocks;     /* struct inode.i_blocks */
+    int i_atime;      /* struct inode.i_atime */
+    int i_mtime;      /* struct inode.i_mtime */
+    int i_ctime;      /* struct inode.i_ctime */
+    int i_blkbits;    /* struct inode.i_blkbits */
+    int i_flags;      /* struct inode.i_flags */
+    int i_sb;         /* struct inode.i_sb */
+    int i_mapping;    /* struct inode.i_mapping */
+    int i_dentry;     /* struct inode.i_dentry */
+    int i_flock;      /* struct inode.i_flock */
+    int i_lock;       /* struct inode.i_lock */
+    int i_count;      /* struct inode.i_count */
+    int s_id;         /* struct super_block.s_id */
+    int s_op;         /* struct super_block.s_op */
+    int s_root;       /* struct super_block.s_root */
+    int s_dentry;     /* struct super_block.s_dentry */
+    int s_files;      /* struct super_block.s_files */
+    int s_mounts;     /* struct super_block.s_mounts */
+    int s_instances;  /* struct super_block.s_instances */
+    int s_list;       /* struct super_block.s_list */
+    int s_dev;        /* struct super_block.s_dev */
+    int s_blocksize;  /* struct super_block.s_blocksize */
+    int s_blocksize_bits; /* struct super_block.s_blocksize_bits */
+    int s_magic;      /* struct super_block.s_magic */
+    int s_type;       /* struct super_block.s_type */
+    int s_flags;      /* struct super_block.s_flags */
+    int s_time_gran;  /* struct super_block.s_time_gran */
+    int s_maxbytes;   /* struct super_block.s_maxbytes */
+    int s_op_flags;   /* struct super_block.s_op_flags */
+
+    /* Thread struct offsets */
+    int t_thread_cpuctx;      /* thread_struct.cpu_context */
+    int t_thread_fpsimd;      /* thread_struct.fpsimd_state */
+
+    /* Signal struct offsets */
+    int t_signal_shared_pending; /* signal_struct.shared_pending */
+    int t_signal_cred_guard;     /* signal_struct.cred_guard_mutex */
+
+    /* Sighand struct offsets */
+    int t_sighand_action;       /* sighand_struct.action */
+
+    /* Fs struct offsets */
+    int t_fs_pwd;               /* fs_struct.pwd */
+    int t_fs_root;              /* fs_struct.root */
+
+    /* Nsproxy struct offsets */
+    int t_nsproxy_mnt_ns;       /* nsproxy.mnt_ns */
+    int t_nsproxy_pid_ns;       /* nsproxy.pid_ns_for_children */
+
+    /* Cred struct offsets */
+    int t_cred_cap_eff;         /* cred.cap_effective */
+    int t_cred_cap_perm;        /* cred.cap_permitted */
+    int t_cred_cap_inh;         /* cred.cap_inheritable */
+    int t_cred_uid;             /* cred.uid */
+
+    /* Verification */
+    int t_sighand_verified;     /* sighand pointer verified */
+};
+
+extern struct memd_learned_ext memd_learned_ext;
+
+/* Learn extended offsets for more universality */
+int memd_learn_extended(void);
+
+/* Readers for extended offsets (defined in memd_learn.c). The learned
+ * slot load is extable-guarded: fault/unknown/NULL falls back to the
+ * compiled field (fail-soft) or NULL, never oopses. Plain functions
+ * (not inlines) so this header needs no include reordering. */
+struct files_struct *memd_t_files_fn(struct task_struct *t);
+struct signal_struct *memd_t_signal_fn(struct task_struct *t);
+struct sighand_struct *memd_t_sighand_fn(struct task_struct *t);
+struct task_struct *memd_t_real_parent_fn(struct task_struct *t);
+void *memd_t_stack_fn(struct task_struct *t);
+struct vm_area_struct *memd_m_mmap_fn(struct mm_struct *mm);
+struct path memd_f_path_fn(struct file *f);
+void *memd_f_private_fn(struct file *f);
+
+#define memd_t_files(t) (memd_t_files_fn(t))
+
+#define memd_t_signal(t) (memd_t_signal_fn(t))
+
+#define memd_t_sighand(t) (memd_t_sighand_fn(t))
+
+#define memd_t_real_parent(t) (memd_t_real_parent_fn(t))
+
+#define memd_t_stack(t) (memd_t_stack_fn(t))
+
+#define memd_f_path(f) (memd_f_path_fn(f))
+
+#define memd_f_op(f) \
+    (memd_learned_ext.f_op >= 0 ? \
+     *(struct file_operations **)((char *)(f) + memd_learned_ext.f_op) : \
+     (f)->f_op)
+
+#define memd_f_private(f) (memd_f_private_fn(f))
+
+/* Writer twin of memd_f_private (release path NULL-ing). Real function
+ * (not inline: struct file is incomplete in this header). */
+void memd_f_private_set(struct file *f, void *v);
+
+/* Learn f_private from an exact anchor (our own anon_inode file whose
+ * private pointer we set at creation). Declared here, defined in
+ * memd_learn.c next to the other file learners. */
+void memd_learn_file_private(struct file *f, void *known_private);
+
+#define memd_d_name(d) \
+    (memd_learned_ext.d_name >= 0 ? \
+     *(struct qstr *)((char *)(d) + memd_learned_ext.d_name) : \
+     (d)->d_name)
+
+#define memd_d_parent(d) \
+    (memd_learned_ext.d_parent >= 0 ? \
+     *(struct dentry **)((char *)(d) + memd_learned_ext.d_parent) : \
+     (d)->d_parent)
+
+#define memd_i_ino(i) \
+    (memd_learned_ext.i_ino >= 0 ? \
+     *(ino_t *)((char *)(i) + memd_learned_ext.i_ino) : \
+     (i)->i_ino)
+
+#define memd_s_root(s) \
+    (memd_learned_ext.s_root >= 0 ? \
+     *(struct dentry **)((char *)(s) + memd_learned_ext.s_root) : \
+     (s)->s_root)
+
+#define memd_m_mmap(mm) (memd_m_mmap_fn(mm))
+
+#define memd_m_arg_lock(mm) \
+    (memd_learned_ext.m_arg_lock >= 0 ? \
+     *(spinlock_t *)((char *)(mm) + memd_learned_ext.m_arg_lock) : \
+     (mm)->arg_lock)
+
+#define memd_m_arg_start(mm) \
+    (memd_learned_ext.m_arg_start >= 0 ? \
+     *(unsigned long *)((char *)(mm) + memd_learned_ext.m_arg_start) : \
+     (mm)->arg_start)
+
+#define memd_m_arg_end(mm) \
+    (memd_learned_ext.m_arg_end >= 0 ? \
+     *(unsigned long *)((char *)(mm) + memd_learned_ext.m_arg_end) : \
+     (mm)->arg_end)
+
+#define memd_m_env_start(mm) \
+    (memd_learned_ext.m_env_start >= 0 ? \
+     *(unsigned long *)((char *)(mm) + memd_learned_ext.m_env_start) : \
+     (mm)->env_start)
+
+#define memd_m_env_end(mm) \
+    (memd_learned_ext.m_env_end >= 0 ? \
+     *(unsigned long *)((char *)(mm) + memd_learned_ext.m_env_end) : \
+     (mm)->env_end)
+
+/* Thread struct readers */
+#define memd_t_thread_cpuctx(t) \
+    (memd_learned_ext.t_thread_cpuctx >= 0 ? \
+     *(void **)((char *)(t) + memd_learned_ext.t_thread_cpuctx) : \
+     NULL)
+
+#define memd_t_thread_fpsimd(t) \
+    (memd_learned_ext.t_thread_fpsimd >= 0 ? \
+     *(void **)((char *)(t) + memd_learned_ext.t_thread_fpsimd) : \
+     NULL)
+
+/* Signal struct readers */
+#define memd_t_signal_shared_pending(t) \
+    (memd_learned_ext.t_signal_shared_pending >= 0 ? \
+     *(struct list_head **)((char *)memd_t_signal(t) + memd_learned_ext.t_signal_shared_pending) : \
+     NULL)
+
+#define memd_t_signal_cred_guard(t) \
+    (memd_learned_ext.t_signal_cred_guard >= 0 ? \
+     *(struct mutex **)((char *)memd_t_signal(t) + memd_learned_ext.t_signal_cred_guard) : \
+     NULL)
+
+/* Sighand struct readers */
+#define memd_t_sighand_action(t) \
+    (memd_learned_ext.t_sighand_action >= 0 ? \
+     *(struct k_sigaction **)((char *)memd_t_sighand(t) + memd_learned_ext.t_sighand_action) : \
+     NULL)
+
+/* Fs struct readers: intentionally absent (fail closed). The t_fs base
+ * offset has no safe learner (fs->pwd/root are embedded struct paths,
+ * not pointers, so no pointer anchor exists), and these readers
+ * previously invoked a memd_t_fs() helper that does not exist, with an
+ * unguarded deref if it ever had. Parked at NULL until a guarded
+ * reader exists. Argument is unevaluated; nothing expands these today. */
+#define memd_t_fs_pwd(t) (NULL)
+
+#define memd_t_fs_root(t) (NULL)
+
+/* Nsproxy struct readers: intentionally absent (fail closed). Same
+ * status as the fs readers above: no safe base learner (prior scans
+ * compared field addresses instead of targets and could never match)
+ * and the referenced memd_t_nsproxy() helper does not exist. Parked
+ * at NULL; argument unevaluated; nothing expands these today. */
+#define memd_t_nsproxy_mnt_ns(t) (NULL)
+
+#define memd_t_nsproxy_pid_ns(t) (NULL)
+
+/* Cred struct readers: guarded functions (defined in memd_learn.c),
+ * not raw derefs. Fault/unknown/NULL yields zero caps (fail closed:
+ * deny) or an invalid uid (999999, never 0-as-root). The uid offset is
+ * the shared memd_cred_uid_off() helper (learned, else compiled 4);
+ * the cap second word (caps 32..63) is base+4 by kernel_cap_struct
+ * definition (two u32s). Plain functions (not inlines) so this header
+ * needs no include reordering. */
+struct memd_learn_cap memd_t_cred_cap_eff_fn(struct task_struct *t);
+struct memd_learn_cap memd_t_cred_cap_perm_fn(struct task_struct *t);
+struct memd_learn_cap memd_t_cred_cap_inh_fn(struct task_struct *t);
+kuid_t memd_t_cred_uid_fn(struct task_struct *t);
+
+#define memd_t_cred_cap_eff(t) (memd_t_cred_cap_eff_fn(t))
+
+#define memd_t_cred_cap_perm(t) (memd_t_cred_cap_perm_fn(t))
+
+#define memd_t_cred_cap_inh(t) (memd_t_cred_cap_inh_fn(t))
+
+#define memd_t_cred_uid(t) (memd_t_cred_uid_fn(t))
+
+/* Comprehensive learning */
+int memd_learn_comprehensive(void);
+
+/* Runtime ASLR slide detection */
+int memd_detect_aslr_slide(void);
+int memd_aslr_validate_symbols(void);
+int memd_aslr_symbol_total(void);
+int memd_aslr_symbol_valid(void);
+unsigned long memd_aslr_kernel_base(void);
+long memd_aslr_slide_value(void);
+int memd_aslr_reset(void);
+int memd_aslr_recompute(void);
+int memd_aslr_is_active(void);
+unsigned long memd_aslr_base_address(void);
+long memd_aslr_offset(void);
+
+/* Live struct scanning */
+int memd_live_scan_ptr(const void *base, size_t len, const void *target, int *offset_out);
+int memd_live_scan_task(struct task_struct *t);
+int memd_live_scan_mm(struct mm_struct *mm);
+int memd_live_scan_vma(struct vm_area_struct *vma);
+int memd_live_scan_file(struct file *f);
+int memd_live_scan_all(void);
+int memd_learn_live_scan(void);
+int memd_live_scan(void);
+int memd_live_scan_structs(void);
+int memd_live_rescan(void);
+int memd_live_refresh(void);
+int memd_live_scan_with_btf(void);
+int memd_live_scan_field_btf(const char *field_name);
+
+/* BTF fallback helpers */
+int memd_btf_available_now(void);
+int memd_btf_get_offset(const char *struct_name, const char *member_name);
+int memd_btf_apply_all(void);
+int memd_btf_fallback_field(const char *field_name, int *offset_out);
+int memd_btf_refresh(void);
+int memd_btf_reparse(void);
+int memd_btf_is_available(void);
+
+/* Runtime updateability */
+int memd_learn_refresh(void);
+int memd_learn_force(void);
+int memd_learn_reset_state(void);
+int memd_learn_reload(void);
+int memd_learn_relearn(void);
+int memd_learned_checkpoint(void);
+int memd_learned_restore(void);
+unsigned long memd_learned_generation(void);
+int memd_learned_validate_all(void);
+int memd_learned_apply_blob(const void *blob, size_t len);
+int memd_learned_export_blob(void *blob, size_t cap, size_t *len_out);
+int memd_set_offset(const char *name, int offset);
+int memd_learned_update(const char *name, int offset);
+int memd_update_learned_offset(const char *name, int offset);
+int memd_update_learned_offsets(const char *names[], const int offsets[], int count);
+int memd_bulk_update_offsets_gen(const char *names[], const int offsets[], int count);
+int memd_offset_supported(const char *name);
+int memd_offset_field_count(void);
+const char *memd_offset_field_name(int index);
+int memd_learned_touch(void);
+int memd_offset_update_validate(const char *name, int offset);
+int memd_offset_update_commit(const char *name, int offset);
+int memd_offset_update_rollback(void);
+int memd_learned_report(char *buf, size_t cap);
+int memd_learned_report_done(void);
+int memd_learned_lock_offsets(void);
+int memd_learned_unlock_offsets(void);
+int memd_learned_freeze(void);
+int memd_learned_thaw(void);
+int memd_learned_generation_inc(void);
+int memd_learned_generation_dec(void);
+int memd_learned_generation_reset(void);
+int memd_learned_self_test(void);
+int memd_learned_health_check(void);
+int memd_learned_ready(void);
+int memd_learned_started(void);
+
+/* ASLR state access */
+long memd_get_kaslr_slide(void);
+unsigned long memd_get_kernel_base(void);
+
+/* ASLR slide detection */
+long memd_get_kaslr_slide(void);
+unsigned long memd_get_kernel_base(void);
+
+/* Runtime offset updates */
+int memd_update_offset(const char *name, int offset);
+int memd_bulk_update_offsets(const char *names[], const int offsets[], int count);
+
+#endif /* MEMD_LEARN_H */
+/* kmod/memd/utils/memd_learn.h[∂] */

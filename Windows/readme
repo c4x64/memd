@@ -1,5 +1,46 @@
-# Windows
+# Windows MEMD Client
 
-Reserved for Windows-specific implementation.
+User-mode client for the MEMD kernel driver on Windows.
+
+## Building
+
+```sh
+# With MinGW:
+gcc -Wall -O2 -I. -o memd_client.exe memd_client.c
+
+# With MSVC:
+cl /W4 /O2 memd_client.c
+```
+
+## Usage
+
+```sh
+memd_client.exe [process_name]
+```
+
+## Files
+
+- `client.h` — Windows DeviceIoControl wrapper (MEMD_DEVICE_NAME)
+- `memd_client.c` — Example client program
+- `driver.h` — WDM kernel driver header (IOCTL codes, structs, device extension)
+- `driver.c` — WDM kernel driver implementation (requires WDK to compile)
+- `Makefile` — Build script (MinGW for client, WDK for driver)
+
+## Driver
+
+The kernel driver (`driver.c` / `driver.h`) implements:
+- Device creation and symbolic link
+- IOCTL dispatch (read/write memory, find process, hide, give root, etc.)
+- Process enumeration via PsGetProcessImageFileName
+- Memory read/write via KeStackAttachProcess
+- Address translation via MmGetPhysicalAddress
+
+Compile with WDK: msbuild or make from WDK command prompt.
+
+## Notes
+
+- Requires the MEMD kernel driver to be installed and running.
+- IOCTL codes use CTL_CODE with base 0x8000.
+- The driver requires Windows 10/11 x64.
 
 <!-- Windows/readme[∂] -->

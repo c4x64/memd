@@ -1,5 +1,31 @@
-# iOS
+# iOS/macOS MEMD Client
 
-Reserved for iOS-specific implementation.
+User-mode client for the MEMD kernel extension on Apple platforms.
+
+## Building
+
+```sh
+make
+# or manually:
+clang -Wall -O2 -I. -o memd_client memd_client.c
+```
+
+## Usage
+
+```sh
+./memd_client [process_name]
+```
+
+## Files
+
+- `client.h` — macOS/iOS ioctl wrapper (MEMD_DEVICE_PATH)
+- `memd_client.c` — Example client program
+- `Makefile` — Build script (Clang/Xcode)
+
+## Notes
+
+- Requires the MEMD kernel extension to be loaded.
+- The kernel extension itself (kext) is not yet implemented.
+- IOCTL codes use _IOWR with magic 'W'.
 
 <!-- iOS/readme[∂] -->

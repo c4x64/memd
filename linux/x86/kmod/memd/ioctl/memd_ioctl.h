@@ -1,0 +1,501 @@
+#ifndef MEMD_IOCTL_H
+#define MEMD_IOCTL_H
+
+#include "memd_common.h"
+#include "memd_bindproc.h"
+
+/* Feature command structs live in their own headers (single definition;
+ * stale duplicates here broke every matrix build with "redefinition"). */
+#include "memd_hwbp.h"
+#include "memd_gyro.h"
+#include "memd_sigforce.h"
+#include "memd_inject.h"
+
+struct memd_addr_translate_cmd {
+    uintptr_t phy_addr; /* Output: Physical address after translation */
+    pid_t pid; /* Input: Process ID owning the virtual address */
+    uintptr_t va; /* Input: Virtual address to translate */
+};
+
+struct memd_debug_info_cmd {
+    u64 ttbr0_el1; /* Translation Table Base Register 0 */
+    u64 task_struct;
+    u64 mm_struct; /* Memory Management Structure */
+    u64 pgd_addr; /* Page Global Directory address */
+    u64 pgd_phys_addr;
+    u64 mm_asid; /* Address Space ID */
+    u32 mm_right;
+};
+
+struct memd_at_s1e0r_cmd {
+    uintptr_t phy_addr;
+    pid_t pid;
+    uintptr_t va;
+};
+
+struct kernel_page {
+    unsigned long flags; /* Atomic flags, some possibly */
+    union { /* This union is 4 bytes in size. */
+        /*
+         * If the page can be mapped to userspace, encodes the number
+         * of times this page is referenced by a page table.
+         */
+        atomic_t _mapcount;
+
+        /*
+         * If the page is neither PageSlab nor mappable to userspace,
+         * the value stored here may help determine what this page
+         * is used for.  See page-flags.h for a list of page types
+         * which are currently stored here.
+         */
+        unsigned int page_type;
+    };
+
+    /* Usage count. *DO NOT USE DIRECTLY*. See page_ref.h */
+    atomic_t _refcount;
+
+    uintptr_t phy_addr;
+};
+
+struct memd_page_info_cmd {
+    pid_t pid;
+    uintptr_t va;
+
+    struct kernel_page page; /* Output: Page information */
+};
+
+#ifndef MEMD_DISABLE_DMABUF
+struct memd_dma_buf_create_cmd {
+    pid_t pid;
+    uintptr_t va;
+    size_t size;
+    int fd;
+};
+#endif
+
+struct memd_pte_mapping_cmd {
+    pid_t pid;
+    uintptr_t start_addr;
+    size_t num_pages;
+    int hide; /* Hide the page if true */
+};
+
+struct memd_page_table_walk_cmd {
+    pid_t pid; /* Input: Process ID */
+    u64 total_pte_count; /* Output: Total number of PTEs (Page Table Entries) */
+    u64 present_pte_count; /* Output: Number of present (mapped) PTEs */
+    u64 pmd_huge_count; /* Output: Number of PMD huge pages (2MB pages) */
+    u64 pud_huge_count; /* Output: Number of PUD huge pages (1GB pages) */
+};
+
+struct memd_copy_process_cmd {
+    pid_t pid;
+    int (*__user fn)(void*);
+    void* __user child_stack;
+    size_t child_stack_size;
+    u64 flags;
+    void* __user arg;
+
+    int __user* child_tid;
+};
+
+struct memd_read_physical_memory_cmd {
+    pid_t pid; /* Input: Process ID owning the virtual address */
+    uintptr_t src_va; /* Input: Virtual address to access */
+    uintptr_t dst_va; /* Input: Virtual address to write */
+    size_t size; /* Input: Size of memory to read */
+    uintptr_t phy_addr; /* Output: Physical address of the source virtual address */
+};
+
+struct memd_write_physical_memory_cmd {
+    pid_t pid; /* Input: Process ID owning the virtual address */
+    uintptr_t src_va; /* Input: Virtual address to access */
+    uintptr_t dst_va; /* Input: Virtual address to write */
+    size_t size; /* Input: Size of memory to read */
+    uintptr_t phy_addr; /* Output: Physical address of the source virtual address */
+};
+
+struct memd_get_module_base_cmd {
+    pid_t pid; /* Input: Process ID */
+    char name[256]; /* Input: Module name */
+    uintptr_t base; /* Output: Base address of the module */
+    int vm_flag; /* Input: VM flag to filter (e.g., VM_EXEC) */
+};
+
+struct memd_find_proc_cmd {
+    pid_t pid; /* Output: Process ID */
+    char name[256]; /* Input: Process name */
+};
+
+struct memd_is_proc_alive_cmd {
+    pid_t pid; /* Output: Process ID */
+    int alive; /* Output: 1 if alive, 0 if not */
+};
+
+struct memd_hide_proc_cmd {
+    pid_t pid; /* Input: Process ID */
+    int hide; /* Input: 1 to hide, 0 to unhide */
+};
+
+/* Trust model (no capable check here, and none inside give_root()):
+ * this call exists to GRANT root, so a privilege check would brick it.
+ * The gate is fd possession: only root can create the memd socket
+ * (memd_sock_create requires uid 0 + CAP_NET_BIND_SERVICE), and only an
+ * fd holder can reach this handler. Do NOT pass the fd to untrusted
+ * processes (inheritance / SCM_RIGHTS transfer escalates the receiver).
+ * Companion read/write/translate handlers share the same fd-gated model. */
+struct memd_give_root_cmd {
+    int result; /* Output: 0 on success, negative error code on failure */
+};
+
+struct memd_read_physical_memory_ioremap_cmd {
+    pid_t pid; /* Input: Process ID owning the virtual address */
+    uintptr_t src_va; /* Input: Virtual address to access */
+    uintptr_t dst_va; /* Input: Virtual address to write */
+    size_t size; /* Input: Size of memory to read */
+    uintptr_t phy_addr; /* Output: Physical address of the source virtual address */
+    int prot; /* Input: Memory protection type (use MT_*) */
+};
+
+struct memd_write_physical_memory_ioremap_cmd {
+    pid_t pid; /* Input: Process ID owning the virtual address */
+    uintptr_t src_va; /* Input: Virtual address to access */
+    uintptr_t dst_va; /* Input: Virtual address to write */
+    size_t size; /* Input: Size of memory to read */
+    uintptr_t phy_addr; /* Output: Physical address of the source virtual address */
+    int prot; /* Input: Memory protection type (use MT_*) */
+};
+
+struct memd_bind_proc_cmd {
+    pid_t pid; /* Input: Process ID owning the virtual address */
+    int fd; /* Output: Anno File Descriptor */
+};
+
+struct memd_list_processes_cmd {
+    u8* __user bitmap; /* Input: User-space bitmap buffer (at least 8192 bytes for PID 0-65535) */
+    size_t bitmap_size; /* Input: Size of bitmap in bytes (must be at least 8192) */
+    size_t process_count; /* Output: Total number of processes (number of set bits) */
+};
+
+struct memd_get_proc_info_cmd {
+    pid_t pid; /* Input: Process ID to query */
+    pid_t tgid; /* Output: Thread group ID (process group leader) */
+    char name[256]; /* Output: Process name (comm) */
+    uid_t uid; /* Output: User ID */
+    pid_t ppid; /* Output: Parent process ID */
+    int prio; /* Output: Process priority */
+};
+
+/* IOCTL command for virtual to physical address translation */
+#define MEMD_IOCTL_ADDR_TRANSLATE _IOWR('W', 1, struct memd_addr_translate_cmd)
+/* IOCTL command for debugging information */
+#define MEMD_IOCTL_DEBUG_INFO _IOR('W', 2, struct memd_debug_info_cmd)
+/* * IOCTL command for va to phys translation */
+#define MEMD_IOCTL_AT_S1E0R _IOWR('W', 3, struct memd_at_s1e0r_cmd)
+/* IOCTL command for getting page information at a specific virtual address */
+#define MEMD_IOCTL_PAGE_INFO _IOWR('W', 4, struct memd_page_info_cmd)
+#ifndef MEMD_DISABLE_DMABUF
+/* IOCTL command for creating a DMA buffer at a specific virtual address */
+#define MEMD_IOCTL_DMA_BUF_CREATE _IOWR('W', 5, struct memd_dma_buf_create_cmd)
+#endif
+/* IOCTL command for getting PTE mapping information */
+#define MEMD_IOCTL_PTE_MAPPING _IOWR('W', 6, struct memd_pte_mapping_cmd)
+/* IOCTL command for page table walk */
+#define MEMD_IOCTL_PAGE_TABLE_WALK _IOWR('W', 7, struct memd_page_table_walk_cmd)
+/* IOCTL command for copying a process */
+#define MEMD_IOCTL_COPY_PROCESS _IOWR('W', 8, struct memd_copy_process_cmd)
+/* IOCTL command for reading physical memory */
+#define MEMD_IOCTL_READ_MEMORY _IOWR('W', 9, struct memd_read_physical_memory_cmd)
+/* IOCTL command for getting module base address */
+#define MEMD_IOCTL_GET_MODULE_BASE _IOWR('W', 10, struct memd_get_module_base_cmd)
+/* IOCTL command for finding a process by name */
+#define MEMD_IOCTL_FIND_PROCESS _IOWR('W', 11, struct memd_find_proc_cmd)
+/* IOCTL command for writing physical memory */
+#define MEMD_IOCTL_WRITE_MEMORY _IOWR('W', 12, struct memd_write_physical_memory_cmd)
+/* IOCTL command for checking if a process is alive */
+#define MEMD_IOCTL_IS_PROCESS_ALIVE _IOWR('W', 13, struct memd_is_proc_alive_cmd)
+/* IOCTL command for hiding/unhiding a process */
+#define MEMD_IOCTL_HIDE_PROCESS _IOWR('W', 14, struct memd_hide_proc_cmd)
+/* IOCTL command for giving root privileges to the current process */
+#define MEMD_IOCTL_GIVE_ROOT _IOWR('W', 15, struct memd_give_root_cmd)
+/* IOCTL command for reading physical memory using ioremap */
+#define MEMD_IOCTL_READ_MEMORY_IOREMAP _IOWR('W', 16, struct memd_read_physical_memory_ioremap_cmd)
+/* IOCTL command for writing physical memory using ioremap */
+#define MEMD_IOCTL_WRITE_MEMORY_IOREMAP _IOWR('W', 17, struct memd_write_physical_memory_ioremap_cmd)
+/* IOCTL command for binding a process to an Anno file descriptor */
+#define MEMD_IOCTL_BIND_PROC _IOWR('W', 18, struct memd_bind_proc_cmd)
+/* IOCTL command for listing all processes as a bitmap */
+#define MEMD_IOCTL_LIST_PROCESSES _IOWR('W', 19, struct memd_list_processes_cmd)
+/* IOCTL command for page permissions of a kernel VA (no content read:
+ * safe on execute-only mappings). Used to map image/rodata regions. */
+struct memd_page_perms_cmd {
+    uintptr_t va; /* Input: kernel virtual address */
+    uintptr_t phy_addr; /* Output: physical address (0 if unmapped) */
+    unsigned int present; /* Output: 1 if mapped at any level */
+    unsigned int leaf_level; /* Output: 0 pud / 1 pmd / 2 pte / 3 missing */
+    unsigned int ap; /* Output: AP[2:1] bits (0 RW, 2 RO) */
+    unsigned int xn; /* Output: 1 if execute-never set */
+    unsigned int idx0; /* Output: pgd index used by the walk */
+    unsigned int idx1; /* Output: pud index used by the walk */
+    unsigned long desc[4]; /* Output: raw pgd/pud/pmd/pte values seen */
+};
+#define MEMD_IOCTL_PAGE_PERMS _IOWR('W', 23, struct memd_page_perms_cmd)
+/* IOCTL command for getting process information by PID */
+#define MEMD_IOCTL_GET_PROC_INFO _IOWR('W', 20, struct memd_get_proc_info_cmd)
+/* Hardware breakpoint/watchpoint commands (structs in memd_hwbp.h). */
+#define MEMD_IOCTL_HWBP_INFO _IOWR('W', 21, struct memd_hwbp_info_cmd)
+
+#define MEMD_IOCTL_HWBP_SET _IOWR('W', 22, struct memd_hwbp_set_cmd)
+
+#define MEMD_IOCTL_HWBP_REMOVE _IOWR('W', 23, struct memd_hwbp_remove_cmd)
+
+#define MEMD_IOCTL_HWBP_LIST _IOWR('W', 24, struct memd_hwbp_list_cmd)
+
+/* Gyroscope/Touch simulation commands (structs in memd_gyro.h). */
+#define MEMD_IOCTL_GYRO_PREPARE _IOWR('W', 30, struct memd_gyro_prepare_cmd)
+
+#define MEMD_IOCTL_TOUCH_INIT _IOWR('W', 31, struct memd_touch_init_cmd)
+
+#define MEMD_IOCTL_TOUCH_INJECT _IOWR('W', 32, struct memd_touch_inject_cmd)
+
+#define MEMD_IOCTL_GYRO_INJECT _IOWR('W', 33, struct memd_gyro_inject_cmd)
+
+/* Signal forcing (struct in memd_sigforce.h). */
+#define MEMD_IOCTL_SIGFORCE _IOWR('W', 34, struct memd_sigforce_cmd)
+
+#define MEMD_IOCTL_GYRO_CALIBRATE _IOWR('W', 35, struct memd_gyro_calibrate_cmd)
+
+#define MEMD_IOCTL_TOUCH_CALIBRATE _IOWR('W', 36, struct memd_touch_calibrate_cmd)
+
+#define MEMD_IOCTL_VIRTUAL_INPUT_CREATE _IOWR('W', 37, struct memd_virtual_input_cmd)
+
+/* Remote .so injection (struct in memd_inject.h). 38/39: lowest free
+ * numbers (25/29 reserved around display/test); sizes differ from any
+ * nr-sharing struct, so full _IOWR codes are unique (gate-verified). */
+#define MEMD_IOCTL_LOAD_SOTOAPP _IOWR('W', 38, struct memd_loadso_cmd)
+#define MEMD_IOCTL_LOAD_SOSUTOAPP _IOWR('W', 39, struct memd_loadso_cmd)
+
+/* Hotswap unload (struct in memd_inject.h): remote dlclose(handle) in
+ * the target. Lowest free number after 40. */
+#define MEMD_IOCTL_LOADSO_UNLOAD _IOWR('W', 41, struct memd_loadso_unload_cmd)
+
+/* Driver identity + capability query (below): the userspace app probes
+ * this first to verify the install and adapt to driver capabilities. */
+#define MEMD_ABI_VERSION 1
+#define MEMD_VERSION_MAJOR 1
+#define MEMD_VERSION_MINOR 0
+#define MEMD_VERSION_PATCH 0
+#define MEMD_F_BOOTSTRAP_DONE 1
+#define MEMD_F_LEARNED_OFFSETS 2
+struct memd_version_cmd {
+    __u32 abi;      /* Input: must equal MEMD_ABI_VERSION */
+    __u32 major;    /* Output: driver version */
+    __u32 minor;    /* Output */
+    __u32 patch;    /* Output */
+    __u32 flags;    /* Output: MEMD_F_* capability/boot-state bits */
+    int gen;      /* Output: learned generation index, or -1 */
+    int result;   /* Output: 0 ok, else -errno */
+};
+#define MEMD_IOCTL_VERSION _IOWR('W', 42, struct memd_version_cmd)
+
+/* Runtime offset-learning snapshot (below): observability for the
+ * universality story — field teams dump this on new kernels to see
+ * exactly what adapted and what stayed unknown (-1). Mask bit i covers
+ * the i-th offset field in order (t_pid=bit0 ... m_pgd=bit7). */
+struct memd_learn_status_cmd {
+    int gen;      /* Output: learned generation index, or -1 */
+    int t_pid;    /* Output: task_struct.pid offset, or -1 */
+    int t_tgid;   /* Output: task_struct.tgid offset, or -1 */
+    int t_mm;     /* Output: task_struct.mm offset, or -1 */
+    int t_cred;   /* Output: task_struct.cred offset, or -1 */
+    int v_start;  /* Output: vm_area_struct.vm_start offset, or -1 */
+    int v_end;    /* Output: vm_area_struct.vm_end offset, or -1 */
+    int v_flags;  /* Output: vm_area_struct.vm_flags offset, or -1 */
+    int m_pgd;    /* Output: mm_struct.pgd offset, or -1 */
+    __u32 mask;     /* Output: learned-bits, t_pid=bit0 */
+    int result;   /* Output: 0 ok, else -errno */
+};
+#define MEMD_IOCTL_LEARN_STATUS _IOWR('W', 43, struct memd_learn_status_cmd)
+
+/* Symbol bootstrap (struct below): userspace delivers kernel addresses
+ * for file helpers GKI protects from unsigned modules, so the kallsyms
+ * parser needs no direct imports. Lowest free number after 39. */
+struct memd_bootstrap_cmd {
+    __u64 filp_open;   /* Input: kernel address of filp_open */
+    __u64 kernel_read; /* Input: kernel address of kernel_read */
+    __u64 filp_close;  /* Input: kernel address of filp_close */
+    int result;        /* Output: 0 ok, else -errno */
+};
+#define MEMD_IOCTL_BOOTSTRAP _IOWR('W', 40, struct memd_bootstrap_cmd)
+
+/* Runtime offset update: userspace pushes learned offsets without rebuild.
+ * Single update: field name (32 bytes) + offset value. */
+struct memd_offset_update_cmd {
+    char field_name[32]; /* Input: field name (e.g., "t_pid", "v_start") */
+    int offset;          /* Input: offset value in bytes */
+    int result;          /* Output: 0 ok, else -errno */
+};
+#define MEMD_IOCTL_OFFSET_UPDATE _IOWR('W', 44, struct memd_offset_update_cmd)
+
+/* Bulk offset update: userspace pushes multiple offsets at once.
+ * Up to 32 name/offset pairs in one ioctl. */
+#define MEMD_MAX_BULK_OFFSETS 32
+struct memd_bulk_offset_update_cmd {
+    __u32 count;                      /* Input: number of entries */
+    struct {
+        char field_name[32];
+        int offset;
+    } entries[MEMD_MAX_BULK_OFFSETS]; /* Input: array of name/offset pairs */
+    int result;                       /* Output: 0 ok, negative = first error, positive = count of failures */
+};
+#define MEMD_IOCTL_BULK_OFFSET_UPDATE _IOWR('W', 45, struct memd_bulk_offset_update_cmd)
+
+/* ASLR/KASLR info query: returns kernel base and slide. */
+struct memd_kaslr_info_cmd {
+    __u64 kernel_base; /* Output: kernel base virtual address */
+    __u64 kaslr_slide; /* Output: KASLR slide (0 if none or unknown) */
+    int result;        /* Output: 0 ok, else -errno */
+};
+#define MEMD_IOCTL_KASLR_INFO _IOWR('W', 46, struct memd_kaslr_info_cmd)
+
+/* IOCTL command for hiding status (hook active, hidden count) */
+struct memd_hide_status_cmd {
+    int active; /* Output: 1 if the getdents64 filter is installed */
+    int hidden_count; /* Output: pids currently in the hidden set */
+};
+#define MEMD_IOCTL_HIDE_STATUS _IOWR('W', 21, struct memd_hide_status_cmd)
+/* IOCTL command for installing/uninstalling the getdents64 filter.
+ * Userspace gates on CFI status first (enforcing kernels would trap on
+ * the indirect table call, so install is refused there by policy). */
+struct memd_hide_install_cmd {
+    int install; /* Input: 1 install, 0 uninstall */
+    int result; /* Output: 0 ok, negative errno on failure */
+};
+#define MEMD_IOCTL_HIDE_INSTALL _IOWR('W', 22, struct memd_hide_install_cmd)
+/* Display facility (numeric draw ops; per-SoC backend, fail-closed).
+ * Structs live in display/memd_display.h (single definition); opcodes:
+ * 26 = status, 27 = install/uninstall, 28 = submit frame ops. */
+#include "memd_display.h"
+#define MEMD_IOCTL_DISP_STATUS _IOWR('W', 26, struct memd_disp_status_cmd)
+#define MEMD_IOCTL_DISP_INSTALL _IOWR('W', 27, struct memd_disp_install_cmd)
+#define MEMD_IOCTL_DISP_FRAME _IOWR('W', 28, struct memd_disp_frame_cmd)
+#ifdef MEMD_DISP_TEST
+#include "memd_display.h"
+#define MEMD_IOCTL_DISP_READBACK _IOWR('W', 29, struct memd_disp_readback_cmd)
+#endif
+
+int do_vaddr_translate(struct socket* sock, void __user* arg);
+int do_debug_info(struct socket* sock, void __user* arg);
+int do_at_s1e0r(struct socket* sock, void __user* arg);
+int do_get_page_info(struct socket* sock, void __user* arg);
+#ifndef MEMD_DISABLE_DMABUF
+int do_create_proc_dma_buf(struct socket* sock, void __user* arg);
+#endif
+int do_pte_mapping(struct socket* sock, void __user* arg);
+int do_page_table_walk(struct socket* sock, void __user* arg);
+int do_copy_process(struct socket* sock, void __user* arg);
+int do_read_physical_memory(struct socket* sock, void __user* arg);
+int do_get_module_base(struct socket* sock, void __user* arg);
+int do_find_process(struct socket* sock, void __user* arg);
+int do_write_physical_memory(struct socket* sock, void __user* arg);
+int do_is_process_alive(struct socket* sock, void __user* arg);
+int do_hide_process(struct socket* sock, void __user* arg);
+int do_give_root(struct socket* sock, void __user* arg);
+int do_read_physical_memory_ioremap(struct socket* sock, void __user* arg);
+int do_write_physical_memory_ioremap(struct socket* sock, void __user* arg);
+int do_list_processes(struct socket* sock, void __user* arg);
+int do_get_process_info(struct socket* sock, void __user* arg);
+int do_hide_status(struct socket* sock, void __user* arg);
+int do_hide_install(struct socket* sock, void __user* arg);
+int do_page_perms(struct socket* sock, void __user* arg);
+int do_disp_status(struct socket* sock, void __user* arg);
+int do_disp_install(struct socket* sock, void __user* arg);
+int do_disp_frame(struct socket* sock, void __user* arg);
+#ifdef MEMD_DISP_TEST
+int do_disp_readback(struct socket* sock, void __user* arg);
+#endif
+int do_hwbp_info(struct socket* sock, void __user* arg);
+int do_hwbp_set(struct socket* sock, void __user* arg);
+int do_hwbp_remove(struct socket* sock, void __user* arg);
+int do_hwbp_list(struct socket* sock, void __user* arg);
+int do_gyro_prepare(struct socket* sock, void __user* arg);
+int do_touch_init(struct socket* sock, void __user* arg);
+int do_touch_inject(struct socket* sock, void __user* arg);
+int do_gyro_inject(struct socket* sock, void __user* arg);
+int do_sigforce(struct socket* sock, void __user* arg);
+int do_gyro_calibrate(struct socket* sock, void __user* arg);
+int do_touch_calibrate(struct socket* sock, void __user* arg);
+int do_virtual_input_create(struct socket* sock, void __user* arg);
+int do_load_sotoapp(struct socket* sock, void __user* arg);
+int do_load_sosutoapp(struct socket* sock, void __user* arg);
+int do_loadso_unload(struct socket* sock, void __user* arg);
+int do_memd_version(struct socket* sock, void __user* arg);
+int do_learn_status(struct socket* sock, void __user* arg);
+int do_bootstrap(struct socket* sock, void __user* arg);
+int do_offset_update(struct socket* sock, void __user* arg);
+int do_bulk_offset_update(struct socket* sock, void __user* arg);
+int do_kaslr_info(struct socket* sock, void __user* arg);
+
+typedef int (*ioctl_handler_t)(struct socket* sock, void __user* arg);
+
+static const struct ioctl_cmd_map {
+    unsigned int cmd;
+    ioctl_handler_t handler;
+} ioctl_handlers[] = {
+    {.cmd = MEMD_IOCTL_ADDR_TRANSLATE, .handler = do_vaddr_translate},
+    {.cmd = MEMD_IOCTL_DEBUG_INFO, .handler = do_debug_info},
+    {.cmd = MEMD_IOCTL_AT_S1E0R, .handler = do_at_s1e0r}, /* Reusing the same handler for AT VA */
+    {.cmd = MEMD_IOCTL_PAGE_INFO, .handler = do_get_page_info},
+#ifndef MEMD_DISABLE_DMABUF
+    {.cmd = MEMD_IOCTL_DMA_BUF_CREATE, .handler = do_create_proc_dma_buf},
+#endif
+    {.cmd = MEMD_IOCTL_PTE_MAPPING, .handler = do_pte_mapping},
+    {.cmd = MEMD_IOCTL_PAGE_TABLE_WALK, .handler = do_page_table_walk},
+    {.cmd = MEMD_IOCTL_COPY_PROCESS, .handler = do_copy_process},
+    {.cmd = MEMD_IOCTL_READ_MEMORY, .handler = do_read_physical_memory},
+    {.cmd = MEMD_IOCTL_GET_MODULE_BASE, .handler = do_get_module_base},
+    {.cmd = MEMD_IOCTL_FIND_PROCESS, .handler = do_find_process},
+    {.cmd = MEMD_IOCTL_WRITE_MEMORY, .handler = do_write_physical_memory},
+    {.cmd = MEMD_IOCTL_IS_PROCESS_ALIVE, .handler = do_is_process_alive},
+    {.cmd = MEMD_IOCTL_HIDE_PROCESS, .handler = do_hide_process},
+    {.cmd = MEMD_IOCTL_GIVE_ROOT, .handler = do_give_root},
+    {.cmd = MEMD_IOCTL_READ_MEMORY_IOREMAP, .handler = do_read_physical_memory_ioremap},
+    {.cmd = MEMD_IOCTL_WRITE_MEMORY_IOREMAP, .handler = do_write_physical_memory_ioremap},
+    {.cmd = MEMD_IOCTL_BIND_PROC, .handler = do_bind_proc},
+    {.cmd = MEMD_IOCTL_LIST_PROCESSES, .handler = do_list_processes},
+    {.cmd = MEMD_IOCTL_GET_PROC_INFO, .handler = do_get_process_info},
+    {.cmd = MEMD_IOCTL_HIDE_STATUS, .handler = do_hide_status},
+    {.cmd = MEMD_IOCTL_HIDE_INSTALL, .handler = do_hide_install},
+    {.cmd = MEMD_IOCTL_PAGE_PERMS, .handler = do_page_perms},
+    {.cmd = MEMD_IOCTL_DISP_STATUS, .handler = do_disp_status},
+    {.cmd = MEMD_IOCTL_DISP_INSTALL, .handler = do_disp_install},
+    {.cmd = MEMD_IOCTL_DISP_FRAME, .handler = do_disp_frame},
+#ifdef MEMD_DISP_TEST
+    {.cmd = MEMD_IOCTL_DISP_READBACK, .handler = do_disp_readback},
+#endif
+    {.cmd = MEMD_IOCTL_HWBP_INFO, .handler = do_hwbp_info},
+    {.cmd = MEMD_IOCTL_HWBP_SET, .handler = do_hwbp_set},
+    {.cmd = MEMD_IOCTL_HWBP_REMOVE, .handler = do_hwbp_remove},
+    {.cmd = MEMD_IOCTL_HWBP_LIST, .handler = do_hwbp_list},
+    {.cmd = MEMD_IOCTL_GYRO_PREPARE, .handler = do_gyro_prepare},
+    {.cmd = MEMD_IOCTL_TOUCH_INIT, .handler = do_touch_init},
+    {.cmd = MEMD_IOCTL_TOUCH_INJECT, .handler = do_touch_inject},
+    {.cmd = MEMD_IOCTL_GYRO_INJECT, .handler = do_gyro_inject},
+    {.cmd = MEMD_IOCTL_SIGFORCE, .handler = do_sigforce},
+    {.cmd = MEMD_IOCTL_GYRO_CALIBRATE, .handler = do_gyro_calibrate},
+    {.cmd = MEMD_IOCTL_TOUCH_CALIBRATE, .handler = do_touch_calibrate},
+    {.cmd = MEMD_IOCTL_VIRTUAL_INPUT_CREATE, .handler = do_virtual_input_create},
+    {.cmd = MEMD_IOCTL_LOAD_SOTOAPP, .handler = do_load_sotoapp},
+    {.cmd = MEMD_IOCTL_LOAD_SOSUTOAPP, .handler = do_load_sosutoapp},
+    {.cmd = MEMD_IOCTL_LOADSO_UNLOAD, .handler = do_loadso_unload},
+    {.cmd = MEMD_IOCTL_VERSION, .handler = do_memd_version},
+    {.cmd = MEMD_IOCTL_LEARN_STATUS, .handler = do_learn_status},
+    {.cmd = MEMD_IOCTL_BOOTSTRAP, .handler = do_bootstrap},
+    {.cmd = MEMD_IOCTL_OFFSET_UPDATE, .handler = do_offset_update},
+    {.cmd = MEMD_IOCTL_BULK_OFFSET_UPDATE, .handler = do_bulk_offset_update},
+    {.cmd = MEMD_IOCTL_KASLR_INFO, .handler = do_kaslr_info},
+    {.cmd = 0, .handler = NULL} /* Sentinel to mark end of array */
+};
+
+#endif // MEMD_IOCTL_H
+/* kmod/memd/ioctl/memd_ioctl.h[∂] */

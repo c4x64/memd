@@ -1,16 +1,41 @@
-# x86/x86_64 Support
+# x86/x86_64 Linux Support
 
-Reserved for x86/x86_64 port of the MEMD kernel module.
+Port of the MEMD kernel module to x86_64 Linux.
 
 ## Status
 
-Not yet implemented. The MEMD module is currently ARM64-only.
+In progress. The module uses Linux kernel APIs common to both ARM64 and x86_64,
+but requires architecture-specific adaptations for:
+- Inline hooks (different calling convention, no BTI)
+- Page table walk (same 4-level, different bit positions and NX bit)
+- Calling convention (System V AMD64 ABI vs AAPCS64)
+- KASLR slide detection (different kernel base)
+- CFI (different mechanism on x86)
 
-## Planned
+## Structure
 
-- x86_64 kernel module port
-- x86-specific inline hook (different calling convention, no BTI)
-- x86 page table walk (4-level vs ARM64's 4-level with different layout)
-- CI build job for x86_64
+```
+linux/x86/
+├── readme
+├── kmod/          # x86_64 kernel module (ported from linux/arm/kmod)
+├── client.h       # x86 userspace client (same as ARM, platform-agnostic)
+├── memd.hpp       # C++ header (same as ARM)
+├── run.sh         # x86 Linux loader
+├── run-linux.sh   # generic Linux loader
+└── Makefile       # x86 build system
+```
 
-<!-- linux/x86/README.md[∂] -->
+## Key Differences from ARM64
+
+| Feature | ARM64 | x86_64 |
+|---------|-------|--------|
+| Calling convention | AAPCS64 (x0-x7 args) | System V AMD64 (rdi, rsi, rdx, rcx, r8, r9) |
+| BTI landing pads | Required (bti c) | Not applicable |
+| CFI | KCFI (per-function hash) | FineIBT / KCFI (different encoding) |
+| Shadow call stack | x18 register | Not used (stack canary instead) |
+| Page table NX bit | Bit 54 | Bit 63 |
+| Kernel base | 0xFFFF800010000000 | 0xFFFFFFFF80000000 (typical) |
+| Module RWX | CONFIG_STRICT_MODULE_RWX | CONFIG_STRICT_MODULE_RWX |
+| Instruction cache | Separate I/D cache (flush required) | Unified cache (no flush needed) |
+
+<!-- linux/x86/readme[∂] -->
