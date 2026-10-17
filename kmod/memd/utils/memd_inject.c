@@ -1067,8 +1067,8 @@ static int inject_so(pid_t pid, const char *path, const char *entry, int su,
         }
     }
     if (ephemeral) {
-        /* Linker unloads itself: maps/solist cleaned by Android's own
-         * linker; no knowledge of the layout is required here. */
+        /* Linker unloads itself: maps/solist cleaned by the target's own
+         * dynamic linker; no knowledge of the layout is required here. */
         retval = 0;
         touched = true;
         if (remote_call(task, mm, addrs.dlclose_va, *handle_out, NULL, 0,

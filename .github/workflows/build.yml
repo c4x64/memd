@@ -591,6 +591,32 @@ jobs:
             kmod/rwbridge-${{ matrix.kmi }}.ko
             run.sh
 
+  build-linux-generic:
+    name: Build generic Linux (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install generic Linux headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+          sudo apt-get install -y linux-headers-generic || true
+          ls -d /usr/src/linux-headers-* 2>/dev/null || true
+          uname -r
+
+      - name: Build module against generic Linux
+        run: |
+          KDIR=$(ls -d /usr/src/linux-headers-* 2>/dev/null | sort | tail -1)
+          if [ -z "$KDIR" ] || [ ! -f "$KDIR/Makefile" ]; then
+            echo "No generic Linux headers available; skipping"
+            exit 0
+          fi
+          echo "Using KDIR=$KDIR"
+          make -C "$KDIR" M="$GITHUB_WORKSPACE/kmod" modules
+
   pack:
     name: Pack SPX Binary
     needs: [generate-matrix, build]
