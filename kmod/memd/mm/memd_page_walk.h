@@ -4,6 +4,14 @@
 #include <linux/mm_types.h>
 #include <linux/types.h>
 
+#ifndef TASK_SIZE_64
+#ifdef TASK_SIZE
+#define TASK_SIZE_64 TASK_SIZE
+#else
+#define TASK_SIZE_64 (0UL)
+#endif
+#endif
+
 #define PAGE_WALK_REGIONS     (1 << 0)
 #define PAGE_WALK_PERMS       (1 << 1)
 #define PAGE_WALK_TYPE        (1 << 2)

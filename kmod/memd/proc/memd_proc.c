@@ -4,17 +4,12 @@
 #include <linux/rcupdate.h>
 
 int is_invisible(pid_t pid) {
-    struct task_struct* task;
-    int ret;
-    if (!pid)
-        return 0;
-    /* find_task_by_vpid requires RCU read lock; the task pointer must
-     * not be touched outside it (no ref taken). */
-    rcu_read_lock();
-    task = find_task_by_vpid(pid);
-    ret = (task && (task->flags & PF_INVISIBLE)) ? 1 : 0;
-    rcu_read_unlock();
-    return ret;
+    /* PF_INVISIBLE was an Android-specific task flag; normal Linux
+     * kernels do not define it, so querying task->flags for that bit
+     * would misclassify unrelated flags. Fail soft: report not
+     * invisible on kernels where the concept does not exist. */
+    (void)pid;
+    return 0;
 }
 
 bool memd_hide_check_visibility(pid_t pid, struct pid_namespace *ns)

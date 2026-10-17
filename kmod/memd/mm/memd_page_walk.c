@@ -32,7 +32,7 @@ struct page_walk_context {
 };
 
 /* ARM64 PTE bit ops without the pte_read/pte_exec/pte_swp_* imports
- * (trimmed on some kernels). Bit positions are ARMv8 page-table
+ * (may be unavailable on some kernels). Bit positions are ARMv8 page-table
  * architecture (AP[2:1] at [7:6], UXN at [54], swap type/offset at
  * [7:3]/[57:8]), identical to the generic pte_* semantics. */
 #define MEMD_PTE_USER_BIT (1UL << 6)
@@ -57,7 +57,7 @@ static inline unsigned long memd_pte_swp_offset(pte_t pte)
     return (pte_val(pte) >> 8) & ((1UL << 50) - 1);
 }
 /* Generic is_swap_pte/pte_user without the imports (both missing from
- * trimmed DDK maps): a non-present entry with nonzero bits is swap;
+ * inline to avoid denied imports): a non-present entry with nonzero bits is swap;
  * USER lives at ARMv8 AP[1] (bit 6) on every generation. */
 static inline int memd_is_swap_pte(pte_t pte)
  {
@@ -83,7 +83,6 @@ static void print_merged_region(unsigned long* start, unsigned long* end) {
 // Walk the Page Table Entries (PTEs)
 static void walk_pte_level(pmd_t* pmd, unsigned long addr, unsigned long end, unsigned long* region_start,
                            unsigned long* region_end, struct page_walk_stats* stats) {
-#if defined(PTE_WALK)
     pte_t *ptep, pte;
     pte_t *ptep_start;
     unsigned long current_addr;
@@ -125,9 +124,6 @@ static void walk_pte_level(pmd_t* pmd, unsigned long addr, unsigned long end, un
     }
 
     pte_unmap(ptep_start);
-#else
-    memd_err("PTE walk not supported on this architecture.\n");
-#endif
 }
 
 // Walk the Page Middle Directories (PMDs)
@@ -249,7 +245,7 @@ void traverse_page_tables(struct mm_struct* mm, struct page_walk_stats* stats) {
     }
 
     do {
-        next = pgd_addr_end(addr, TASK_SIZE);
+        next = pgd_addr_end(addr, TASK_SIZE_64);
         if (pgd_present(*pgd) && !pgd_none(*pgd)) {
             walk_p4d_level(pgd, addr, next, &region_start, &region_end, stats);
         } else {
@@ -257,7 +253,7 @@ void traverse_page_tables(struct mm_struct* mm, struct page_walk_stats* stats) {
         }
         addr = next;
         pgd++;
-    } while (addr < TASK_SIZE && addr != 0);
+    } while (addr < TASK_SIZE_64 && addr != 0);
 
     print_merged_region(&region_start, &region_end);
 
@@ -538,7 +534,7 @@ int memd_page_walk(struct mm_struct *mm, struct page_walk_context *ctx)
      }
 
      ctx->mm = mm;
-     /* No TASK_SIZE_MIN on matrix DDKs; user range starts at 0. End at
+     /* User range starts at 0. End at
       * TASK_SIZE_64 (not build-time TASK_SIZE: a 5.10-built image on a
       * 52-bit-VA 6.x kernel must still reach high mappings; the extra
       * range is unmapped holes elsewhere and walks fail closed). */

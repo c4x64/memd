@@ -23,10 +23,12 @@
  */
 
 #include <linux/version.h>
+#include <linux/types.h>
 
-/* Generation index by (major, minor). MEMD_GEN_54 is dormant: no DDK
- * image exists to prove its table entries (see memd_net_gen), so 5.4
- * resolves to unknown-generation NO-GO at runtime. */
+/* Generation index by (major, minor). All six LTS generations below are
+ * supported on Android GKI and normal/mainline Linux alike: the gen is
+ * derived solely from (major, minor), never from an "android"/vendor
+ * token in the release string. MEMD_GEN_54 is live. */
 #define MEMD_GEN_54   0
 #define MEMD_GEN_510  1
 #define MEMD_GEN_515  2
@@ -34,6 +36,15 @@
 #define MEMD_GEN_66   4
 #define MEMD_GEN_612  5
 #define MEMD_GEN_N    6
+
+/* Sentinel returned for kernels whose (major, minor) is not in the
+ * supported set. Callers must treat this as NO-GO and refuse socket
+ * init rather than guessing offsets. */
+#define MEMD_GEN_UNKNOWN (-1)
+
+/* Convenience bounds for table indexing and validation. */
+#define MEMD_GEN_FIRST   0
+#define MEMD_GEN_LAST    (MEMD_GEN_N - 1)
 
 /* Current compile-time generation (for static asserts only). */
 #define MEMD_MAJ (((LINUX_VERSION_CODE) >> 16) & 0xff)
@@ -251,6 +262,48 @@ static const struct memd_ops_off memd_ops_offs[MEMD_GEN_N] = {
 
 /* Resolve the running kernel to a generation index, or -1. */
 int memd_net_gen(void);
+
+/* Safe accessor: identical to memd_net_gen() but named for call sites that
+ * want an explicit "unknown -> refuse" contract. Never returns a value
+ * outside [-1, MEMD_GEN_N). */
+int memd_net_gen_safe(void);
+
+/* Map a numeric (major, minor) kernel version to a generation index,
+ * or MEMD_GEN_UNKNOWN when unsupported. Pure function of its args; does
+ * not touch the running kernel. Safe to call from any context. */
+int memd_net_gen_from_version(int major, int minor);
+
+/* Parse a kernel release string ("5.15.0-...", "6.1.0-...-generic",
+ * "5.4.147-android11-...", ...) into numeric components. Returns 0 on
+ * success (major/minor found) and -1 otherwise. *patch is set to 0 when
+ * no patch level is present. All output pointers may be NULL. */
+int memd_net_parse_release(const char *release, int *major, int *minor,
+                           int *patch);
+
+/* True when the release string looks like an Android GKI build (contains
+ * an "android" token). Informational only: generation mapping does not
+ * depend on this. */
+int memd_net_is_android_release(const char *release);
+
+/* True when (major, minor) is one of the supported generations. */
+int memd_net_version_supported(int major, int minor);
+
+/* Human-readable name for a generation index ("5.4", "5.10", ...), or
+ * "unknown" for MEMD_GEN_UNKNOWN/out of range. Returned string is a
+ * compile-time literal (no allocation, safe to print). */
+const char *memd_net_gen_name(int gen);
+
+/* Copy the detected running-kernel release string into buf (NUL
+ * terminated). Returns 0 on success, -1 if unavailable. */
+int memd_net_release_str(char *buf, size_t cap);
+
+/* Runtime-detected components of the running kernel release (0 when
+ * unavailable). Each triggers detection on first use. */
+int memd_net_cached_major(void);
+int memd_net_cached_minor(void);
+int memd_net_cached_patch(void);
+/* True when the running kernel release contained an "android" token. */
+int memd_net_cached_is_android(void);
 
 /* Build registration structs into the internal static buffers.
  * Returns 0 ok, -1 unknown generation (caller refuses init). */

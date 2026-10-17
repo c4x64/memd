@@ -19,6 +19,10 @@
 #include "memd_page_walk.h"
 #include "memd_utils.h"
 
+#ifndef PROT_NORMAL
+#define PROT_NORMAL 0
+#endif
+
 struct memd_mapped_page_info {
     uintptr_t phys_addr; /* Physical page address (page-aligned) */
     void* mapped_ptr; /* Kernel virtual address from ioremap */
