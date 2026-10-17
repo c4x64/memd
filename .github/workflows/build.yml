@@ -238,7 +238,7 @@ jobs:
     needs: prepare-kcidb-batch
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       max-parallel: 8
@@ -273,6 +273,7 @@ jobs:
             echo "empty batch, nothing to do"
             exit 0
           fi
+          export KCIDB_CMD_TIMEOUT=600
           i=$((START + ${{ matrix.worker }}))
           while [ "$i" -lt "$END" ]; do
             TK=$(python3 .github/scripts/kcidb_batch.py \

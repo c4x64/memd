@@ -112,8 +112,17 @@ def require_https(url, field):
     return url
 
 
+COMMAND_TIMEOUT = int(os.environ.get("KCIDB_CMD_TIMEOUT", "600"))
+
 def run(command, **kwargs):
-    subprocess.run(command, check=True, **kwargs)
+    print(f"+ {' '.join(command)}", flush=True)
+    kwargs.setdefault("timeout", COMMAND_TIMEOUT)
+    try:
+        subprocess.run(command, check=True, **kwargs)
+    except subprocess.TimeoutExpired:
+        raise ValueError(
+            f"Command timed out after {COMMAND_TIMEOUT}s: {' '.join(command)}"
+        )
 
 
 def download_config(url, destination):
