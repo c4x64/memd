@@ -22,7 +22,11 @@ echo "============================================================"
 
 cd "$(dirname "$0")/kmod"
 make clean >/dev/null 2>&1 || true
-make KDIR="$KDIR" KMI="on-device" modules
+# Keep the build polite: do not saturate the CPU on low-power devices.
+NPROC=$(nproc 2>/dev/null || echo 1)
+JOBS=$(( NPROC / 2 ))
+[ "$JOBS" -lt 1 ] && JOBS=1
+nice -n 19 make -j"$JOBS" KDIR="$KDIR" KMI="on-device" modules
 
 if [ -f rwbridge.ko ]; then
     echo "Build succeeded: $(pwd)/rwbridge.ko"
