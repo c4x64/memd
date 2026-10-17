@@ -42,7 +42,7 @@ jobs:
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
       - name: Test module loader tools
-        run: python3 -m unittest discover -s tools -p 'test_*.py'
+        run: python3 -m unittest discover -s Branch-main/tools -p 'test_*.py'
 
       - name: Run 2-TU gate (direct exit-code contract)
         run: python3 Branch-main/tools/two_tu_gate.py
