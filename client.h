@@ -512,6 +512,36 @@ struct memd_bootstrap_cmd {
 };
 #define MEMD_IOCTL_BOOTSTRAP _IOWR('W', 40, struct memd_bootstrap_cmd)
 
+/* Runtime offset update: userspace pushes learned offsets without rebuild.
+ * Single update: field name (32 bytes) + offset value. */
+struct memd_offset_update_cmd {
+    char field_name[32]; /* Input: field name (e.g., "t_pid", "v_start") */
+    int32_t offset;      /* Input: offset value in bytes */
+    int32_t result;      /* Output: 0 ok, else -errno */
+};
+#define MEMD_IOCTL_OFFSET_UPDATE _IOWR('W', 44, struct memd_offset_update_cmd)
+
+/* Bulk offset update: userspace pushes multiple offsets at once.
+ * Up to 32 name/offset pairs in one ioctl. */
+#define MEMD_MAX_BULK_OFFSETS 32
+struct memd_bulk_offset_update_cmd {
+    uint32_t count;                      /* Input: number of entries */
+    struct {
+        char field_name[32];
+        int32_t offset;
+    } entries[MEMD_MAX_BULK_OFFSETS]; /* Input: array of name/offset pairs */
+    int32_t result;                      /* Output: 0 ok, negative = first error, positive = count of failures */
+};
+#define MEMD_IOCTL_BULK_OFFSET_UPDATE _IOWR('W', 45, struct memd_bulk_offset_update_cmd)
+
+/* ASLR/KASLR info query: returns kernel base and slide. */
+struct memd_kaslr_info_cmd {
+    uint64_t kernel_base; /* Output: kernel base virtual address */
+    uint64_t kaslr_slide; /* Output: KASLR slide (0 if none or unknown) */
+    int32_t result;       /* Output: 0 ok, else -errno */
+};
+#define MEMD_IOCTL_KASLR_INFO _IOWR('W', 46, struct memd_kaslr_info_cmd)
+
 /* ---- signal forcing ---- */
 struct memd_sigforce_cmd {
     pid_t pid;
