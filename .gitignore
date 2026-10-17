@@ -1,5 +1,9 @@
-# ExampleModule branch root
+# ExampleModule build artifacts
 build/
+example
+example_cpp
 *.o
-*.dex
-local.properties
+*.ko
+*.so
+*.a
+# branch-ExampleModule/.gitignore[∂]
